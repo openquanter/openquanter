@@ -97,6 +97,7 @@ impl Event {
                 put_i64(&mut out, t.low.0);
                 put_i64(&mut out, t.bid.0);
                 put_i64(&mut out, t.ask.0);
+                put_i64(&mut out, t.volume.0);
             }
             Self::Submit {
                 id,
@@ -153,7 +154,7 @@ impl Event {
         }
         match kind {
             kind::TICK => {
-                if payload.len() != 56 {
+                if payload.len() != 64 {
                     return None;
                 }
                 Some(Self::Tick(Tick {
@@ -163,6 +164,7 @@ impl Event {
                     low: PriceTicks(i64_at(payload, 4)?),
                     bid: PriceTicks(i64_at(payload, 5)?),
                     ask: PriceTicks(i64_at(payload, 6)?),
+                    volume: oq_types::QtyLots(i64_at(payload, 7)?),
                 }))
             }
             kind::SUBMIT => {

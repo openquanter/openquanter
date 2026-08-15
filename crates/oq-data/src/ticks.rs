@@ -28,9 +28,9 @@ pub const MAGIC: u32 = u32::from_le_bytes(*b"OQTK");
 /// Bytes of file header.
 pub const HEADER_LEN: usize = 32;
 /// Bytes per record.
-pub const RECORD_LEN: usize = 56;
+pub const RECORD_LEN: usize = 64;
 /// The format version this build writes.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// A tick file header.
 ///
@@ -44,6 +44,9 @@ pub const VERSION: u16 = 1;
 ///     24    4 crc32 of the record region
 ///     28    4 reserved
 /// ```
+///
+/// A record is eight little-endian `i64`s: exchange time, arrival time,
+/// last, high, low, bid, ask, volume.
 ///
 /// The record count and checksum are in the header rather than a
 /// trailer so a reader can validate before allocating, and so a
@@ -68,6 +71,7 @@ pub fn encode(instrument: u64, ticks: &[Tick]) -> Vec<u8> {
         body.extend_from_slice(&t.low.0.to_le_bytes());
         body.extend_from_slice(&t.bid.0.to_le_bytes());
         body.extend_from_slice(&t.ask.0.to_le_bytes());
+        body.extend_from_slice(&t.volume.0.to_le_bytes());
     }
     let checksum = crc32(&body);
 
@@ -147,6 +151,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Header, Vec<Tick>), Error> {
             low: PriceTicks(at(4)),
             bid: PriceTicks(at(5)),
             ask: PriceTicks(at(6)),
+            volume: oq_types::QtyLots(at(7)),
         });
     }
     Ok((header, ticks))
@@ -281,6 +286,7 @@ mod tests {
                     low: PriceTicks(999_990 + t),
                     bid: PriceTicks(999_999 + t),
                     ask: PriceTicks(1_000_001 + t),
+                    volume: oq_types::QtyLots(t * 7),
                 }
             })
             .collect()
