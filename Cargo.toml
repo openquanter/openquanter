@@ -1,11 +1,12 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/oq-types",
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/openquanter/openquanter"
 

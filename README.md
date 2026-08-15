@@ -68,5 +68,5 @@ Apache-2.0. See [LICENSE](LICENSE).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). By contributing you agree to the
-project's contribution terms (DCO sign-off required; CLA for substantial
-contributions). Support is best-effort; there is no SLA before 1.0.
+project's contribution terms: a DCO sign-off on every commit, and the
+[CLA](CLA.md) for substantial contributions. Support is best-effort; there is no SLA before 1.0.

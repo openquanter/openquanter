@@ -60,6 +60,7 @@ Apache-2.0，见 [LICENSE](LICENSE)。
 
 ## 参与贡献
 
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。提交贡献即表示你接受项目的贡献条款
-（需要 DCO sign-off；实质性贡献需签署 CLA）。社区支持为 best-effort，
+见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。提交贡献即表示你接受项目的贡献
+条款：每个 commit 需要 DCO sign-off，实质性贡献需同意
+[CLA](CLA.zh-CN.md)。社区支持为 best-effort，
 1.0 之前不承诺 SLA。
