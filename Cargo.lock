@@ -23,6 +23,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oq-data"
+version = "0.0.1"
+dependencies = [
+ "oq-engine",
+ "oq-hash",
+ "oq-types",
+]
+
+[[package]]
 name = "oq-engine"
 version = "0.0.1"
 dependencies = [

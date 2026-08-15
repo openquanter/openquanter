@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/oq-backtest",
     "crates/oq-core",
+    "crates/oq-data",
     "crates/oq-engine",
     "crates/oq-hash",
     "crates/oq-journal",
