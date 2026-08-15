@@ -50,7 +50,6 @@ impl Replay {
     ///
     /// Recovery reads a snapshot taken at sequence N and then applies
     /// everything from N onward, so this is the shape recovery needs.
-    #[must_use]
     pub fn since(&self, from: u64) -> impl Iterator<Item = &Frame> {
         self.frames.iter().filter(move |f| f.seq >= from)
     }

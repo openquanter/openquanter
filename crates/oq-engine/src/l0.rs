@@ -254,10 +254,7 @@ impl L0Engine {
         let buy_trigger = tick.buy_trigger();
         let buy_reference = tick.buy_fill_reference();
         if buy_trigger.0 > 0 {
-            loop {
-                let Some(best) = self.book.bids().first().copied() else {
-                    break;
-                };
+            while let Some(best) = self.book.bids().first().copied() {
                 let Some(price) = best.price() else { break };
                 if price < buy_trigger {
                     break;
@@ -282,10 +279,7 @@ impl L0Engine {
         let sell_trigger = tick.sell_trigger();
         let sell_reference = tick.sell_fill_reference();
         if sell_trigger.0 > 0 {
-            loop {
-                let Some(best) = self.book.asks().first().copied() else {
-                    break;
-                };
+            while let Some(best) = self.book.asks().first().copied() {
                 let Some(price) = best.price() else { break };
                 if price > sell_trigger {
                     break;
