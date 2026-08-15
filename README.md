@@ -2,6 +2,8 @@
 
 **A deterministic, AI-native quantitative trading framework in Rust — from CTA to HFT.**
 
+[English](README.md) · [中文](README.zh-CN.md)
+
 > ⚠️ Early development. APIs are unstable before 1.0. Not financial advice; use at your own risk.
 
 ## What is OpenQuanter?
@@ -11,6 +13,9 @@ event core: the same engine runs backtesting and live trading, with only the
 event producers swapped. It is designed for crypto perpetual markets first,
 with a fidelity ladder that scales from fast tick-replay research to
 orderbook-level simulation.
+
+The 2.x line is a ground-up rewrite on a Rust core — a new architecture rather
+than an incremental port.
 
 ### Design pillars
 
@@ -31,17 +36,30 @@ orderbook-level simulation.
 - **Overfitting statistics built in** — parameter sweeps report Deflated
   Sharpe Ratio and Probability of Backtest Overfitting by default.
 
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [Requirements Specification](docs/REQUIREMENTS.md) | What the framework must do, and how acceptance is measured |
+| [Roadmap](docs/ROADMAP.md) | Milestones, entry triggers, exit gates, path to 1.0 |
+| [Implementation Plan](docs/IMPLEMENTATION.md) | Architecture, design decisions, crate map, task plan |
+
+Full index: [docs/](docs/README.md).
+
 ## Status
 
 Pre-alpha. The workspace currently contains the initial crate skeleton.
-See the roadmap in the issues/milestones of this repository.
+Milestone progress is tracked in this repository's issues and milestones; see
+the [Roadmap](docs/ROADMAP.md) for what each milestone unlocks.
 
-## 中文简介
+## Building
 
-OpenQuanter 是一个以 Rust 确定性事件核为中心的开源量化交易框架：回测与实盘
-共用同一引擎，保真度按需分级（tick 回放 → 排队/延迟建模 → L2 订单簿），
-并将保证金/强平建模与 AI 能力（进程内推理、RL 训练环境、LLM 研究沙盒）作为
-一等公民。面向加密永续市场优先，欢迎中文社区参与共建。
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
 
 ## License
 
@@ -51,4 +69,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). By contributing you agree to the
 project's contribution terms (DCO sign-off required; CLA for substantial
-contributions).
+contributions). Support is best-effort; there is no SLA before 1.0.

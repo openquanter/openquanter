@@ -11,6 +11,13 @@ Guidance for AI coding agents (and humans) working in this repository.
   no I/O, no thread spawning inside `apply()`-style state machines.
   Time arrives as injected events.
 
+## Documentation
+
+- [Requirements](docs/REQUIREMENTS.md) · [Roadmap](docs/ROADMAP.md) ·
+  [Implementation Plan](docs/IMPLEMENTATION.md) (index: [docs/](docs/README.md)).
+- Docs are authored in English and mirrored in Chinese (`*.zh-CN.md`).
+  English is the source of truth; update both sides in the same pull request.
+
 ## Commands
 
 ```bash
