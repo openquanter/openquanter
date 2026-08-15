@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/oq-core",
     "crates/oq-engine",
     "crates/oq-hash",
     "crates/oq-journal",
