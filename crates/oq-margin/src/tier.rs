@@ -253,10 +253,15 @@ mod tests {
         let table = TierTable::example_btcusdt();
         let boundary = Cash::from_units(50_000);
 
-        let below = boundary.scaled(Ratio::from_ppm(4_000));
-        let above = boundary
-            .scaled(Ratio::from_ppm(5_000))
-            .sub(Cash::from_units(50));
+        let lower = table.tier_for(boundary);
+        let upper = table.tier_for(Cash(boundary.0 + 1));
+        assert_ne!(
+            lower.rate, upper.rate,
+            "the boundary must separate brackets"
+        );
+
+        let below = boundary.scaled(lower.rate).sub(lower.amount);
+        let above = boundary.scaled(upper.rate).sub(upper.amount);
         assert_eq!(
             below, above,
             "maintenance must not jump at a bracket boundary"
