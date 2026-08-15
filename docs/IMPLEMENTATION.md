@@ -262,6 +262,52 @@ reconciliation are where trading systems actually break.
 
 ---
 
+## 4.1 Repository layout
+
+The architecture lives in the **crate split**, not in the directory tree.
+Cargo forbids circular dependencies between crates, so the dependency
+graph above is enforced by the compiler rather than by convention: the
+deterministic core cannot reach a venue adapter because it does not
+depend on the crate that contains one. That is a stronger boundary than
+any directory arrangement provides, and it is why "no I/O in the core"
+is an architectural property here instead of a rule people have to
+remember.
+
+Within a crate, modules are flat files until a module genuinely needs
+submodules. Nesting a 150-line module inside its own directory adds a
+path segment and no information.
+
+```
+openquanter/
+  Cargo.toml            workspace manifest, shared lints and metadata
+  crates/
+    oq-stats/
+      AGENTS.md         local commands and invariants (nearest file wins)
+      Cargo.toml
+      src/*.rs          flat while modules stay small
+    oq-engine/
+      src/
+        lib.rs
+        matching/       l0.rs, l1.rs, l2.rs — the fidelity ladder
+        book/           order book reconstruction
+    oq-gateway/
+      src/
+        contract.rs     the connector contract every venue implements
+        binance/        market_data.rs, orders.rs, user_stream.rs, reconcile.rs
+    ...
+  docs/                 requirements, roadmap, implementation plan
+  scripts/              repository tooling (DCO check, name reservation)
+  examples/             example strategies
+  data/                 sample datasets and golden baselines
+  crates/*/tests/       integration tests, separate from in-module unit tests
+  crates/*/benches/     criterion benchmarks, tracked in CI
+```
+
+Unit tests live beside the code they test, in a `#[cfg(test)]` module in
+the same file — the Rust convention, and it keeps an invariant next to
+the function that has to satisfy it. Integration tests, which exercise a
+crate through its public API only, live in `tests/`.
+
 ## 5. Execution plan
 
 Task IDs are stable references for issues and pull requests.

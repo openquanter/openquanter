@@ -220,6 +220,46 @@ mismatch 根本不是回归。
 
 ---
 
+## 4.1 仓库布局
+
+架构存在于 **crate 划分**中，而不是目录树里。Cargo 禁止 crate 之间循环依赖，
+因此上面那张依赖图是**编译器强制**的，而不是靠约定维持：确定性内核够不到交易所
+适配器，因为它根本不依赖包含适配器的那个 crate。这比任何目录安排都强，也正是
+"内核里不许有 I/O"在这里是架构性质、而不是一条需要人去记的规矩的原因。
+
+在 crate 内部，模块保持扁平文件，直到某个模块**确实**需要子模块为止。把一个
+150 行的模块塞进它自己的目录，只是多了一层路径，不增加任何信息。
+
+```
+openquanter/
+  Cargo.toml            workspace 清单、共享 lint 与元数据
+  crates/
+    oq-stats/
+      AGENTS.md         本地命令与不变量（就近文件优先）
+      Cargo.toml
+      src/*.rs          模块还小时保持扁平
+    oq-engine/
+      src/
+        lib.rs
+        matching/       l0.rs、l1.rs、l2.rs —— 保真度阶梯
+        book/           订单簿重建
+    oq-gateway/
+      src/
+        contract.rs     每个交易所都要实现的连接器契约
+        binance/        market_data.rs、orders.rs、user_stream.rs、reconcile.rs
+    ...
+  docs/                 需求、路线图、实施方案
+  scripts/              仓库工具（DCO 检查、名称占位）
+  examples/             示例策略
+  data/                 样例数据集与 golden 基线
+  crates/*/tests/       集成测试，与模块内单测分开
+  crates/*/benches/     criterion 基准，在 CI 中被跟踪
+```
+
+单元测试与被测代码同文件，放在 `#[cfg(test)]` 模块里——这是 Rust 惯例，也让
+不变量紧挨着必须满足它的那个函数。只经公开 API 检验 crate 的集成测试放在
+`tests/`。
+
 ## 5. 执行计划
 
 任务 ID 用作 issue 与 PR 的稳定引用。
