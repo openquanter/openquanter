@@ -1,0 +1,14 @@
+[package]
+name = "oq-l2feed"
+version = "0.0.1"
+description = "Market data capture for the OpenQuanter trading framework: verbatim record framing, UTC-day rotation, sealing and manifests"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oq-hash = { path = "../oq-hash", version = "0.0.1" }
+
+[lints]
+workspace = true

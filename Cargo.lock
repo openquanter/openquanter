@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "oq-core"
+version = "0.0.1"
+dependencies = [
+ "oq-engine",
+ "oq-journal",
+ "oq-margin",
+ "oq-types",
+]
+
+[[package]]
 name = "oq-engine"
 version = "0.0.1"
 dependencies = [
@@ -18,6 +28,20 @@ name = "oq-journal"
 version = "0.0.1"
 dependencies = [
  "oq-hash",
+ "oq-types",
+]
+
+[[package]]
+name = "oq-l2feed"
+version = "0.0.1"
+dependencies = [
+ "oq-hash",
+]
+
+[[package]]
+name = "oq-margin"
+version = "0.0.1"
+dependencies = [
  "oq-types",
 ]
 
