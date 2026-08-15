@@ -13,7 +13,7 @@
 //!
 //! See design decision D13 in `docs/IMPLEMENTATION.md`.
 
-use crate::hash::sha256_hex;
+use oq_hash::sha256_hex;
 
 /// The identity of a run: what code, over what data, under what settings.
 #[derive(Debug, Clone, PartialEq, Eq)]

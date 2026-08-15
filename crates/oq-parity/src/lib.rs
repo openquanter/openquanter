@@ -17,11 +17,9 @@
 //!    concludes nothing about behavior. See [`manifest`].
 
 pub mod diff;
-pub mod hash;
 pub mod manifest;
 pub mod record;
 
 pub use diff::{Difference, FieldDifference, ParityReport, compare};
-pub use hash::{Sha256, sha256_hex};
 pub use manifest::{BaselineStatus, IdentityElement, RunManifest};
 pub use record::{Fill, Nanos, RunOutput};

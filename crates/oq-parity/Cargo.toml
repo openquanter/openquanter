@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+oq-hash = { path = "../oq-hash", version = "0.0.1" }
 oq-types = { path = "../oq-types", version = "0.0.1" }
 
 [lints]

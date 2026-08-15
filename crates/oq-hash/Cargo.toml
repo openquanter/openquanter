@@ -1,0 +1,13 @@
+[package]
+name = "oq-hash"
+version = "0.0.1"
+description = "Content hashing primitives for the OpenQuanter trading framework: SHA-256 and CRC-32"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
