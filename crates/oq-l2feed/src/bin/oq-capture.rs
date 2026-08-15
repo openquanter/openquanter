@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use oq_l2feed::session::{SessionConfig, StopReason, run};
 use oq_l2feed::stream::{Software, StreamId};
-use oq_l2feed::venue::{binance_perp_streams, binance_perp_url};
+use oq_l2feed::venue::{binance_perp_polls, binance_perp_streams, binance_perp_url};
 use oq_l2feed::writer::CaptureWriter;
-use oq_l2feed::ws::WsConnector;
+use oq_l2feed::ws::{PollConnector, WsConnector};
 
 const USAGE: &str = "\
 oq-capture — record one market data stream verbatim
@@ -33,7 +33,8 @@ USAGE:
 OPTIONS:
     --root <DIR>          Archive root directory
     --symbol <SYMBOL>     Instrument, e.g. BTCUSDT
-    --stream <NAME>       depth | bookTicker | aggTrade | markPrice | forceOrder
+    --stream <NAME>       depth | bookTicker | trade | forceOrder | markPrice
+                          (markPrice is polled over REST; the rest are streams)
     --venue <NAME>        Venue label for the archive path [default: binance-perp]
     --minutes <N>         Stop after N minutes [default: run until interrupted]
     --floor-gb <N>        Stop when free space falls below N GiB [default: 10]
@@ -75,30 +76,43 @@ fn real_main() -> Result<ExitCode, String> {
         .transpose()?
         .unwrap_or(10);
 
-    let spec = binance_perp_streams(&symbol)
+    // Some data has a stream; some only has an endpoint to poll. Both
+    // go through the same capture path.
+    let socket = binance_perp_streams(&symbol)
         .into_iter()
-        .find(|s| s.name == stream_name)
-        .ok_or_else(|| {
-            format!(
-                "unknown stream {stream_name:?}; expected one of depth, bookTicker, aggTrade, markPrice, forceOrder"
-            )
-        })?;
+        .find(|s| s.name == stream_name);
+    let poll = binance_perp_polls(&symbol)
+        .into_iter()
+        .find(|p| p.name == stream_name);
 
-    let stream = StreamId::new(&venue, &symbol, &spec.name);
+    let (name, url, poll_interval) = match (socket, poll) {
+        (Some(spec), _) => {
+            let url = binance_perp_url(&spec.topic);
+            (spec.name, url, None)
+        }
+        (None, Some(spec)) => (
+            spec.name,
+            spec.url,
+            Some(Duration::from_secs(spec.interval_secs)),
+        ),
+        (None, None) => {
+            return Err(format!(
+                "unknown stream {stream_name:?}; expected one of depth, bookTicker, trade, forceOrder, markPrice"
+            ));
+        }
+    };
+
+    let stream = StreamId::new(&venue, &symbol, &name);
     let software = Software::new(
         concat!("oq-l2feed ", env!("CARGO_PKG_VERSION")),
         option_env!("OQ_BUILD_COMMIT").unwrap_or("unknown"),
     );
 
-    let url = binance_perp_url(&spec.topic);
     let mut config = SessionConfig::new(&root, stream.clone(), software.clone(), &url);
     config.duration = minutes.map(|m| Duration::from_secs(m * 60));
     config.disk_floor_bytes = floor_gb * 1024 * 1024 * 1024;
 
     let mut writer = CaptureWriter::new(&root, stream, software).map_err(|e| e.to_string())?;
-    // A silent socket must look different from a quiet market, or a
-    // half-open connection would be recorded as an uneventful hour.
-    let mut connector = WsConnector::new(&url, Duration::from_secs(60));
 
     eprintln!(
         "capturing {} {} from {url}",
@@ -106,7 +120,21 @@ fn real_main() -> Result<ExitCode, String> {
     );
     eprintln!("archive root {root}, stopping below {floor_gb} GiB free");
 
-    let stats = run(&config, &mut connector, &mut writer).map_err(|e| e.to_string())?;
+    let stats = match poll_interval {
+        Some(interval) => {
+            eprintln!("polling every {}s", interval.as_secs());
+            let mut connector = PollConnector::new(&url, interval);
+            run(&config, &mut connector, &mut writer)
+        }
+        None => {
+            // A silent socket must look different from a quiet market,
+            // or a half-open connection would be recorded as an
+            // uneventful hour.
+            let mut connector = WsConnector::new(&url, Duration::from_secs(60));
+            run(&config, &mut connector, &mut writer)
+        }
+    }
+    .map_err(|e| e.to_string())?;
     let sealed = writer.seal().map_err(|e| e.to_string())?;
 
     let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);

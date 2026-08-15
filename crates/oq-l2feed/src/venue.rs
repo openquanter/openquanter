@@ -27,23 +27,61 @@ impl StreamSpec {
     }
 }
 
-/// The streams the capture plan calls for, for one symbol.
+/// The WebSocket streams the capture plan calls for, for one symbol.
 ///
-/// Order matters only for readability. The set is the one in
-/// `docs/CAPTURE-FORMAT.md`: incremental depth and best bid/offer for
-/// the book and the queue model, aggregated trades for what consumes
-/// the queue ahead of you, mark price for the margin engine, and forced
-/// liquidations for tail behaviour.
+/// Incremental depth and best bid/offer give the book and the queue
+/// model; trades give what consumes the queue ahead of you; forced
+/// liquidations give scarce tail data.
+///
+/// **`trade`, not `aggTrade`.** A live probe on 2026-08-16 found the
+/// venue's aggregated and derived streams — `aggTrade`, `kline_*`,
+/// `ticker`, `miniTicker`, `markPrice` and the `!…@arr` fan-outs —
+/// silently delivering nothing, while the raw streams worked. The
+/// subscription protocol confirms any name without validating it, so an
+/// invalid or dead stream is indistinguishable from a quiet market
+/// until you notice the file never grows. `trade` is the finer-grained
+/// source anyway: individual fills rather than fills pre-aggregated by
+/// price and time, which is what a queue model wants.
+///
+/// Mark price and funding have no working stream here and are captured
+/// by polling instead; see [`binance_perp_polls`].
 #[must_use]
 pub fn binance_perp_streams(symbol: &str) -> Vec<StreamSpec> {
     let lower = symbol.to_lowercase();
     vec![
         StreamSpec::new("depth", format!("{lower}@depth@0ms")),
         StreamSpec::new("bookTicker", format!("{lower}@bookTicker")),
-        StreamSpec::new("aggTrade", format!("{lower}@aggTrade")),
-        StreamSpec::new("markPrice", format!("{lower}@markPrice@1s")),
+        StreamSpec::new("trade", format!("{lower}@trade")),
         StreamSpec::new("forceOrder", format!("{lower}@forceOrder")),
     ]
+}
+
+/// A REST endpoint captured by polling, because no stream carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollSpec {
+    /// Name used in the archive path.
+    pub name: String,
+    /// URL to poll.
+    pub url: String,
+    /// Seconds between polls.
+    pub interval_secs: u64,
+}
+
+/// Polled endpoints for one symbol.
+///
+/// `markPrice` carries the mark price, index price and funding rate —
+/// the margin engine's inputs, since liquidation is computed against
+/// mark price rather than the last trade.
+#[must_use]
+pub fn binance_perp_polls(symbol: &str) -> Vec<PollSpec> {
+    vec![PollSpec {
+        name: "markPrice".to_string(),
+        url: format!(
+            "https://fapi.binance.com/fapi/v1/premiumIndex?symbol={}",
+            symbol.to_uppercase()
+        ),
+        interval_secs: 1,
+    }]
 }
 
 /// WebSocket URL for a single stream on Binance USD-M futures.
@@ -114,13 +152,37 @@ mod tests {
     fn stream_set_matches_the_capture_plan() {
         let streams = binance_perp_streams("BTCUSDT");
         let names: Vec<_> = streams.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["depth", "bookTicker", "aggTrade", "markPrice", "forceOrder"]
-        );
+        assert_eq!(names, ["depth", "bookTicker", "trade", "forceOrder"]);
         assert_eq!(streams[0].topic, "btcusdt@depth@0ms");
         assert!(binance_perp_url(&streams[0].topic).starts_with("wss://"));
         assert!(binance_perp_snapshot_url("btcusdt", 1000).contains("symbol=BTCUSDT"));
+    }
+
+    #[test]
+    fn aggregated_streams_are_not_subscribed_to() {
+        // They accept a subscription and then deliver nothing, which is
+        // worse than an error: the capture looks healthy and the file
+        // stays empty. Trades come from the raw stream instead.
+        let topics: Vec<_> = binance_perp_streams("BTCUSDT")
+            .into_iter()
+            .map(|s| s.topic)
+            .collect();
+        for dead in ["aggTrade", "kline", "ticker", "miniTicker", "markPrice"] {
+            assert!(
+                !topics.iter().any(|t| t.contains(dead)),
+                "{dead} does not deliver on this venue"
+            );
+        }
+    }
+
+    #[test]
+    fn mark_price_is_polled_because_no_stream_carries_it() {
+        let polls = binance_perp_polls("btcusdt");
+        assert_eq!(polls.len(), 1);
+        assert_eq!(polls[0].name, "markPrice");
+        assert!(polls[0].url.contains("premiumIndex"));
+        assert!(polls[0].url.contains("symbol=BTCUSDT"));
+        assert_eq!(polls[0].interval_secs, 1);
     }
 
     #[test]
