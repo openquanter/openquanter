@@ -11,10 +11,14 @@
 pub const FORMAT_VERSION: u32 = 1;
 
 pub mod day;
+pub mod disk;
 pub mod frame;
 pub mod manifest;
+pub mod session;
 pub mod stream;
+pub mod venue;
 pub mod writer;
+pub mod ws;
 
 pub use day::UtcDay;
 pub use frame::{DecodeError, Kind, Record, decode, decode_all};
