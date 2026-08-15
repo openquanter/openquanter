@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Python (research bindings)
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local data & secrets — never commit market data, configs with keys, or credentials
+/data/
+*.local.toml
+.env

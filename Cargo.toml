@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oq-types",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/openquanter/openquanter"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
