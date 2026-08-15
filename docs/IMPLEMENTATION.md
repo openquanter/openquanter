@@ -187,6 +187,31 @@ behavior rather than documentation that describes intent.
   clock-offset estimate at startup and archive it with the data — latency
   modeling built on an unverified local clock is built on sand.
 
+### D13 — Baselines are identified by content, not by commit
+
+A regression baseline pinned to a code commit alone expires silently. Input
+data gets corrected, a configuration default moves, a dataset is re-exported —
+the code is untouched, so the baseline still looks valid, and the next
+comparison reports a mismatch that is not a regression at all.
+
+This failure mode is worse than a missed regression: it produces a *confident*
+wrong answer, and the person reading it has no way to tell "the engine
+changed" from "the inputs changed". Time is then spent bisecting code that was
+never at fault.
+
+Therefore every parity and golden baseline in this project is identified by the
+triple **(code commit, content hash of the input data, hash of the effective
+configuration)**, and the comparison tool classifies its own output:
+
+| Triple | Report |
+|---|---|
+| All three match | Differences are **behavioral** — a regression to investigate |
+| Any element differs | **`baseline invalidated — rebase required`**, naming the element that changed |
+
+Hashing the inputs costs microseconds and removes an entire class of
+misdiagnosis. The rule extends to golden tests: a golden baseline whose sample
+data changed is stale, not violated.
+
 ---
 
 ## 3. Technology choices
@@ -215,7 +240,7 @@ behavior rather than documentation that describes intent.
 | `oq-engine` | Matching: L0 (frozen anchor), L1, L2 | M1 / M4 |
 | `oq-margin` | Tiered maintenance margin, liquidation paths, liquidation orders, funding spikes | M1–M2 ★ |
 | `oq-backtest` | Run scheduling, funding, accounting, exports, participation rate, fidelity report | M1 |
-| `oq-parity` | Trade-by-trade diff and difference attribution | M1 (built first) |
+| `oq-parity` | Trade-by-trade diff and difference attribution; baselines identified by the (commit, data hash, config hash) triple (D13) | M1 (built first) |
 | `oq-data` | Dual-timestamp Arrow layer, bitemporal reference data, strict as-of joins | M1–M2 |
 | `oq-l2feed` | Capture toolkit: incremental depth, BBO, trades, mark price, liquidations, rule tables | M0 |
 | `oq-strategy` | Tier A traits, indicator components | M2 |
@@ -275,7 +300,7 @@ does not belong on a shared or bandwidth-constrained link.
 
 | ID | Task | Done when |
 |---|---|---|
-| P1.1 | `oq-parity` harness | Trade-by-trade diff with attribution, runnable against two arbitrary run outputs |
+| P1.1 | `oq-parity` harness | Trade-by-trade diff with attribution, runnable against two arbitrary run outputs; baselines carry the (commit, data hash, config hash) triple and a stale baseline reports `baseline invalidated` rather than a mismatch |
 | P1.2 | `oq-types` | Fixed-point arithmetic property-tested; illegal order state transitions unrepresentable |
 | P1.3 | `oq-journal` | Append, snapshot, replay, torn-tail recovery all tested including crash injection |
 | P1.4 | `oq-core` | Sequencer plus kernel; determinism test replays a journal to identical output |
@@ -348,8 +373,8 @@ Four layers, each answering a different question.
 |---|---|---|
 | **Unit** | Does this function do what it says? | Standard `cargo test`, fast, per-crate |
 | **Property** | Are the invariants preserved under arbitrary inputs? | `proptest`: quantity conservation, price-time priority, no crossed book, non-negative margin, monotonic liquidation price |
-| **Golden** | Did observable behavior change? | Sample data replayed, full output compared; baselines regenerate only with recorded human confirmation |
-| **Parity** | Do two implementations or two modes agree? | `oq-parity` trade-by-trade diff with attribution; used for ports, refactors, throughput mode, and Python/Rust inference |
+| **Golden** | Did observable behavior change? | Sample data replayed, full output compared; baselines carry the identity triple (D13) and regenerate only with recorded human confirmation |
+| **Parity** | Do two implementations or two modes agree? | `oq-parity` trade-by-trade diff with attribution; used for ports, refactors, throughput mode, and Python/Rust inference. A stale baseline is reported as stale, never as a difference |
 | **Simulation** | Does the whole system survive hostile conditions? | `oq-sim` randomized fault injection, every failure reproducible from `(seed, commit)` |
 
 Rules that are not negotiable:
@@ -358,6 +383,8 @@ Rules that are not negotiable:
   wrong, that is a design change with its own review.
 - Golden baseline updates require an explicit human confirmation recorded in
   the pull request. An agent or a script may propose one; it may not approve it.
+- A comparison never reports a difference it cannot attribute. If the inputs
+  or configuration moved, the output says so (D13) instead of blaming the code.
 - Public CI runs entirely on sample data. No quality gate may depend on a
   private dataset.
 - Benchmarks run in CI with tracked baselines; a performance regression is a

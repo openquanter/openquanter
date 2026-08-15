@@ -92,7 +92,9 @@ depends on the invariants established here.
 
 **Scope.**
 
-- `oq-parity` **first** — trade-by-trade diff and difference attribution.
+- `oq-parity` **first** — trade-by-trade diff and difference attribution,
+  with baselines identified by the (commit, data hash, config hash) triple so
+  a stale baseline reports itself instead of masquerading as a regression.
   Building the measuring instrument before the thing being measured is
   deliberate.
 - `oq-types`: domain types, `i64` fixed-point arithmetic, typestate order and

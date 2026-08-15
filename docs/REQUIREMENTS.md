@@ -158,6 +158,8 @@ ladder: any tier may be run with margin enabled.
 | FR-RESEARCH-3 | Results exceeding an overfitting threshold are marked and, in strict mode, refused for deployment packaging. | Core |
 | FR-RESEARCH-4 | Backtest output is analysis-friendly: trade-level records, equity curve, and fidelity report in open formats. | Core |
 | FR-RESEARCH-5 | A **parity harness** performs trade-by-trade diffing between two runs with difference attribution — used for validating ports, refactors, and fidelity-tier changes. | Core |
+| FR-RESEARCH-6 | A parity or golden baseline is identified by the triple **(code commit, content hash of the input data, hash of the effective configuration)**. | Core |
+| FR-RESEARCH-7 | When any element of that triple differs from the run under test, the tool reports **`baseline invalidated — rebase required`** and names the element that changed. A bare mismatch that leaves the cause to be guessed is not an acceptable output. A difference is reported as a behavioral regression only when all three elements match. | Core |
 
 ### 3.9 AI and ML — `FR-AI`
 
