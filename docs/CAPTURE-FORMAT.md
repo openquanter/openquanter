@@ -1,0 +1,195 @@
+# Market Data Capture Format
+
+> Status: **Draft for review** · [中文版](CAPTURE-FORMAT.zh-CN.md)
+> Implemented by: `oq-l2feed` · Related: [Implementation Plan](IMPLEMENTATION.md) §5 Phase 0
+
+A day of market data that was not captured is gone permanently, and a day
+that was captured in the wrong format is nearly as bad. This document
+specifies how captured data is framed, sealed, verified, and archived.
+
+## 1. Goals
+
+1. **Verbatim.** The bytes the venue sent are the bytes on disk. No
+   merging, no downsampling, no re-serialization. Aggregation is the
+   consumer's job, and any transformation applied at capture time is one
+   that can never be undone.
+2. **Replay-grade.** Every record carries both the exchange timestamp and
+   the local receive timestamp at nanosecond resolution. This is the
+   difference between data you can research with and data you can
+   simulate latency with.
+3. **Sealed by day.** A completed day is immutable, hashed, and
+   self-describing, so it can be compressed, transferred, verified, and
+   then trusted for years.
+4. **Crash-safe.** A capture process that dies mid-write loses at most
+   the final record, and the loss is detectable rather than silent.
+5. **Verifiable.** Every archived day carries a manifest with a content
+   hash. That hash is also what a parity baseline pins as its data
+   identity (see D13 in the implementation plan).
+
+## 2. Layout
+
+```
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap        active day
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap.zst    sealed day
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.manifest.json
+```
+
+One file per venue, symbol, stream and UTC day. The split is deliberate
+on every axis:
+
+- **By day** because it gives archival a natural unit: seal, hash,
+  compress, transfer, verify, then let retention delete the local copy.
+- **By stream** because streams have wildly different volumes and
+  retention value. Incremental depth is gigabytes a day; the
+  maintenance-margin rule table is bytes. Mixing them forces the cheap
+  data to inherit the expensive data's handling.
+- **By UTC day** because exchange timestamps are UTC, and a "day" that
+  depends on the capture host's timezone is a trap for whoever reads the
+  archive later.
+
+Rotation happens at the first record whose **exchange** timestamp falls
+in a new UTC day, not on a local-clock timer. A file therefore contains
+exactly the records belonging to its day even if the capture host's clock
+drifts or the process restarts across midnight.
+
+## 3. Record framing
+
+Length-prefixed binary frames, appended sequentially. Little-endian.
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 4 | `len` | Byte length of everything after this field |
+| 4 | 1 | `kind` | `0` = venue payload, `1` = control record |
+| 5 | 8 | `local_ts` | Local receive time, nanoseconds since the Unix epoch |
+| 13 | 8 | `exch_ts` | Exchange timestamp, nanoseconds; `i64::MIN` when the payload carries none |
+| 21 | 4 | `crc32` | CRC-32 of the payload bytes |
+| 25 | `len - 21` | `payload` | The venue's bytes, exactly as received |
+
+Framing rather than newline-delimited JSON: a length prefix holds any
+byte sequence without escaping, so the verbatim rule survives payloads
+that contain newlines, invalid UTF-8, or binary protocols. The cost is
+that the file is not directly greppable, which is why `oq-l2feed cat`
+converts a range of records to NDJSON on demand.
+
+The CRC is per record, not per file: it lets a reader distinguish a torn
+final record from corruption in the middle, which are different problems
+with different responses.
+
+## 4. Control records
+
+`kind = 1` payloads are UTF-8 JSON emitted by the capture process itself,
+interleaved in the stream so their position in time is unambiguous.
+
+| `type` | Emitted when | Contents |
+|---|---|---|
+| `session_start` | Capture starts or resumes | Capture software version and commit, venue, symbol, stream, subscription parameters |
+| `clock_offset` | At session start and hourly | Estimated offset and dispersion against the time source. Latency modeling built on an unverified local clock is built on sand, so the estimate is archived with the data rather than assumed |
+| `gap` | Connection lost | Reason, last sequence number seen, wall-clock duration of the outage |
+| `snapshot` | After any reconnect | The REST order book snapshot that re-establishes state, with the sequence number it corresponds to |
+| `session_end` | Clean shutdown | Record and byte counts for the session |
+
+A `gap` record is never omitted for being inconvenient. A reader must be
+able to tell "nothing happened in the market" from "we were not
+listening", and only an explicit marker makes that distinction possible.
+
+## 5. Sealing a day
+
+When rotation occurs, the completed day is sealed:
+
+1. Flush and close the active `.oqcap` file.
+2. Scan it once to compute the manifest.
+3. Compress to `.oqcap.zst` (zstd level 19 with long-distance matching;
+   market data is highly repetitive and typically compresses around 10:1).
+4. Write `<day>.manifest.json`.
+5. Only then may the uncompressed file be removed.
+
+```json
+{
+  "format_version": 1,
+  "venue": "example",
+  "symbol": "EXAMPLEUSDT",
+  "stream": "depth",
+  "utc_day": "2026-08-15",
+  "records": 48213904,
+  "bytes_raw": 9187442310,
+  "bytes_compressed": 921883104,
+  "first_exch_ts": 1786780800000000000,
+  "last_exch_ts": 1786867199998000000,
+  "first_local_ts": 1786780800000141000,
+  "last_local_ts": 1786867199998233000,
+  "gaps": 2,
+  "gap_seconds_total": 11.4,
+  "clock_offset_ns": {"at_start": -412000, "at_end": 318000, "max_abs": 1204000},
+  "capture_version": "oq-l2feed 0.1.0",
+  "capture_commit": "0000000000000000000000000000000000000000",
+  "sha256_compressed": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sha256_raw": "0000000000000000000000000000000000000000000000000000000000000000"
+}
+```
+
+Both hashes are recorded: the compressed one verifies the transfer, the
+raw one identifies the *content* independently of how it was compressed.
+Only the raw hash belongs in a parity baseline — recompressing an archive
+must not invalidate every baseline that depends on it.
+
+## 6. Archival
+
+The capture host is a buffer, not an archive. The pipeline is:
+
+```
+seal → hash → transfer → verify remote hash → mark archived → retention deletes local
+```
+
+Rules that keep this from quietly losing data:
+
+- **Never delete a local file that has not been verified at the
+  destination.** Verification means recomputing the hash on the far side,
+  not trusting the transfer tool's exit code.
+- **Transfer sealed days only.** The active day is still being appended
+  to; copying it produces a file that is neither current nor complete.
+- **Batch, don't stream.** Compressed daily archives move as whole files
+  on a schedule. A continuously streaming link turns every network
+  problem into a capture problem, and capture is the part that cannot be
+  redone.
+- **Retention is a function of verified archival**, never of age alone.
+
+The destination is deliberately unspecified here: any host, NAS, or
+object store that can hold the data and recompute a hash will do. Where
+a given deployment archives to is deployment configuration, not part of
+the format.
+
+## 7. Crash safety
+
+The active file is append-only. A process that dies mid-write leaves a
+truncated final frame, detected by a short read or a CRC mismatch on the
+last record. Readers must:
+
+1. Treat a torn final record as end-of-file rather than corruption.
+2. Treat a CRC failure anywhere earlier as corruption and refuse to
+   proceed silently.
+
+On restart, the capture process appends to the existing day file and
+emits a `session_start` control record, so the seam is visible in the
+data rather than inferred from file modification times.
+
+## 8. Volume planning
+
+Order of magnitude for one liquid perpetual instrument's full incremental
+depth stream: **5–15 GB per day raw, 0.5–1.5 GB per day compressed**,
+i.e. roughly 200–550 GB per year per symbol after compression. Best bid
+and offer, trades, and mark price streams together are a small fraction
+of that. Rule tables and periodic REST polls are negligible.
+
+Two consequences worth internalizing before starting: storage grows
+monotonically and forever, and the local buffer on the capture host must
+survive the longest plausible archival outage — a full disk stops
+capture, and a stopped capture is a permanent hole.
+
+## 9. Why not other formats
+
+| Alternative | Why not at capture time |
+|---|---|
+| NDJSON | Requires escaping to stay verbatim, and re-serializing JSON changes bytes. Available as an *export*, not as the archive |
+| Parquet / columnar | Excellent for analysis, wrong for capture: it buffers, imposes a schema on data whose schema the venue controls, and cannot represent a message it fails to parse. Convert after sealing |
+| Database ingestion | Couples capture uptime to database uptime, and makes the archive a backup problem rather than a file |
+| Compressed stream written live | Interleaves compression latency with receive latency and makes a torn tail unrecoverable rather than truncating cleanly |

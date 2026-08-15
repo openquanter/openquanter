@@ -9,6 +9,7 @@
 | [需求规格说明](REQUIREMENTS.zh-CN.md) · [English](REQUIREMENTS.md) | 定位、目标用户、功能与非功能需求、验收目标、保真度阶梯、非目标 |
 | [路线图](ROADMAP.zh-CN.md) · [English](ROADMAP.md) | M0–M5 与 1.0 各里程碑、启动触发条件与验收门、发布节奏、风险清单 |
 | [实施方案](IMPLEMENTATION.zh-CN.md) · [English](IMPLEMENTATION.md) | 架构、设计决策、crate 划分、分阶段任务计划、测试策略、性能预算 |
+| [采集格式规范](CAPTURE-FORMAT.zh-CN.md) · [English](CAPTURE-FORMAT.md) | 行情采集的分帧、控制记录、按天密封、归档校验与容量规划 |
 
 ## 阅读顺序
 
