@@ -1,0 +1,28 @@
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  dco:
+    name: Sign-off check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The check walks the commit range, so the full history of the
+          # pull request branch is required.
+          fetch-depth: 0
+
+      - name: Check Signed-off-by on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            scripts/check-dco.sh "$BASE_SHA" "$HEAD_SHA"
+          else
+            scripts/check-dco.sh
+          fi
