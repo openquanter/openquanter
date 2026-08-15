@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "oq-parity"
+version = "0.0.1"
+dependencies = [
+ "oq-types",
+]
+
+[[package]]
 name = "oq-stats"
 version = "0.0.1"
 
