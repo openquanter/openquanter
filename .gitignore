@@ -19,3 +19,7 @@ dist/
 /data/
 *.local.toml
 .env
+
+# Local-only scan configuration (never commit these)
+.secretscan-local
+.secretscan-allow

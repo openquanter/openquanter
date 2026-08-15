@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Scan the working tree for content that must never enter a public
+# repository: credentials, private keys, and deployment details.
+#
+# Usage:
+#   scripts/check-no-secrets.sh             # scan tracked files
+#   scripts/check-no-secrets.sh --history   # scan every commit as well
+#   scripts/check-no-secrets.sh --self-test # prove the patterns fire
+#
+# Note on regex dialect: `git grep -E` is POSIX ERE and does **not**
+# support `\b`. A pattern containing it matches nothing and fails
+# silently, which is worse than having no check at all. That is what
+# --self-test exists to catch.
+#
+# Two extension points, both intentionally kept out of this repository:
+#
+#   .secretscan-local   extra regexes, one per line. Deployment-specific
+#                       terms — host names, internal domains, machine
+#                       aliases — belong here, NOT in this script. A
+#                       public deny-list of your own host names is itself
+#                       a disclosure.
+#   .secretscan-allow   regexes for known false positives.
+#
+# Both files are git-ignored.
+
+set -uo pipefail
+
+MODE="${1:-tracked}"
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# High-signal patterns only. Anything noisy here trains people to ignore
+# the check, which is worse than not having it.
+PATTERNS=(
+  'BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY'
+  'ghp_[A-Za-z0-9]{30,}'
+  'gho_[A-Za-z0-9]{30,}'
+  'github_pat_[A-Za-z0-9_]{30,}'
+  'glpat-[A-Za-z0-9_-]{20,}'
+  'AKIA[0-9A-Z]{16}'
+  'xox[baprs]-[A-Za-z0-9-]{10,}'
+  'cio[A-Za-z0-9]{30,}'
+  '-----BEGIN CERTIFICATE-----'
+  '(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password|passwd)[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"'{$][^"'"'"']{7,}'
+  '(([0-9]{1,3})\.){3}[0-9]{1,3}:[0-9]{2,5}'
+  '[a-z0-9_-]+@(([0-9]{1,3})\.){3}[0-9]{1,3}'
+  'ssh[[:space:]]+-[ip][[:space:]]'
+  '\.ssh/id_(rsa|ed25519|ecdsa)'
+)
+
+if [ -f .secretscan-local ]; then
+  while IFS= read -r line; do
+    [ -n "$line" ] && [[ "$line" != \#* ]] && PATTERNS+=("$line")
+  done < .secretscan-local
+  echo "loaded $(grep -cvE '^\s*(#|$)' .secretscan-local) local pattern(s)"
+fi
+
+self_test() {
+  # Each sample must be flagged by at least one pattern. A scanner that
+  # silently stopped matching is indistinguishable from a clean repo,
+  # so this runs in CI alongside the scan itself.
+  local samples=(
+    'aws_key = "AKIAIOSFODNN7EXAMPLE"'
+    'password: "correct-horse-battery"'
+    'api_key = "abcdefghijklmnop"'
+    'token=ghp_0123456789abcdefghijklmnopqrstuvwxyz'
+    'gitlab: glpat-0123456789abcdefghij'
+    'host 203.0.113.44:22022'
+    'deploy@198.51.100.7'
+    '-----BEGIN OPENSSH PRIVATE KEY-----'
+    'key at ~/.ssh/id_ed25519'
+  )
+
+  local failures=0
+  for sample in "${samples[@]}"; do
+    local matched=0
+    for pattern in "${PATTERNS[@]}"; do
+      if printf '%s\n' "$sample" | grep -qE -i -e "$pattern"; then
+        matched=1
+        break
+      fi
+    done
+    if [ "$matched" -eq 0 ]; then
+      echo "SELF-TEST FAIL: no pattern matches: $sample"
+      failures=$((failures + 1))
+    fi
+  done
+
+  if [ "$failures" -gt 0 ]; then
+    echo "$failures of ${#samples[@]} samples were not detected"
+    return 1
+  fi
+  echo "self-test: all ${#samples[@]} samples detected by ${#PATTERNS[@]} patterns"
+  return 0
+}
+
+allowed() {
+  [ -f .secretscan-allow ] || return 1
+  grep -qE -f .secretscan-allow <<< "$1"
+}
+
+scan_target() {
+  local label="$1" hits=0
+  shift
+  for pattern in "${PATTERNS[@]}"; do
+    while IFS= read -r hit; do
+      [ -z "$hit" ] && continue
+      allowed "$hit" && continue
+      echo "FAIL [$label] $hit"
+      hits=$((hits + 1))
+    done < <("$@" "$pattern" 2>/dev/null | grep -v 'scripts/check-no-secrets.sh' | sort -u | head -20)
+  done
+  return "$hits"
+}
+
+grep_tracked() {
+  # -e matters: several patterns begin with a dash and would otherwise
+  # be parsed as options.
+  git grep -I -n -E -i -e "$1" -- . ':(exclude)scripts/check-no-secrets.sh'
+}
+
+grep_history() {
+  git grep -I -n -E -i -e "$1" $(git rev-list --all) -- . 2>/dev/null \
+    | grep -v 'scripts/check-no-secrets.sh'
+}
+
+if [ "$MODE" = "--self-test" ]; then
+  self_test
+  exit $?
+fi
+
+if ! self_test; then
+  echo "refusing to report a clean scan from a broken scanner"
+  exit 1
+fi
+
+total=0
+
+scan_target "working tree" grep_tracked
+total=$((total + $?))
+
+if [ "$MODE" = "--history" ]; then
+  scan_target "history" grep_history
+  total=$((total + $?))
+fi
+
+echo
+if [ "$total" -gt 0 ]; then
+  cat <<'MSG'
+Secrets or deployment details found.
+
+If this is a false positive, add a regex to .secretscan-allow (git-ignored).
+If it is real, do not just delete the line: a committed secret is a
+disclosed secret. Rotate the credential first, then remove it.
+MSG
+  exit 1
+fi
+
+echo "no secrets or deployment details found"
