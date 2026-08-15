@@ -238,11 +238,14 @@ openquanter/
       AGENTS.md         本地命令与不变量（就近文件优先）
       Cargo.toml
       src/*.rs          模块还小时保持扁平
+    oq-journal/
+      src/*.rs          分帧、写入、读取、快照存储
     oq-engine/
       src/
         lib.rs
-        matching/       l0.rs、l1.rs、l2.rs —— 保真度阶梯
-        book/           订单簿重建
+        book.rs         价格时间优先的订单簿
+        l0.rs           tick 回放撮合；l1.rs、l2.rs 随后
+        matching/       阶梯长大后再拆子模块
     oq-gateway/
       src/
         contract.rs     每个交易所都要实现的连接器契约

@@ -285,11 +285,14 @@ openquanter/
       AGENTS.md         local commands and invariants (nearest file wins)
       Cargo.toml
       src/*.rs          flat while modules stay small
+    oq-journal/
+      src/*.rs          framing, writer, reader, snapshot store
     oq-engine/
       src/
         lib.rs
-        matching/       l0.rs, l1.rs, l2.rs — the fidelity ladder
-        book/           order book reconstruction
+        book.rs         price-time priority order book
+        l0.rs           tick-replay matching; l1.rs, l2.rs follow
+        matching/       submodules appear as the ladder grows
     oq-gateway/
       src/
         contract.rs     the connector contract every venue implements
