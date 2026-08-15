@@ -38,14 +38,14 @@
 
 #![forbid(unsafe_code)]
 
-pub mod crc;
 pub mod frame;
 pub mod reader;
 pub mod snapshot;
 pub mod writer;
 
-pub use crc::{Crc32, crc32};
-pub use frame::{Frame, FrameError, HEADER_LEN, MAGIC, MAX_PAYLOAD, VERSION};
+pub use frame::{
+    FRAMING_LEN, Frame, FrameError, HEADER_LEN, MAGIC, MAX_PAYLOAD, TRAILER_LEN, VERSION,
+};
 pub use reader::{Reader, Replay, ReplayStop};
 pub use snapshot::{Snapshot, SnapshotStore};
 pub use writer::{SyncPolicy, Writer};
@@ -57,10 +57,16 @@ use std::io;
 pub enum JournalError {
     Io(io::Error),
     /// A record in the middle of the journal did not decode.
-    Corrupt { at_offset: u64, cause: FrameError },
+    Corrupt {
+        at_offset: u64,
+        cause: FrameError,
+    },
     /// Sequence numbers must be contiguous; a gap means records were
     /// lost, which no reader can paper over.
-    SequenceGap { expected: u64, found: u64 },
+    SequenceGap {
+        expected: u64,
+        found: u64,
+    },
 }
 
 impl From<io::Error> for JournalError {

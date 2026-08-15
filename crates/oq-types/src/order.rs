@@ -215,7 +215,10 @@ pub enum FillError {
     /// Refused rather than clamped: an over-fill means the caller's
     /// view of the book disagrees with the book, and silently clamping
     /// hides that disagreement until it surfaces as a position break.
-    Overfill { remaining: QtyLots, attempted: QtyLots },
+    Overfill {
+        remaining: QtyLots,
+        attempted: QtyLots,
+    },
 }
 
 fn apply_fill<S: OrderState>(order: Order<S>, qty: QtyLots) -> Result<FillOutcome, FillError> {
@@ -402,7 +405,7 @@ mod tests {
             panic!("6 of remaining 6 completes");
         };
         assert_eq!(done.remaining(), QtyLots::ZERO);
-        assert!(Filled::TERMINAL);
+        const { assert!(Filled::TERMINAL) };
     }
 
     #[test]

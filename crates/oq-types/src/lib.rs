@@ -29,11 +29,11 @@ pub mod ids;
 pub mod order;
 pub mod time;
 
-pub use fixed::{Cash, PriceTicks, QtyLots, Ratio};
-pub use ids::{InstrumentId, OrderId, SeqNo, StrategyId, TradeId};
+pub use fixed::{CASH_SCALE, Cash, PriceTicks, QtyLots, RATIO_SCALE, Ratio};
+pub use ids::{IdAllocator, InstrumentId, OrderId, SeqNo, StrategyId, TradeId};
 pub use order::{
-    Cancelled, Filled, Live, Order, OrderKind, OrderState, PartiallyFilled, Pending, Rejected,
-    TimeInForce,
+    Cancelled, FillError, FillOutcome, Filled, Live, Order, OrderKind, OrderState, PartiallyFilled,
+    Pending, Rejected, TimeInForce, Working,
 };
 pub use time::{Nanos, Stamp};
 

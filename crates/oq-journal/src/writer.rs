@@ -244,7 +244,8 @@ mod tests {
         // Simulate a writer that died mid-record.
         {
             let mut f = OpenOptions::new().append(true).open(&path).expect("append");
-            f.write_all(&[0x4F, 0x51, 0x52, 0x4A, 0x01]).expect("partial write");
+            f.write_all(&[0x4F, 0x51, 0x52, 0x4A, 0x01])
+                .expect("partial write");
             f.flush().expect("flush");
         }
 
@@ -269,7 +270,13 @@ mod tests {
         let mut w = Writer::open(&path, SyncPolicy::Never).expect("open");
         w.append(1, b"zero").expect("append");
         let err = w.append_at(5, 1, b"jumped").expect_err("must refuse");
-        assert!(matches!(err, JournalError::SequenceGap { expected: 1, found: 5 }));
+        assert!(matches!(
+            err,
+            JournalError::SequenceGap {
+                expected: 1,
+                found: 5
+            }
+        ));
         drop(w);
         std::fs::remove_file(&path).ok();
     }

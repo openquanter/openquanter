@@ -209,7 +209,10 @@ mod tests {
     fn cash_scaling_truncates_toward_zero() {
         // 1.00000000 * 0.15% = 0.0015; and the negative case truncates
         // toward zero rather than toward negative infinity.
-        assert_eq!(Cash::from_units(1).scaled(Ratio::from_ppm(1_500)), Cash(150_000));
+        assert_eq!(
+            Cash::from_units(1).scaled(Ratio::from_ppm(1_500)),
+            Cash(150_000)
+        );
         assert_eq!(Cash(-7).scaled(Ratio::from_percent(50)), Cash(-3));
     }
 
