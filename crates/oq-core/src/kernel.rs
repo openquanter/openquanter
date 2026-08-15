@@ -84,6 +84,14 @@ pub struct State {
     pub now: Nanos,
     /// The most recent traded price.
     pub mark: PriceTicks,
+    /// Whether the venue is allowed to close the account.
+    ///
+    /// Enabled in anything describing a real account. Disabling it
+    /// models an account with unlimited collateral — which no venue
+    /// offers, and which is what a backtest without a margin model
+    /// silently assumes. It exists so that assumption can be run as the
+    /// control arm of an experiment rather than left implicit.
+    pub enforce_liquidation: bool,
 }
 
 impl State {
@@ -105,7 +113,19 @@ impl State {
             funding: Cash::ZERO,
             now: Nanos::ZERO,
             mark: PriceTicks::ZERO,
+            enforce_liquidation: true,
         }
+    }
+
+    /// The same state with liquidation disabled.
+    ///
+    /// Named for what it is rather than for a mode: a caller reading
+    /// `without_liquidation()` at a call site cannot mistake it for a
+    /// performance option.
+    #[must_use]
+    pub fn without_liquidation(mut self) -> Self {
+        self.enforce_liquidation = false;
+        self
     }
 
     /// The position as the margin model sees it.
@@ -322,7 +342,7 @@ impl Kernel {
     /// there, and a model that only checks periodically reports
     /// survival through moves that ended the account.
     fn check_liquidation(&mut self, mark: PriceTicks) {
-        if self.state.qty.is_zero() {
+        if !self.state.enforce_liquidation || self.state.qty.is_zero() {
             return;
         }
         let position = self.state.position();
