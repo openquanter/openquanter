@@ -193,3 +193,51 @@ capture, and a stopped capture is a permanent hole.
 | Parquet / columnar | Excellent for analysis, wrong for capture: it buffers, imposes a schema on data whose schema the venue controls, and cannot represent a message it fails to parse. Convert after sealing |
 | Database ingestion | Couples capture uptime to database uptime, and makes the archive a backup problem rather than a file |
 | Compressed stream written live | Interleaves compression latency with receive latency and makes a torn tail unrecoverable rather than truncating cleanly |
+
+## 10. Venue behaviour worth knowing
+
+Three findings from the first live capture. They are recorded here
+because each one is invisible until data is already being collected, and
+each one produces an archive that looks healthy while being wrong.
+
+### A subscription that succeeds proves nothing
+
+The venue's `SUBSCRIBE` confirms any stream name without validating it.
+A name invented for a test — `btcusdt@thisDoesNotExist` — returns
+success and then silence, exactly like a real stream in a quiet market.
+
+Half the documented streams were found delivering nothing at all while
+their raw counterparts worked: aggregated trades, klines, tickers, mark
+price and the array fan-outs were silent; incremental depth, best bid
+and offer, and raw trades were fine.
+
+**Consequence for capture:** never infer health from a successful
+connection. A stream that has produced no records for longer than its
+expected quiet period is a fault, and the capture process should be able
+to say so. Where a stream has no working form, poll the REST endpoint
+that carries the same data and record the polls through the same path —
+a failed poll is a disconnect, and belongs in the archive as a gap.
+
+### The publish cadence can be fixed, so volume scales with message size
+
+Incremental depth on this venue arrives on a fixed cadence — measured at
+26 or 28 ms across 4411 consecutive messages, with a single 34 ms
+outlier and no other value. The book does not push on every change; it
+publishes a batch on a clock.
+
+**Consequence for planning:** an active market does not send *more*
+messages, it sends *larger* ones. Capacity estimates must scale the
+bytes per message, not the message rate, and a rate measured in a quiet
+period is a floor rather than an average.
+
+### Buffered data is not captured data
+
+A writer that flushes on a record count alone will hold a low-rate
+stream in memory for a long time — at one message a second and a
+thousand-record threshold, over sixteen minutes. A crash there loses
+messages that were *received*, so no gap marker records their absence
+and the archive is silently short.
+
+**Consequence:** flush on a timer as well as a count. The capture
+process should also be observable from outside — a file that never grows
+must mean a fault, not a buffer.
