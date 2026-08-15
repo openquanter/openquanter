@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "oq-backtest"
+version = "0.0.1"
+dependencies = [
+ "oq-core",
+ "oq-engine",
+ "oq-margin",
+ "oq-types",
+]
+
+[[package]]
 name = "oq-core"
 version = "0.0.1"
 dependencies = [
