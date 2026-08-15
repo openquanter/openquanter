@@ -3,5 +3,9 @@
 version = 4
 
 [[package]]
+name = "oq-stats"
+version = "0.0.1"
+
+[[package]]
 name = "oq-types"
 version = "0.0.1"

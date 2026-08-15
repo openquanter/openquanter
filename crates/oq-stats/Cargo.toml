@@ -1,0 +1,13 @@
+[package]
+name = "oq-stats"
+version = "0.0.1"
+description = "Backtest overfitting statistics for the OpenQuanter trading framework: deflated Sharpe ratio and probability of backtest overfitting"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
