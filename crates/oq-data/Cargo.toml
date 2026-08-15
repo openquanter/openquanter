@@ -1,0 +1,23 @@
+[package]
+name = "oq-data"
+version = "0.0.1"
+description = "Data plane for the OpenQuanter trading framework: dual-timestamp tick sources, bitemporal reference data, and leakage-free as-of joins"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oq-engine = { path = "../oq-engine", version = "0.0.1" }
+oq-hash = { path = "../oq-hash", version = "0.0.1" }
+oq-types = { path = "../oq-types", version = "0.0.1" }
+
+[features]
+# The default build reads the workspace's own tick format and carries no
+# third-party dependencies, so the common path stays fast to build and
+# cheap to audit. Columnar archive support is a separate opt-in because
+# it pulls a large dependency tree that most consumers never need.
+default = []
+
+[lints]
+workspace = true

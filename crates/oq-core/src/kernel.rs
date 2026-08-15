@@ -368,6 +368,27 @@ impl Kernel {
         self.state.engine.submit(order);
     }
 
+    /// Everything a replay must reproduce.
+    ///
+    /// Use this in equivalence assertions rather than [`Kernel::summary`],
+    /// which is a projection and cannot see the order book.
+    #[must_use]
+    pub fn fingerprint(&self) -> Fingerprint {
+        Fingerprint {
+            summary: self.summary(),
+            book: self
+                .state
+                .engine
+                .book()
+                .iter()
+                .map(|r| (r.id(), r.order.remaining().0))
+                .collect(),
+            working: self.working.clone(),
+            enforce_liquidation: self.state.enforce_liquidation,
+            id_watermark: self.state.engine.id_watermark(),
+        }
+    }
+
     /// A compact summary of account state, for reports and assertions.
     #[must_use]
     pub fn summary(&self) -> Summary {
@@ -382,6 +403,26 @@ impl Kernel {
             now: self.state.now,
         }
     }
+}
+
+/// Everything about a kernel that a replay must reproduce.
+///
+/// The determinism test compares this rather than the account summary.
+/// A summary is a projection — eight aggregates — and a replay that
+/// rebuilt the order book incorrectly, or not at all, would still match
+/// it. Comparing a fingerprint that is *derived from the whole state*
+/// means the test does not have to be updated every time state grows,
+/// which is exactly the maintenance failure that lets such a gap open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    pub summary: Summary,
+    /// Resting orders, in book order, with their remaining quantity.
+    pub book: Vec<(OrderId, i64)>,
+    /// Orders the kernel considers working.
+    pub working: Vec<OrderId>,
+    pub enforce_liquidation: bool,
+    /// Identifier watermark, so a replay that skipped an id is caught.
+    pub id_watermark: (u64, u64),
 }
 
 /// Account state at a point in the run.
