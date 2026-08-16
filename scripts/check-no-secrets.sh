@@ -46,6 +46,13 @@ PATTERNS=(
   '[a-z0-9_-]+@(([0-9]{1,3})\.){3}[0-9]{1,3}'
   'ssh[[:space:]]+-[ip][[:space:]]'
   '\.ssh/id_(rsa|ed25519|ecdsa)'
+  # Where something runs is not a secret in the way a key is, but it is
+  # the half of a deployment that a reader cannot change and an attacker
+  # does not have to guess. A cloud region hard-coded as a default says
+  # which datacentre the capture sits in; a home directory baked into a
+  # path says how it is laid out. Both belong in the environment.
+  '"(ap|us|eu|na|sa)-[a-z]+(-[0-9])?"'
+  '/home/(ubuntu|ec2-user|admin)/'
 )
 
 if [ -f .secretscan-local ]; then
