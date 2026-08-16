@@ -135,7 +135,7 @@ fn main() -> ExitCode {
         .map(|(stream, records)| Source { records, stream })
         .collect();
 
-    let (ticks, report) = match to_ticks(&sources, scales, window_ms * 1_000_000) {
+    let (ticks, report) = match to_ticks(venue.as_ref(), &sources, scales, window_ms * 1_000_000) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("oq-ingest: {e}");

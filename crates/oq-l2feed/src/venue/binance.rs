@@ -6,7 +6,8 @@
 
 use core::time::Duration;
 
-use super::{AckPolicy, Instrument, PollSpec, StreamSpec, Transport, Venue};
+use super::{AckPolicy, Instrument, PollSpec, StreamSpec, Trade, Transport, Venue};
+use crate::depth::{DepthUpdate, ParseError, Scales, parse_fixed};
 
 /// Binance USD-M perpetual futures.
 #[derive(Debug, Clone, Copy, Default)]
@@ -118,6 +119,31 @@ impl Venue for BinancePerp {
             qty_scale,
         })
     }
+
+    /// Price and size sit at the top level as `"p"` and `"q"`.
+    fn parse_trade(&self, payload: &[u8], scales: Scales) -> Option<Trade> {
+        let price = string_field(payload, br#""p":"#)?;
+        let qty = string_field(payload, br#""q":"#)?;
+        Some(Trade {
+            price: parse_fixed(&price, scales.price).ok()?,
+            qty: parse_fixed(&qty, scales.qty).ok()?,
+        })
+    }
+
+    fn parse_depth(&self, payload: &[u8], scales: Scales) -> Result<DepthUpdate, ParseError> {
+        crate::depth::parse_depth(payload, scales)
+    }
+}
+
+/// Extract a JSON string value that follows `key`.
+fn string_field(payload: &[u8], key: &[u8]) -> Option<String> {
+    let pos = payload.windows(key.len()).position(|w| w == key)?;
+    let rest = &payload[pos + key.len()..];
+    let start = rest.iter().position(|b| *b == b'"')? + 1;
+    let end = start + rest[start..].iter().position(|b| *b == b'"')?;
+    core::str::from_utf8(&rest[start..end])
+        .ok()
+        .map(str::to_owned)
 }
 
 fn event_time_ns(payload: &[u8]) -> Option<i64> {

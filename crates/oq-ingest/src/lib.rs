@@ -32,9 +32,10 @@
 
 use oq_engine::Tick;
 use oq_l2feed::book::Book;
-use oq_l2feed::depth::{Scales, parse_depth, parse_fixed};
+use oq_l2feed::depth::Scales;
 use oq_l2feed::frame::{Kind, Record};
 use oq_l2feed::manifest::is_gap;
+use oq_l2feed::venue::Venue;
 use oq_types::{Nanos, PriceTicks, QtyLots, Stamp};
 
 /// How the conversion went, so a caller can tell a thin market from a
@@ -65,6 +66,13 @@ pub struct Source<'a> {
 
 /// Fold captured records into ticks of `window_ns`.
 ///
+/// The venue supplies the parsing, because payload shapes have nothing
+/// in common between venues: one sends `"p"` and `"q"` at the top level,
+/// another `"px"` and `"sz"` nested under `"data"`. A reader written for
+/// either finds nothing in the other, which is not an error — just an
+/// empty result, so the conversion yields no ticks and reports an empty
+/// archive.
+///
 /// Depth and trade records for one instrument are supplied together;
 /// each contributes what only it knows. Depth alone yields ticks with
 /// book state and no trades, which is a legitimate and visibly
@@ -77,6 +85,7 @@ pub struct Source<'a> {
 /// that a partial read is visible rather than fatal. Returns `Err` only
 /// for a non-positive window, which has no meaning to fall back on.
 pub fn to_ticks(
+    venue: &dyn Venue,
     sources: &[Source<'_>],
     scales: Scales,
     window_ns: i64,
@@ -102,7 +111,7 @@ pub fn to_ticks(
                 continue;
             }
             match source.stream {
-                "depth" => match parse_depth(&record.payload, scales) {
+                "depth" => match venue.parse_depth(&record.payload, scales) {
                     Ok(update) => events.push(Event {
                         at: record.day_ts(),
                         local: record.local_ts,
@@ -110,7 +119,7 @@ pub fn to_ticks(
                     }),
                     Err(_) => report.unparseable += 1,
                 },
-                "trade" => match parse_trade(&record.payload, scales) {
+                "trade" => match venue.parse_trade(&record.payload, scales) {
                     Some(t) => events.push(Event {
                         at: record.day_ts(),
                         local: record.local_ts,
@@ -215,14 +224,8 @@ struct Event {
 
 enum EventKind {
     Depth(Box<oq_l2feed::depth::DepthUpdate>),
-    Trade(Trade),
+    Trade(oq_l2feed::venue::Trade),
     Gap,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Trade {
-    price: i64,
-    qty: i64,
 }
 
 struct Window {
@@ -285,32 +288,6 @@ impl Window {
             volume: QtyLots(volume_total),
         }
     }
-}
-
-/// Read price and quantity out of a raw trade payload.
-///
-/// Deliberately narrow: a trade is a price and a size, and everything
-/// else the venue said is still in the archive for whoever needs it.
-fn parse_trade(payload: &[u8], scales: Scales) -> Option<Trade> {
-    let price = string_field(payload, b"\"p\":")?;
-    let qty = string_field(payload, b"\"q\":")?;
-    Some(Trade {
-        price: parse_fixed(&price, scales.price).ok()?,
-        qty: parse_fixed(&qty, scales.qty).ok()?,
-    })
-}
-
-/// Extract a JSON string value that follows `key`.
-fn string_field(payload: &[u8], key: &[u8]) -> Option<String> {
-    let pos = payload
-        .windows(key.len())
-        .position(|window| window == key)?;
-    let rest = &payload[pos + key.len()..];
-    let start = rest.iter().position(|b| *b == b'"')? + 1;
-    let end = start + rest[start..].iter().position(|b| *b == b'"')?;
-    core::str::from_utf8(&rest[start..end])
-        .ok()
-        .map(str::to_owned)
 }
 
 #[cfg(test)]

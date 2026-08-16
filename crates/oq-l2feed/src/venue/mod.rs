@@ -35,6 +35,7 @@
 pub mod binance;
 pub mod binance_instruments;
 pub mod okx;
+pub mod okx_instruments;
 
 use core::time::Duration;
 
@@ -185,6 +186,41 @@ pub trait Venue {
     /// Quoting precision for a symbol, when the venue is known to
     /// publish it.
     fn instrument(&self, symbol: &str) -> Option<Instrument>;
+
+    /// Read a trade out of a payload: price and size, in ticks and lots.
+    ///
+    /// Only what a tick needs. Everything else the venue said is still
+    /// in the archive for whoever wants it, and parsing more here would
+    /// be more that can be parsed wrongly once and be wrong forever.
+    ///
+    /// This belongs to the venue for the same reason the subscription
+    /// does. The shapes have nothing in common: one venue sends
+    /// `"p"` and `"q"` at the top level, the other `"px"` and `"sz"`
+    /// nested under `"data"`. A reader written for either finds nothing
+    /// in the other — which is not an error, just an empty result, so
+    /// the conversion produces no ticks and says the archive was empty.
+    fn parse_trade(&self, payload: &[u8], scales: crate::depth::Scales) -> Option<Trade>;
+
+    /// Read an order book update out of a payload.
+    ///
+    /// # Errors
+    ///
+    /// When the payload is not a book update for this venue, or a price
+    /// or size does not fit the given scale.
+    fn parse_depth(
+        &self,
+        payload: &[u8],
+        scales: crate::depth::Scales,
+    ) -> Result<crate::depth::DepthUpdate, crate::depth::ParseError>;
+}
+
+/// One trade, reduced to what a tick is built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trade {
+    /// Price in instrument ticks.
+    pub price: i64,
+    /// Size in instrument lots.
+    pub qty: i64,
 }
 
 /// Look up a venue by the identifier used on the command line and in

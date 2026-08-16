@@ -19,7 +19,8 @@
 
 use core::time::Duration;
 
-use super::{AckPolicy, Instrument, PollSpec, StreamSpec, Transport, Venue};
+use super::{AckPolicy, Instrument, PollSpec, StreamSpec, Trade, Transport, Venue};
+use crate::depth::{DepthUpdate, Level, ParseError, Scales, parse_fixed};
 
 /// OKX perpetual swaps.
 #[derive(Debug, Clone, Copy, Default)]
@@ -85,17 +86,108 @@ impl Venue for OkxSwap {
         event_time_ns
     }
 
-    /// Not yet published for this venue.
+    /// Looked up after the symbol is translated, because the table is
+    /// keyed by this venue's own instrument ids.
     ///
-    /// `None` is the honest answer and the tools treat it as one: they
-    /// stop and ask rather than assuming a scale, because a wrong
-    /// precision rescales every price without failing. The generated
-    /// table that Binance has comes from its `exchangeInfo`; the
-    /// equivalent here is `/api/v5/public/instruments`, and until that is
-    /// generated this says so instead of guessing.
-    fn instrument(&self, _symbol: &str) -> Option<Instrument> {
-        None
+    /// The venue publishes a tick size where the other publishes a count
+    /// of decimal places; the conversion happens in the generator, not
+    /// here, so this stays a lookup. See [`super::okx_instruments`].
+    fn instrument(&self, symbol: &str) -> Option<Instrument> {
+        let (price_scale, qty_scale) = super::okx_instruments::precision(&instrument_id(symbol))?;
+        Some(Instrument {
+            price_scale,
+            qty_scale,
+        })
     }
+
+    /// Price and size are `"px"` and `"sz"`, nested under `"data"`.
+    fn parse_trade(&self, payload: &[u8], scales: Scales) -> Option<Trade> {
+        let text = core::str::from_utf8(payload).ok()?;
+        if !text.contains(r#""channel":"trades""#) {
+            return None;
+        }
+        Some(Trade {
+            price: parse_fixed(&quoted(text, r#""px":"#)?, scales.price).ok()?,
+            qty: parse_fixed(&quoted(text, r#""sz":"#)?, scales.qty).ok()?,
+        })
+    }
+
+    /// The book arrives as `"bids"` and `"asks"` inside `"data"`, and
+    /// the sequence is `seqId` and `prevSeqId` where the other venue
+    /// uses `u` and `pu`. The shapes differ; what they mean does not,
+    /// which is why both can produce the same `DepthUpdate`.
+    fn parse_depth(&self, payload: &[u8], scales: Scales) -> Result<DepthUpdate, ParseError> {
+        let text = core::str::from_utf8(payload).map_err(|_| ParseError::NotDepth)?;
+        if !text.contains(r#""channel":"books""#) {
+            return Err(ParseError::NotDepth);
+        }
+
+        let ts = quoted(text, r#""ts":"#)
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or(ParseError::MissingField("ts"))?;
+        let seq = bare_int(text, r#""seqId":"#).ok_or(ParseError::MissingField("seqId"))?;
+        // A snapshot has no predecessor and the venue says so with -1.
+        // `prev_final_id` being an Option is exactly the right shape for
+        // that: reporting -1 as a real predecessor would make the first
+        // message after a resubscribe look like a break in the chain.
+        let prev = bare_int(text, r#""prevSeqId":"#).filter(|p| *p >= 0);
+        let first = prev.map_or(seq, |p| p + 1);
+
+        Ok(DepthUpdate {
+            event_ms: ts,
+            first_id: u64::try_from(first).unwrap_or(0),
+            final_id: u64::try_from(seq).unwrap_or(0),
+            prev_final_id: prev.and_then(|p| u64::try_from(p).ok()),
+            bids: levels(text, r#""bids":[["#, scales)?,
+            asks: levels(text, r#""asks":[["#, scales)?,
+        })
+    }
+}
+
+/// A quoted JSON string value following `key`.
+fn quoted(text: &str, key: &str) -> Option<String> {
+    let rest = &text[text.find(key)? + key.len()..];
+    let start = rest.find('"')? + 1;
+    let end = start + rest[start..].find('"')?;
+    Some(rest[start..end].to_string())
+}
+
+/// A bare JSON integer following `key`, which may be negative.
+fn bare_int(text: &str, key: &str) -> Option<i64> {
+    let rest = &text[text.find(key)? + key.len()..];
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    digits.parse().ok()
+}
+
+/// Levels arrive as `[["price","size","liquidations","orders"], ...]`.
+/// Only the first two matter here; the rest is still in the archive.
+fn levels(text: &str, key: &str, scales: Scales) -> Result<Vec<Level>, ParseError> {
+    let Some(start) = text.find(key) else {
+        return Ok(Vec::new());
+    };
+    // Start at the outer bracket so the per-level split below sees the
+    // first level too.
+    let rest = &text[start + key.len() - 2..];
+    let end = rest.find("]]").map_or(rest.len(), |i| i + 2);
+    let mut out = Vec::new();
+    for entry in rest[..end].split('[').skip(1) {
+        let mut parts = entry.trim_start_matches('"').split(',');
+        let Some(price) = parts.next() else { continue };
+        let Some(qty) = parts.next() else { continue };
+        let price = price.trim_matches(|c| c == '"' || c == ']');
+        let qty = qty.trim_matches(|c| c == '"' || c == ']');
+        if price.is_empty() || qty.is_empty() {
+            continue;
+        }
+        out.push(Level {
+            price: parse_fixed(price, scales.price)?,
+            qty: parse_fixed(qty, scales.qty)?,
+        });
+    }
+    Ok(out)
 }
 
 /// Map a plain symbol to this venue's instrument id.
@@ -180,8 +272,19 @@ mod tests {
     }
 
     #[test]
+    fn precision_is_found_through_the_translated_symbol() {
+        // The archive and every other venue call it BTCUSDT; the table
+        // is keyed by BTC-USDT-SWAP. A lookup that skipped the
+        // translation would find nothing and the tools would refuse to
+        // convert data they can read perfectly well.
+        let i = OkxSwap.instrument("BTCUSDT").expect("listed");
+        assert_eq!((i.price_scale, i.qty_scale), (1, 2));
+        assert_eq!(OkxSwap.instrument("btcusdt"), OkxSwap.instrument("BTCUSDT"));
+    }
+
+    #[test]
     fn an_unknown_instrument_is_none_rather_than_a_guess() {
-        assert!(OkxSwap.instrument("BTCUSDT").is_none());
+        assert!(OkxSwap.instrument("NOTLISTEDUSDT").is_none());
     }
 
     #[test]
