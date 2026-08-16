@@ -5,6 +5,7 @@ members = [
     "crates/oq-core",
     "crates/oq-data",
     "crates/oq-engine",
+    "crates/oq-examples",
     "crates/oq-hash",
     "crates/oq-journal",
     "crates/oq-l2feed",
