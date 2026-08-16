@@ -84,6 +84,8 @@ impl Venue for BinancePerp {
             url: format!("wss://fstream.binance.com/ws/{}", spec.topic),
             subscribe: Vec::new(),
             ack,
+            // This venue pings us, and answering in place is enough.
+            keepalive: None,
         }
     }
 
@@ -100,6 +102,12 @@ impl Venue for BinancePerp {
 
     fn event_time_reader(&self) -> fn(&[u8]) -> Option<i64> {
         event_time_ns
+    }
+
+    /// A bare integer after `"t":`. This venue sends one trade per
+    /// message, so there is normally one; the scan does not assume it.
+    fn trade_ids(&self, payload: &[u8]) -> Vec<u64> {
+        super::ids_after(payload, br#""t":"#, false)
     }
 
     /// Precisions are per-contract and there is no way to guess them:

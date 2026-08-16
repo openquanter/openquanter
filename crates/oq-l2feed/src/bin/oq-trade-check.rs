@@ -13,7 +13,15 @@
 //!
 //! ```text
 //! oq-trade-check archive/binance-perp/BTCUSDT/trade/2026-08-16/11.oqcap
+//! oq-trade-check --venue okx-swap archive/okx-swap/BTCUSDT/trade/2026-08-16.oqcap
 //! ```
+//!
+//! The venue reads its own ids: one writes a bare `"t":12345`, the other
+//! a quoted `"tradeId":"12345"`, and a reader written for either finds
+//! none at all in the other. That is not an error — it is an empty
+//! check, and an empty check here reports the same shape as a passing
+//! one. The venue is taken from the archive path when it is not given,
+//! because that path already names it.
 //!
 //! Exits non-zero when ids are missing or repeated, so it belongs in
 //! whatever runs after a capture.
@@ -22,28 +30,58 @@ use std::process::ExitCode;
 
 use oq_l2feed::frame::{Kind, decode_all};
 
-fn id_of(payload: &[u8]) -> Option<u64> {
-    let i = payload.windows(4).position(|w| w == br#""t":"#)? + 4;
-    let digits: Vec<u8> = payload[i..]
-        .iter()
-        .copied()
-        .take_while(u8::is_ascii_digit)
-        .collect();
-    if digits.is_empty() {
-        return None;
-    }
-    core::str::from_utf8(&digits).ok()?.parse().ok()
+/// The venue segment of an archive path: `<root>/<venue>/<symbol>/<stream>/…`.
+///
+/// Inferred rather than required because every archive path holds it,
+/// and a flag that is nearly always the same as something already on the
+/// command line is a flag that gets forgotten and then defaulted wrongly.
+fn venue_from_path(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let stream_idx = parts.iter().rposition(|p| {
+        matches!(
+            *p,
+            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice" | "fundingRate"
+        )
+    })?;
+    parts
+        .get(stream_idx.checked_sub(2)?)
+        .map(|s| (*s).to_string())
 }
 
 fn main() -> ExitCode {
-    let path = std::env::args().nth(1).expect("path");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let Some(path) = args.iter().find(|a| !a.starts_with("--")).cloned() else {
+        eprintln!(
+            "oq-trade-check: missing path\n\nUSAGE:\n    oq-trade-check [--venue <NAME>] <FILE.oqcap>"
+        );
+        return ExitCode::FAILURE;
+    };
+
+    let venue_id = flag("--venue")
+        .or_else(|| venue_from_path(&path))
+        .unwrap_or_else(|| "binance-perp".to_string());
+    let Some(venue) = oq_l2feed::venue::by_id(&venue_id) else {
+        eprintln!(
+            "oq-trade-check: unknown venue {venue_id:?}; known: {}",
+            oq_l2feed::venue::known_ids().join(", ")
+        );
+        return ExitCode::FAILURE;
+    };
+    println!("venue           {venue_id}");
+
     let bytes = std::fs::read(&path).expect("read");
     let (records, torn) = decode_all(&bytes).expect("decode");
 
     let mut ids: Vec<u64> = records
         .iter()
         .filter(|r| r.kind == Kind::Payload)
-        .filter_map(|r| id_of(&r.payload))
+        .flat_map(|r| venue.trade_ids(&r.payload))
         .collect();
     let total = ids.len();
     ids.sort_unstable();
@@ -80,7 +118,10 @@ fn main() -> ExitCode {
     // shape of a passing one.
     if total == 0 {
         println!();
-        println!("verdict: NOT A TRADE STREAM — no trade ids found, so nothing here was checked");
+        println!(
+            "verdict: NOT A TRADE STREAM — no trade ids found for {venue_id}, so nothing \
+             here was checked (wrong file, or the wrong --venue for it)"
+        );
         return ExitCode::FAILURE;
     }
 

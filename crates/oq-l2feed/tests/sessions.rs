@@ -62,6 +62,7 @@ impl Venue for EveningOpen {
             url: String::new(),
             subscribe: Vec::new(),
             ack: AckPolicy::None,
+            keepalive: None,
         }
     }
     fn event_time_ns(&self, _payload: &[u8]) -> Option<i64> {
@@ -75,6 +76,9 @@ impl Venue for EveningOpen {
     }
     fn parse_trade(&self, _payload: &[u8], _scales: Scales) -> Option<Trade> {
         None
+    }
+    fn trade_ids(&self, _payload: &[u8]) -> Vec<u64> {
+        Vec::new()
     }
     fn parse_depth(&self, _payload: &[u8], _scales: Scales) -> Result<DepthUpdate, ParseError> {
         Err(ParseError::NotDepth)
@@ -188,6 +192,7 @@ fn a_venue_that_says_nothing_still_divides_by_the_clock() {
                 url: String::new(),
                 subscribe: Vec::new(),
                 ack: AckPolicy::None,
+                keepalive: None,
             }
         }
         fn event_time_ns(&self, _p: &[u8]) -> Option<i64> {
@@ -201,6 +206,9 @@ fn a_venue_that_says_nothing_still_divides_by_the_clock() {
         }
         fn parse_trade(&self, _p: &[u8], _s: Scales) -> Option<Trade> {
             None
+        }
+        fn trade_ids(&self, _p: &[u8]) -> Vec<u64> {
+            Vec::new()
         }
         fn parse_depth(&self, _p: &[u8], _s: Scales) -> Result<DepthUpdate, ParseError> {
             Err(ParseError::NotDepth)

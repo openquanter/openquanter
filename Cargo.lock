@@ -425,6 +425,16 @@ name = "oq-hash"
 version = "2.0.0-alpha.1"
 
 [[package]]
+name = "oq-ingest"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "oq-data",
+ "oq-engine",
+ "oq-l2feed",
+ "oq-types",
+]
+
+[[package]]
 name = "oq-journal"
 version = "2.0.0-alpha.1"
 dependencies = [

@@ -22,7 +22,7 @@
 use std::process::ExitCode;
 
 use oq_l2feed::book::{Applied, Book};
-use oq_l2feed::depth::{Scales, parse_depth};
+use oq_l2feed::depth::Scales;
 use oq_l2feed::frame::{Kind, decode_all};
 use oq_l2feed::manifest::is_gap;
 
@@ -66,10 +66,20 @@ fn main() -> ExitCode {
     // prices like "57.45300" that are valid at five, which reads as a
     // corrupt archive rather than a mis-set flag.
     let venue_id = value("--venue").unwrap_or_else(|| "binance-perp".to_string());
+    // The venue parses its own payloads. Reading them with another
+    // venue's parser does not produce wrong numbers — it produces no
+    // numbers, and the verdict is "NO DEPTH UPDATES", which reads as a
+    // capture that recorded nothing rather than a tool looking at it
+    // through the wrong venue.
+    let Some(venue) = oq_l2feed::venue::by_id(&venue_id) else {
+        eprintln!(
+            "oq-book-check: unknown venue {venue_id:?}; known: {}",
+            oq_l2feed::venue::known_ids().join(", ")
+        );
+        return ExitCode::FAILURE;
+    };
     let symbol = value("--symbol").or_else(|| symbol_from_path(&path));
-    let looked_up = symbol
-        .as_deref()
-        .and_then(|s| oq_l2feed::venue::by_id(&venue_id).and_then(|v| v.instrument(s)));
+    let looked_up = symbol.as_deref().and_then(|s| venue.instrument(s));
 
     if looked_up.is_none() && value("--price-scale").is_none() {
         eprintln!(
@@ -137,7 +147,7 @@ fn main() -> ExitCode {
             continue;
         }
 
-        let update = match parse_depth(&record.payload, scales) {
+        let update = match venue.parse_depth(&record.payload, scales) {
             Ok(u) => u,
             Err(e) => {
                 stats.unparseable += 1;

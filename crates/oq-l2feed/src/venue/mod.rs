@@ -109,6 +109,19 @@ pub enum AckPolicy {
     Explicit {
         /// Byte sequence that identifies a successful acknowledgement.
         marker: Vec<u8>,
+        /// Byte sequence that identifies a refusal.
+        ///
+        /// A venue that answers explicitly answers both ways, and the
+        /// two answers are worth telling apart: a refused subscription
+        /// will never succeed, while a silent one may just be a quiet
+        /// market. Without this the refusal falls through as data — it
+        /// gets written into the archive as though it were a book
+        /// update — and the wait ends at the deadline reporting that
+        /// the subscription "was accepted but delivered nothing", which
+        /// is the opposite of what happened.
+        ///
+        /// Empty means the venue has no distinct refusal to look for.
+        reject_marker: Vec<u8>,
         /// How long to wait for it.
         deadline: Duration,
     },
@@ -131,6 +144,23 @@ pub struct Transport {
     pub subscribe: Vec<Vec<u8>>,
     /// How the subscription is confirmed.
     pub ack: AckPolicy,
+    /// How long this venue tolerates hearing nothing from us before it
+    /// hangs up, if it hangs up at all.
+    ///
+    /// `None` where the venue drives the keepalive itself: Binance sends
+    /// a ping and a pong answers it, so nothing has to be scheduled.
+    /// OKX is the other kind — it closes a connection with `4004 No data
+    /// received in 30s` — and on a busy channel the market hides that,
+    /// because data arriving *is* the keepalive. It only appears on a
+    /// quiet one: a funding-rate subscription reconnects every thirty
+    /// seconds and lands a gap in the archive each time, which reads as
+    /// a flaky network rather than a missing ping.
+    ///
+    /// A protocol-level ping frame is what gets sent, deliberately.
+    /// OKX also documents a text `ping` that draws a text `pong`, and
+    /// that `pong` would be captured as a record — noise in an archive
+    /// whose whole promise is that it holds what the venue said.
+    pub keepalive: Option<Duration>,
 }
 
 /// The precision a venue quotes an instrument in.
@@ -201,6 +231,21 @@ pub trait Venue {
     /// the conversion produces no ticks and says the archive was empty.
     fn parse_trade(&self, payload: &[u8], scales: crate::depth::Scales) -> Option<Trade>;
 
+    /// Every trade id carried by a payload, in the order they appear.
+    ///
+    /// Completeness is checked by following the ids the venue issued, so
+    /// this is what makes that check possible — and it has to be the
+    /// venue's, because the shapes share nothing: a bare `"t":12345` on
+    /// one, a quoted `"tradeId":"12345"` on the other. A reader written
+    /// for either finds no ids at all in the other, and no ids means no
+    /// gaps among them, which is an empty check wearing the shape of a
+    /// passing one.
+    ///
+    /// A `Vec` rather than an `Option` because a venue may put several
+    /// trades in one frame. Taking only the first would report every
+    /// other trade in that frame as missing.
+    fn trade_ids(&self, payload: &[u8]) -> Vec<u64>;
+
     /// Read an order book update out of a payload.
     ///
     /// # Errors
@@ -256,6 +301,46 @@ pub fn by_id(id: &str) -> Option<Box<dyn Venue>> {
         "okx-swap" => Some(Box::new(okx::OkxSwap)),
         _ => None,
     }
+}
+
+/// Every integer following `key`, optionally past an opening quote.
+///
+/// Shared because the difference between the venues here is one quote,
+/// and two near-identical scans would be two places for the same bug.
+/// Deliberately a scan rather than a parse: the payload is stored
+/// verbatim regardless, and this value only has to identify a trade.
+pub(crate) fn ids_after(payload: &[u8], key: &[u8], quoted: bool) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + key.len() <= payload.len() {
+        let Some(found) = payload[at..]
+            .windows(key.len())
+            .position(|w| w == key)
+            .map(|p| at + p)
+        else {
+            break;
+        };
+        let mut i = found + key.len();
+        if quoted {
+            // A quoted value must actually be quoted. Skipping this
+            // would read the digits of whatever followed instead.
+            if payload.get(i) != Some(&b'"') {
+                at = found + key.len();
+                continue;
+            }
+            i += 1;
+        }
+        let digits: Vec<u8> = payload[i..]
+            .iter()
+            .copied()
+            .take_while(u8::is_ascii_digit)
+            .collect();
+        if let Ok(id) = core::str::from_utf8(&digits).unwrap_or("").parse::<u64>() {
+            out.push(id);
+        }
+        at = found + key.len();
+    }
+    out
 }
 
 /// Every registered venue identifier, for error messages and `--help`.

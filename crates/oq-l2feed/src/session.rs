@@ -185,6 +185,14 @@ pub struct SessionStats {
     pub elapsed: Duration,
     /// Why it stopped.
     pub stop: StopReason,
+    /// What the last failed connection attempt said, if one failed.
+    ///
+    /// `ConnectionLost` alone does not distinguish a venue that refused
+    /// the subscription from a network that went away, and those want
+    /// opposite responses: one is a typo in a symbol, the other is a
+    /// reason to wait. The venue usually says which in as many words,
+    /// and dropping the error threw that away.
+    pub last_error: Option<String>,
 }
 
 impl SessionStats {
@@ -297,6 +305,7 @@ pub fn run_with_clock<C: Connector, K: Clock>(
         outage: Duration::ZERO,
         elapsed: Duration::ZERO,
         stop: StopReason::DurationElapsed,
+        last_error: None,
     };
     let mut consecutive_failures = 0u32;
     let mut since_disk_check = 0u64;
@@ -322,8 +331,9 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 consecutive_failures = 0;
                 source
             }
-            Err(_) => {
+            Err(e) => {
                 consecutive_failures += 1;
+                stats.last_error = Some(e.to_string());
                 if consecutive_failures >= config.max_consecutive_failures {
                     stats.stop = StopReason::ConnectionLost;
                     break;
@@ -662,6 +672,7 @@ mod tests {
             outage: Duration::ZERO,
             elapsed: Duration::from_secs(3_600),
             stop: StopReason::DurationElapsed,
+            last_error: None,
         };
         // 3600 bytes in an hour is 86_400 bytes a day.
         assert_eq!(stats.projected_bytes_per_day(), 86_400);
