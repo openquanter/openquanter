@@ -22,7 +22,12 @@ BIN="${BIN:-/home/ubuntu/oq-capture}"
 ROOT="${ROOT:-/home/ubuntu/capture}"
 LOGDIR="${LOGDIR:-/home/ubuntu/oq/log/capture}"
 FLOOR_GB="${FLOOR_GB:-8}"
-ROTATION="${ROTATION:-}"          # empty until a binary that supports it is deployed
+# Hourly, not daily: a daily file is only sealed at UTC midnight, so a
+# host that dies at 23:00 loses the day. Hourly bounds that to an hour.
+# The watchdog must default to the same value the operator started with
+# -- a restart that silently picks a different rotation leaves two
+# layouts interleaved in one day.
+ROTATION="${ROTATION:-hourly}"
 SYMBOLS="${SYMBOLS:-BTCUSDT ETHUSDT BNBUSDT HYPEUSDT}"
 STREAMS="${STREAMS:-depth bookTicker trade forceOrder markPrice}"
 

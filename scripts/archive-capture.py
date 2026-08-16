@@ -51,16 +51,70 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cos
 from cos_client import from_env  # noqa: E402
 
 
-def sealed_files(root):
-    """Yield (raw, manifest) for every capture file the writer has closed."""
+def open_files_on_host():
+    """Every regular file currently held open by any process.
+
+    Read from /proc rather than inferred, because the alternative --
+    "it has not been written to recently" -- is wrong for exactly the
+    streams that matter. A liquidation feed can idle for hours; its
+    file is indistinguishable by mtime from one whose writer died. Act
+    on that guess and the archive deletes a file out from under a live
+    capture, which keeps writing to the unlinked inode until it exits
+    and takes the data with it.
+    """
+    held = set()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            for fd in os.listdir(fd_dir):
+                try:
+                    held.add(os.path.realpath(os.path.join(fd_dir, fd)))
+                except OSError:
+                    pass
+        except OSError:
+            # The process exited between listdir and open, or belongs
+            # to another user. Either way it is not ours to inspect.
+            continue
+    return held
+
+
+def archivable(root, stale_minutes):
+    """Yield (raw, manifest_or_None) for every file that should ship.
+
+    Two cases, and the second is the one that matters:
+
+    * **Sealed.** A manifest exists, so the writer closed the file
+      normally. Normal rotation and clean shutdown both land here.
+
+    * **Orphaned.** No manifest and no process holding it open. The
+      capture died -- OOM, power loss, a restart, an operator's kill --
+      without running its seal step.
+
+    Only handling the sealed case would strand data exactly when
+    something went wrong, which is when it is least affordable. The
+    frame format tolerates a torn tail, so an orphan is still readable;
+    what it lacks is the manifest's record count and time bounds, and
+    that is no reason to leave it on a disk that is filling.
+
+    Liveness is decided by an open file descriptor, with staleness only
+    as a second, weaker guard.
+    """
+    held = open_files_on_host()
+    cutoff = time.time() - stale_minutes * 60
     for dirpath, _dirs, files in os.walk(root):
         for name in sorted(files):
-            if not name.endswith(".manifest.json"):
+            if not name.endswith(".oqcap"):
                 continue
-            manifest = os.path.join(dirpath, name)
-            raw = manifest[: -len(".manifest.json")] + ".oqcap"
-            if os.path.exists(raw):
+            raw = os.path.join(dirpath, name)
+            manifest = raw[: -len(".oqcap")] + ".manifest.json"
+            if os.path.exists(manifest):
                 yield raw, manifest
+            elif os.path.realpath(raw) in held:
+                continue  # a live capture owns it
+            elif os.path.getmtime(raw) < cutoff:
+                yield raw, None
 
 
 def is_quiescent(path, settle=1.0):
@@ -100,6 +154,8 @@ def main():
                    help="keep archived files locally for this long before deleting")
     p.add_argument("--heartbeat", default=os.environ.get("ARCHIVE_HEARTBEAT", ""),
                    help="URL pinged only on a fully clean run")
+    p.add_argument("--stale-minutes", type=float, default=20,
+                   help="a manifest-less file untouched this long is orphaned [20]")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
@@ -108,14 +164,16 @@ def main():
 
     cos = None if args.dry_run else from_env(args.env, internal=not args.public)
 
-    found = shipped = open_files = failed = 0
+    found = shipped = open_files = failed = orphans = 0
     now = time.time()
 
-    for raw, manifest in sealed_files(args.root):
+    for raw, manifest in archivable(args.root, args.stale_minutes):
         if not is_quiescent(raw):
             open_files += 1
             continue
         found += 1
+        if manifest is None:
+            orphans += 1
         rel = os.path.relpath(raw, args.root)
 
         if args.dry_run:
@@ -137,12 +195,13 @@ def main():
             failed += 1
             continue
 
-        ok_m, detail_m = cos.put_file(mkey, manifest)
-        if not ok_m:
-            print(f"archive: manifest upload failed for {rel}: {detail_m}",
-                  file=sys.stderr)
-            failed += 1
-            continue
+        if manifest is not None:
+            ok_m, detail_m = cos.put_file(mkey, manifest)
+            if not ok_m:
+                print(f"archive: manifest upload failed for {rel}: {detail_m}",
+                      file=sys.stderr)
+                failed += 1
+                continue
 
         # Only now is the remote copy known-good. Deleting before this
         # point would trade a recoverable disk-space problem for an
@@ -151,14 +210,16 @@ def main():
         if age_h >= args.keep_hours:
             os.remove(raw)
             os.remove(blob)
-            os.remove(manifest)
-            print(f"archived + removed {rel}")
+            if manifest is not None:
+                os.remove(manifest)
+            tag = "" if manifest is not None else " [orphan, no manifest]"
+            print(f"archived + removed {rel}{tag}")
         else:
             print(f"archived (kept locally, {age_h:.1f}h old) {rel}")
         shipped += 1
 
     print()
-    print(f"sealed files found : {found}")
+    print(f"files found        : {found} ({orphans} orphaned, no manifest)")
     print(f"archived + verified: {shipped}")
     print(f"still being written: {open_files}")
     print(f"failed             : {failed}")
