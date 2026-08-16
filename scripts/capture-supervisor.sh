@@ -18,9 +18,9 @@
 
 set -uo pipefail
 
-BIN="${BIN:-/home/ubuntu/oq-capture}"
-ROOT="${ROOT:-/home/ubuntu/capture}"
-LOGDIR="${LOGDIR:-/home/ubuntu/oq/log/capture}"
+BIN="${BIN:-$HOME/oq-capture}"
+ROOT="${ROOT:-$HOME/capture}"
+LOGDIR="${LOGDIR:-$HOME/oq/log/capture}"
 FLOOR_GB="${FLOOR_GB:-8}"
 # Hourly, not daily: a daily file is only sealed at UTC midnight, so a
 # host that dies at 23:00 loses the day. Hourly bounds that to an hour.
