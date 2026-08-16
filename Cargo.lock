@@ -436,6 +436,7 @@ dependencies = [
 name = "oq-l2feed"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "libc",
  "oq-hash",
  "tungstenite",
  "ureq",
