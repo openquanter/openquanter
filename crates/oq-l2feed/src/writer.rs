@@ -329,6 +329,37 @@ impl CaptureWriter {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+
+        // Reopening a window that already holds records means a restart
+        // landed inside it, which with hourly rotation is what every
+        // restart does. Counting only from here would seal a manifest
+        // describing part of its own file -- a manifest that undercounts
+        // is worse than none, because nothing downstream can tell it is
+        // wrong, and the whole point of the manifest is to say whether
+        // an hour is complete.
+        //
+        // The accounting is rebuilt from the bytes rather than from the
+        // previous manifest: the file is the only thing that cannot be
+        // stale, and decoding also tolerates a torn tail left by a hard
+        // kill.
+        let mut builder = ManifestBuilder::new();
+        let existing = fs::read(&path).unwrap_or_default();
+        if !existing.is_empty() {
+            let (records, _torn) = crate::frame::decode_all(&existing)
+                .map_err(|e| io::Error::other(format!("cannot reopen {}: {e}", path.display())))?;
+            for record in &records {
+                builder.observe(record);
+            }
+        }
+
+        // Drop the previous manifest now that it no longer describes the
+        // file. If this process is killed before sealing, the archive
+        // should see an honest orphan rather than a manifest that lies.
+        let manifest_path = self.stream.manifest_for(&self.root, window);
+        if manifest_path.exists() {
+            fs::remove_file(&manifest_path)?;
+        }
+
         // Append rather than truncate: a restart continues the day, and
         // the seam is visible in the data through a session_start record
         // rather than inferred from file timestamps.
@@ -337,7 +368,7 @@ impl CaptureWriter {
             window,
             path,
             file: BufWriter::with_capacity(1 << 20, file),
-            builder: ManifestBuilder::new(),
+            builder,
             late_records: 0,
         });
         Ok(())

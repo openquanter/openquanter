@@ -108,11 +108,21 @@ def archivable(root, stale_minutes):
             if not name.endswith(".oqcap"):
                 continue
             raw = os.path.join(dirpath, name)
+
+            # An open descriptor beats every other signal, manifest
+            # included. A capture restarted mid-window reopens the
+            # window's file and appends to it, which leaves a manifest
+            # that is real but stale -- it describes fewer records than
+            # the file now holds. Trusting the manifest alone would
+            # upload and delete a file a live capture is still writing,
+            # and the process would go on writing to the unlinked inode
+            # until it exited.
+            if os.path.realpath(raw) in held:
+                continue
+
             manifest = raw[: -len(".oqcap")] + ".manifest.json"
             if os.path.exists(manifest):
                 yield raw, manifest
-            elif os.path.realpath(raw) in held:
-                continue  # a live capture owns it
             elif os.path.getmtime(raw) < cutoff:
                 yield raw, None
 

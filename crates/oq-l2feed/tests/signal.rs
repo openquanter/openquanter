@@ -136,3 +136,53 @@ fn tempdir() -> PathBuf {
     std::fs::create_dir_all(&base).expect("create temp dir");
     base
 }
+
+/// A restart inside a window must not leave the manifest undercounting.
+///
+/// With hourly rotation every restart lands mid-window, so this is the
+/// common case, not an edge one. A manifest that describes only the
+/// records written since the last restart is worse than no manifest at
+/// all: nothing downstream can tell that it is wrong, and its whole
+/// purpose is to answer "is this hour complete".
+#[test]
+fn reopening_a_window_keeps_the_manifest_describing_the_whole_file() {
+    let dir = tempdir().join("reopen");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stream = StreamId::new("binance-perp", "ETHUSDT", "trade");
+    let clock = FixedClock(1_786_000_000_000_000_000);
+
+    let write_some = |n: usize| {
+        let mut w = CaptureWriter::new(&dir, stream.clone(), software_for_writer())
+            .expect("open writer")
+            .with_rotation(Rotation::Daily);
+        for i in 0..n {
+            w.append(&oq_l2feed::frame::Record {
+                kind: Kind::Payload,
+                local_ts: clock.now_ns(),
+                exch_ts: clock.now_ns(),
+                payload: format!(r#"{{"i":{i}}}"#).into_bytes(),
+            })
+            .expect("append");
+        }
+        w.seal().expect("seal")
+    };
+
+    let first = write_some(10);
+    assert_eq!(first.manifest.records, 10);
+
+    // Second session appends to the same window's file.
+    let second = write_some(7);
+    assert_eq!(
+        second.manifest.records, 17,
+        "the manifest must count everything in the file, not just this session"
+    );
+
+    let bytes = std::fs::read(&second.path).expect("read file");
+    let (records, torn) = decode_all(&bytes).expect("decode");
+    assert_eq!(torn, 0);
+    assert_eq!(
+        records.len() as u64,
+        second.manifest.records,
+        "manifest and file must agree on how many records exist"
+    );
+}
