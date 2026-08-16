@@ -139,9 +139,13 @@ pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) ->
 
     for tick in ticks {
         let event = Event::Tick(*tick);
+        let mut tick_fills: Vec<Fill> = Vec::new();
         for out in kernel.apply(&event) {
             match out {
-                Output::Filled(f) => fills.push(*f),
+                Output::Filled(f) => {
+                    fills.push(*f);
+                    tick_fills.push(*f);
+                }
                 Output::Liquidated {
                     at,
                     price,
@@ -211,7 +215,14 @@ pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) ->
             equity: summary.equity,
             working: kernel.working().len(),
         };
+
+        // Fills first, then the tick. A strategy that manages a position
+        // must see its executions before it decides what to do next, and
+        // the context it sees already reflects them.
         intents.clear();
+        for fill in &tick_fills {
+            strategy.on_fill(fill, &ctx, &mut intents);
+        }
         strategy.on_tick(&ctx, &mut intents);
 
         for intent in &intents {
