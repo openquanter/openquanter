@@ -42,10 +42,13 @@ alive=0
 
 for sym in $SYMBOLS; do
   for st in $STREAMS; do
-    # Match on the exact flag pair so BTCUSDT never matches BTCUSDT-something
-    # and depth never matches a future depth20 stream.
-    if pgrep -f -- "--symbol $sym --stream $st\$" >/dev/null 2>&1 \
-       || pgrep -f -- "--symbol $sym --stream $st " >/dev/null 2>&1; then
+    # Match on root as well as symbol and stream. Without the root, a
+    # second generation started under a different archive root during an
+    # overlapping upgrade looks like the first one is already running,
+    # and nothing gets started -- silently turning a zero-gap upgrade
+    # into an ordinary one.
+    if pgrep -f -- "--root $ROOT --symbol $sym --stream $st\$" >/dev/null 2>&1 \
+       || pgrep -f -- "--root $ROOT --symbol $sym --stream $st " >/dev/null 2>&1; then
       alive=$((alive + 1))
       continue
     fi
@@ -59,7 +62,10 @@ for sym in $SYMBOLS; do
 done
 
 sleep 2
-running=$(pgrep -xc oq-capture 2>/dev/null) || running=0
+# Count only this root's generation. During an overlapping upgrade two
+# generations run at once, and a plain process-name count would report
+# double and never match the expected number.
+running=$(pgrep -fc -- "--root $ROOT --symbol " 2>/dev/null) || running=0
 expected=0
 for sym in $SYMBOLS; do
   for _st in $STREAMS; do expected=$((expected + 1)); done

@@ -61,6 +61,10 @@ struct OpenDay {
     builder: ManifestBuilder,
     /// Records that arrived after the day had already rolled over.
     late_records: u64,
+    /// `local_ts` of the last record already in the file when this
+    /// window was opened, for a window that was resumed rather than
+    /// started. `None` for a fresh file.
+    resumed_after: Option<i64>,
 }
 
 impl CaptureWriter {
@@ -237,7 +241,25 @@ impl CaptureWriter {
             &self.stream.symbol,
             &self.stream.stream,
         );
-        self.append(&Record::control(local_ts, payload))
+        let sealed = self.append(&Record::control(local_ts, payload))?;
+
+        // Starting a session in a window that already held records means
+        // this process replaced one that stopped. Nothing was listening
+        // in between, which is a gap in exactly the sense the manifest
+        // reports -- and until this was counted, an upgrade or a crash
+        // restart left a hole that the manifest described as `gaps: 0`.
+        // A reader checking that field would conclude the window was
+        // complete, which is the failure mode the field exists to
+        // prevent.
+        if let Some(open) = self.open.as_mut()
+            && let Some(previous) = open.resumed_after.take()
+        {
+            let outage = local_ts.saturating_sub(previous);
+            if outage > 0 {
+                open.builder.observe_gap(outage);
+            }
+        }
+        Ok(sealed)
     }
 
     /// Flush buffered bytes to the operating system.
@@ -363,6 +385,7 @@ impl CaptureWriter {
         // Append rather than truncate: a restart continues the day, and
         // the seam is visible in the data through a session_start record
         // rather than inferred from file timestamps.
+        let resumed_after = builder.local_last();
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         self.open = Some(OpenDay {
             window,
@@ -370,6 +393,7 @@ impl CaptureWriter {
             file: BufWriter::with_capacity(1 << 20, file),
             builder,
             late_records: 0,
+            resumed_after,
         });
         Ok(())
     }

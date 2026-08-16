@@ -105,6 +105,16 @@ impl ManifestBuilder {
         self.gap_ns_total += outage_ns;
     }
 
+    /// The `local_ts` of the last record observed, if any.
+    ///
+    /// Used to measure the silence between one capture session and the
+    /// next when a process restarts into a window that already holds
+    /// records.
+    #[must_use]
+    pub fn local_last(&self) -> Option<i64> {
+        self.local_last
+    }
+
     /// Account for a clock offset estimate.
     pub fn observe_clock_offset(&mut self, offset_ns: i64) {
         if !self.clock_seen {

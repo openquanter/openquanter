@@ -186,3 +186,58 @@ fn reopening_a_window_keeps_the_manifest_describing_the_whole_file() {
         "manifest and file must agree on how many records exist"
     );
 }
+
+/// A restart leaves a hole, and the manifest has to say so.
+///
+/// Until this was counted, `gaps: 0` meant "no disconnect while the
+/// process was running" while reading as "nothing is missing". An
+/// upgrade or a crash restart put a multi-minute hole in a window that
+/// the manifest still described as complete -- the exact conclusion the
+/// field exists to prevent a reader from drawing.
+#[test]
+fn a_restart_seam_is_counted_as_a_gap() {
+    let dir = tempdir().join("seam");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stream = StreamId::new("binance-perp", "BTCUSDT", "trade");
+
+    const SECOND: i64 = 1_000_000_000;
+    let t0 = 1_786_000_000_000_000_000i64;
+
+    let session = |start: i64, n: i64| {
+        let mut w = CaptureWriter::new(&dir, stream.clone(), software_for_writer())
+            .expect("open")
+            .with_rotation(Rotation::Daily);
+        w.append_session_start(start).expect("session start");
+        for i in 0..n {
+            w.append(&oq_l2feed::frame::Record {
+                kind: Kind::Payload,
+                local_ts: start + i * SECOND,
+                exch_ts: start + i * SECOND,
+                payload: b"{}".to_vec(),
+            })
+            .expect("append");
+        }
+        w.seal().expect("seal")
+    };
+
+    let first = session(t0, 5);
+    assert_eq!(
+        first.manifest.gaps, 0,
+        "a window opened fresh has nothing before it to be missing"
+    );
+
+    // Restart 90 seconds after the first session's last record.
+    let last_of_first = t0 + 4 * SECOND;
+    let restart_at = last_of_first + 90 * SECOND;
+    let second = session(restart_at, 5);
+
+    assert_eq!(
+        second.manifest.gaps, 1,
+        "the silence between two sessions in one window is a gap"
+    );
+    assert_eq!(
+        second.manifest.gap_ns_total,
+        90 * SECOND,
+        "and its length is the silence, measured from the last record to the restart"
+    );
+}
