@@ -35,6 +35,11 @@ BUDGETS=(
   "oq-data:0"
   "oq-parity:0"
   "oq-stats:0"
+  # The strategy contract. Zero, and it has to stay zero for a reason
+  # the other zeros do not share: this is the crate a user writes
+  # against. Anything that lands here is inherited by every strategy
+  # anyone ever writes, in backtest and in production alike.
+  "oq-strategy:0"
   # The bridge from captured archives to the tick format. It depends on
   # oq-l2feed and inherits its transitive tree, which is why it is a
   # separate crate: oq-data must stay at zero, and it would not if the

@@ -30,8 +30,8 @@
 //! describes neither.
 
 use crate::run::{MarginMode, RunConfig, RunResult, run};
-use crate::strategy::Strategy;
 use oq_engine::Tick;
+use oq_strategy::Strategy;
 use oq_types::{Cash, Nanos};
 
 /// The two arms and what separates them.
@@ -166,8 +166,8 @@ impl DeviationReport {
 mod tests {
     use super::*;
     use crate::run::{RunConfig, tick_at};
-    use crate::strategy::{Context, Intent};
     use oq_margin::{Contract, MarginTier, TierTable};
+    use oq_strategy::{Context, Intent};
     use oq_types::{InstrumentId, OrderId, QtyLots, Ratio, Side};
 
     const BTC: Contract = Contract::new(10_000);

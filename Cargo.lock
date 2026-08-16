@@ -380,6 +380,7 @@ dependencies = [
  "oq-core",
  "oq-engine",
  "oq-margin",
+ "oq-strategy",
  "oq-types",
 ]
 
@@ -478,6 +479,14 @@ dependencies = [
 [[package]]
 name = "oq-stats"
 version = "2.0.0-alpha.1"
+
+[[package]]
+name = "oq-strategy"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "oq-engine",
+ "oq-types",
+]
 
 [[package]]
 name = "oq-types"

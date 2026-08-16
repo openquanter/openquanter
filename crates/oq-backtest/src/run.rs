@@ -18,10 +18,10 @@
 //! control arm of an experiment, and it is what most published backtest
 //! results silently are.
 
-use crate::strategy::{Context, Intent, Strategy};
 use oq_core::{Event, Kernel, Output, State};
 use oq_engine::Tick;
 use oq_margin::{Contract, FundingSchedule, TierTable};
+use oq_strategy::{Context, Intent, Strategy};
 use oq_types::{Cash, Fill, InstrumentId, Nanos, PriceTicks, QtyLots, Stamp};
 
 /// Whether the venue is allowed to close the account.
@@ -354,7 +354,7 @@ pub fn tick_at(ns: i64, last: i64, high: i64, low: i64) -> Tick {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::Intent;
+    use oq_strategy::Intent;
     use oq_types::{OrderId, Side};
 
     const BTC: Contract = Contract::new(10_000);

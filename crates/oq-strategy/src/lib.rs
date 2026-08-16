@@ -16,6 +16,23 @@
 //! would add — indicators, position sizing, schedulers — is a library
 //! on top of this, not a widening of the boundary the engine has to
 //! trust.
+//!
+//! # Why this is its own crate
+//!
+//! It lived in `oq-backtest` until it had a second caller in sight. A
+//! strategy that can only be defined inside the backtest host is a
+//! strategy the live host cannot run without depending on the backtest
+//! host, and the alternative — a second trait for live — is the exact
+//! shape that makes "the same strategy, unchanged, in both modes"
+//! unprovable. Moving it below both hosts is cheap while the only
+//! implementations are in this repository and gets steadily more
+//! expensive afterwards, so it happened before the live host existed
+//! rather than during it.
+//!
+//! The dependencies are the floor: `oq-types` for the domain types and
+//! `oq-engine` for the observation a strategy is handed. Both are plain
+//! std Rust, so writing a strategy compiles three small crates and
+//! nothing else — no journal, no margin tables, no venue client.
 
 use oq_types::{Fill, Offset, OrderId, PriceTicks, QtyLots, Side};
 
