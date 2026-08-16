@@ -48,6 +48,13 @@ BUDGETS=(
   # Speaks WebSocket and HTTP to a venue, so it carries a TLS stack.
   # Isolated here on purpose: the engine must not inherit it.
   "oq-l2feed:60"
+  # Reads an account over HTTPS, so it carries a TLS stack for the same
+  # reason oq-l2feed does — and the same ureq, so this adds no tree the
+  # workspace was not already carrying. Signing and JSON reading are
+  # written out by hand rather than pulled in: this is the crate that
+  # holds the API secret, and every dependency here is one more thing
+  # trusted with it.
+  "oq-gateway:40"
 )
 
 third_party_count() {

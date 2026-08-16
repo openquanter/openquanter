@@ -421,6 +421,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oq-gateway"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "oq-hash",
+ "ureq",
+]
+
+[[package]]
 name = "oq-hash"
 version = "2.0.0-alpha.1"
 

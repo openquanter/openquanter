@@ -12,6 +12,7 @@
 //! from the workspace alone is a weak link.
 
 pub mod crc32;
+pub mod hmac;
 pub mod sha256;
 
 pub use crc32::crc32;

@@ -1,0 +1,15 @@
+[package]
+name = "oq-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Venue adapter: account access and reconciliation. Read-only for now."
+
+[dependencies]
+oq-hash.workspace = true
+ureq = "3.4"
+
+[lints]
+workspace = true
