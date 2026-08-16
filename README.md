@@ -133,11 +133,19 @@ Pre-alpha, and specific about it. **Built and tested today:**
   strategy twice and quantifies what a margin-free run overstates.
 - **Data plane** — dual timestamps, leakage-free as-of joins, bitemporal
   reference data.
-- **Capture** — verbatim venue records with local timestamps, UTC-day
-  sealing, manifests with content hashes. Proven against a live venue.
-  `oq-book-check` replays an archive back into an order book, because
-  bytes on disk prove the messages arrived and only a reconstruction
-  proves they can be used.
+- **Capture** — verbatim venue records with local timestamps, UTC-day or
+  hourly sealing, manifests with content hashes. Proven against a live
+  venue. A venue is an adapter: which streams to subscribe, how the
+  subscription is confirmed, where the exchange timestamp sits, and the
+  quoting precision of each instrument. `oq-book-check` replays an
+  archive back into an order book, because bytes on disk prove the
+  messages arrived and only a reconstruction proves they can be used.
+- **Capture to backtest** — `oq-ingest` folds captured depth and trades
+  into the tick format the engine replays. Conversion is deliberately
+  lossy: a window of L2 becomes a best bid and a best ask, and the raw
+  archive stays the record. Verified on a real captured day — 978,118
+  depth updates and 127,276 trades became 26,237 one-second ticks with
+  no unreadable payload.
 - **Statistics** — deflated Sharpe ratio, probability of backtest
   overfitting, trial registry.
 - **Parity** — trade-by-trade diffing with difference attribution, over

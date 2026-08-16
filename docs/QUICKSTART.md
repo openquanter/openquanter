@@ -174,6 +174,40 @@ See [Capture Format](CAPTURE-FORMAT.md) for the archive layout, the
 sealing and verification pipeline, and what the venue actually serves —
 including the streams that accept a subscription and then send nothing.
 
+## 7. Backtest on what you captured
+
+An archive is not yet something the engine reads. `oq-ingest` folds
+captured depth and trades into the tick format a backtest replays:
+
+```bash
+cargo run --bin oq-ingest -- \
+  --archive ./archive/binance-perp/BTCUSDT --day 2026-08-16 --out btc.ticks
+```
+
+It reports what it built — windows emitted, how many carried a trade,
+gap markers seen, payloads it could not read — so a thin conversion is
+visible rather than quietly small. `--window-ms` sets the window; one
+second is the default.
+
+The conversion is lossy on purpose. A window of L2 depth becomes a best
+bid and a best ask, and the book behind them is dropped. That is only an
+acceptable trade because the archive is kept: the capture is the record,
+and this is a projection of it for the strategies a projection can
+carry. Strategies that need the book itself need the L2 fidelity tier,
+which does not exist yet — a richer tick would not substitute for it.
+
+Two conventions matter if you read the output directly. Extremes belong
+to their own window: `high` and `low` are the highest and lowest trades
+*inside* a window, never a running maximum carried forward. Volume
+accumulates, so per-window volume is the difference between consecutive
+ticks; a difference that comes out negative means the venue reset its
+counter rather than that trades were undone.
+
+Quoting precision comes from the venue's instrument table rather than a
+default, because a wrong scale does not fail — it silently rescales
+every price. If the instrument is unknown, the tool stops instead of
+guessing.
+
 ## What to read next
 
 | If you want to | Read |
