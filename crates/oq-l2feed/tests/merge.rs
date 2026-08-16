@@ -136,7 +136,10 @@ fn merge_covers_the_union_exactly_once() {
     let records_field = text
         .split("\"records\"")
         .nth(1)
-        .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()))
+        .and_then(|s| {
+            s.split(|c: char| !c.is_ascii_digit())
+                .find(|s| !s.is_empty())
+        })
         .expect("records field");
     assert_eq!(
         records_field.parse::<usize>().unwrap(),

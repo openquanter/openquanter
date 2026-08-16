@@ -117,8 +117,7 @@ fn sigterm_stops_the_capture_and_keeps_what_it_received() {
     assert_eq!(torn, 0, "a sealed file must not end mid-record");
     let payloads = records.iter().filter(|r| r.kind == Kind::Payload).count();
     assert_eq!(
-        payloads as u64,
-        stats.payloads,
+        payloads as u64, stats.payloads,
         "every received payload must survive the signal"
     );
     assert!(

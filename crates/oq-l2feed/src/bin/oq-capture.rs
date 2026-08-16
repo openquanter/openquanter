@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use oq_l2feed::day::Rotation;
-use oq_l2feed::session::{install_signal_handlers, SessionConfig, StopReason, run};
+use oq_l2feed::session::{SessionConfig, StopReason, install_signal_handlers, run};
 use oq_l2feed::stream::{Software, StreamId};
 use oq_l2feed::venue::{binance_perp_polls, binance_perp_streams, binance_perp_url};
 use oq_l2feed::writer::CaptureWriter;

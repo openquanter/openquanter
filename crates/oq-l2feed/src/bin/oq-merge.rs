@@ -281,10 +281,7 @@ fn merge_one(
         option_env!("OQ_BUILD_COMMIT").unwrap_or("unknown"),
     );
     let manifest = builder.build(&stream, window, &software, &bytes);
-    std::fs::write(
-        out_root.join(stream_manifest_rel(rel)),
-        manifest.to_json(),
-    )?;
+    std::fs::write(out_root.join(stream_manifest_rel(rel)), manifest.to_json())?;
 
     Ok(stats)
 }

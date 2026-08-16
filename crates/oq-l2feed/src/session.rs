@@ -20,9 +20,9 @@
 //! be either too slow to recover or fast enough to get rate-limited at
 //! the worst moment.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::frame::Record;
