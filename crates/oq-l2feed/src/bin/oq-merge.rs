@@ -278,7 +278,7 @@ fn merge_one(
 
     let software = Software::new(
         concat!("oq-merge ", env!("CARGO_PKG_VERSION")),
-        option_env!("OQ_COMMIT").unwrap_or("unknown"),
+        option_env!("OQ_BUILD_COMMIT").unwrap_or("unknown"),
     );
     let manifest = builder.build(&stream, window, &software, &bytes);
     std::fs::write(

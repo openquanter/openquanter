@@ -45,3 +45,19 @@ cargo clippy -p oq-l2feed --all-targets -- -D warnings
 - Torn-tail semantics live in `frame::decode_all`: a truncated *final*
   record means the writer died mid-append and reading stops cleanly; a
   checksum failure anywhere earlier is corruption and errors.
+
+## Building for deployment
+
+Set `OQ_BUILD_COMMIT` when building anything that will write an
+archive:
+
+```sh
+OQ_BUILD_COMMIT=$(git rev-parse --short HEAD) \
+  cargo build --release -p oq-l2feed
+```
+
+It lands in every manifest as `capture_commit`, and it is the first
+thing anyone asks when a file looks wrong six months later. Without it
+the field reads `unknown`, which is worse than it sounds: the archive
+then cannot say which build produced it, and a capture bug becomes
+impossible to scope to the window it affected.
