@@ -11,6 +11,7 @@ document links to its counterpart at the top.
 | [Requirements Specification](REQUIREMENTS.md) · [中文](REQUIREMENTS.zh-CN.md) | Positioning, users, functional and non-functional requirements, acceptance goals, fidelity ladder, non-goals |
 | [Roadmap](ROADMAP.md) · [中文](ROADMAP.zh-CN.md) | Milestones M0–M5 and 1.0, entry triggers and exit gates, release cadence, risk register |
 | [Implementation Plan](IMPLEMENTATION.md) · [中文](IMPLEMENTATION.zh-CN.md) | Architecture, design decisions, crate map, phase-by-phase task plan, testing strategy, performance budgets |
+| [Tick Format](TICK-FORMAT.md) · [中文](TICK-FORMAT.zh-CN.md) | The on-disk format a backtest reads: layout, the append-only field rule, integrity versus identity |
 | [Capture Format](CAPTURE-FORMAT.md) · [中文](CAPTURE-FORMAT.zh-CN.md) | Record framing, control records, daily sealing, archival verification, volume planning |
 
 ## Reading order
