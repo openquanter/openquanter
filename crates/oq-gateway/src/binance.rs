@@ -25,6 +25,11 @@ use oq_hash::hmac::hmac_sha256_hex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::creds::Credentials;
+use crate::exec::{
+    Endpoint, Execution, NewOrder, OrderAck, OrderUpdate, Placed, Reject, Unresolved, UserEvent,
+    UserStream, decimal,
+};
+use oq_types::{Instrument, Side, TimeInForce};
 
 /// Anything that stops a read from producing an answer.
 #[derive(Debug)]
@@ -110,7 +115,20 @@ pub struct Trade {
     pub maker: bool,
 }
 
-/// A read-only client.
+/// Which HTTP verb a request uses.
+///
+/// Named rather than passed as a string: the difference between a read
+/// and a write is the difference this crate is most careful about, and
+/// a typo in a string is not a difference the compiler notices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Method {
+    Get,
+    Post,
+    Put,
+    Delete,
+}
+
+/// A client for one deployment of the venue.
 pub struct Binance {
     base: String,
     creds: Credentials,
@@ -124,6 +142,20 @@ impl Binance {
     pub const MAINNET: &'static str = "https://fapi.binance.com";
     /// The testnet, which is where anything new should be pointed first.
     pub const TESTNET: &'static str = "https://testnet.binancefuture.com";
+
+    /// Build a client against a named deployment.
+    ///
+    /// Preferred over [`Binance::new`] wherever the choice is between
+    /// test and production, because a string that is wrong by one
+    /// character is production and an enum cannot be.
+    #[must_use]
+    pub fn at(endpoint: Endpoint, creds: Credentials) -> Self {
+        let base = match endpoint {
+            Endpoint::Testnet => Self::TESTNET,
+            Endpoint::Live => Self::MAINNET,
+        };
+        Self::new(base, creds)
+    }
 
     /// Build a client against `base`.
     #[must_use]
@@ -303,11 +335,50 @@ impl Binance {
     }
 
     fn send(&self, url: &str, signed: bool) -> Result<String, VenueError> {
-        let mut req = self.agent.get(url);
-        if signed {
-            req = req.header("X-MBX-APIKEY", self.creds.key());
-        }
-        match req.call() {
+        self.send_method(Method::Get, url, signed)
+    }
+
+    /// Send with an explicit method.
+    ///
+    /// Split out rather than folded into [`Binance::send`] so that the
+    /// crate's read paths keep calling something that can only issue a
+    /// GET. A write is a different call, and a reviewer sees it.
+    fn send_method(&self, method: Method, url: &str, signed: bool) -> Result<String, VenueError> {
+        // Each arm builds and sends in place: the builders are
+        // different types per verb, and a POST carries a body where the
+        // others do not.
+        let key = self.creds.key();
+        let sent = match method {
+            Method::Get => {
+                let mut r = self.agent.get(url);
+                if signed {
+                    r = r.header("X-MBX-APIKEY", key);
+                }
+                r.call()
+            }
+            Method::Delete => {
+                let mut r = self.agent.delete(url);
+                if signed {
+                    r = r.header("X-MBX-APIKEY", key);
+                }
+                r.call()
+            }
+            Method::Post => {
+                let mut r = self.agent.post(url);
+                if signed {
+                    r = r.header("X-MBX-APIKEY", key);
+                }
+                r.send_empty()
+            }
+            Method::Put => {
+                let mut r = self.agent.put(url);
+                if signed {
+                    r = r.header("X-MBX-APIKEY", key);
+                }
+                r.send_empty()
+            }
+        };
+        match sent {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
                 let body = resp
@@ -670,5 +741,511 @@ mod tests {
     fn a_failed_request_does_not_report_its_signature() {
         let url = "https://fapi.binance.com/fapi/v2/account?timestamp=1&signature=deadbeef";
         assert_eq!(redact(url), "https://fapi.binance.com/fapi/v2/account");
+    }
+}
+
+// ---------------------------------------------------------------------
+// Order entry.
+//
+// Kept at the end of the file and behind its own trait implementation
+// rather than mixed into the read methods above, because the difference
+// between reading an account and moving money is the difference this
+// crate is most careful about, and it should be visible in the diff
+// that introduces it.
+// ---------------------------------------------------------------------
+
+/// What a venue's answer means, decided without a network.
+///
+/// Separated from the request so the classification can be tested
+/// exhaustively against recorded bodies. Getting it wrong is not a
+/// visible failure: a refusal read as unknown causes a pointless query,
+/// and an unknown read as a refusal causes a duplicate order.
+fn classify(status: u16, body: &str, client_id: &str) -> Placed {
+    // 5xx is the venue failing to answer, not answering "no". The
+    // request may well have been processed before it fell over.
+    if (500..600).contains(&status) {
+        return Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!("venue returned {status}"),
+        });
+    }
+    // A 4xx carrying the venue's own error code is a decision: the
+    // order does not exist, and an identical retry gets an identical
+    // refusal.
+    if let Some(code) = field_i64(body, "code") {
+        return Placed::Rejected(Reject {
+            code: Some(code),
+            message: field_str(body, "msg").unwrap_or_else(|| body.trim().to_string()),
+        });
+    }
+    // A refusal that does not say why is not a refusal anyone can act
+    // on. Treated as unknown, which costs a query and cannot cost a
+    // duplicate position.
+    Placed::Unknown(Unresolved {
+        client_id: client_id.to_string(),
+        reason: format!("venue returned {status} without an error code"),
+    })
+}
+
+/// Read an acknowledgement out of a success body.
+///
+/// A 2xx whose fields cannot be read is *not* a success: the order
+/// exists and this build cannot name it. That is precisely the unknown
+/// case, and the client id is how it gets resolved.
+fn ack_from(body: &str, client_id: &str) -> Placed {
+    match (
+        field_i64(body, "orderId"),
+        field_str(body, "clientOrderId"),
+        field_str(body, "status"),
+    ) {
+        (Some(venue_id), Some(echoed), Some(status)) => Placed::Accepted(OrderAck {
+            venue_id,
+            client_id: echoed,
+            status,
+            executed_qty: field_str(body, "executedQty").unwrap_or_else(|| "0".to_string()),
+        }),
+        _ => Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: "venue accepted the order but its answer could not be read".to_string(),
+        }),
+    }
+}
+
+/// Binance accepts `^[\.A-Z:/a-z0-9_-]{1,36}$` here, and rejects the
+/// rest with a message about the signature rather than about the id.
+///
+/// Checked before sending rather than after being refused, because an
+/// id containing `&` or `=` would not merely be invalid — it would
+/// change the meaning of the signed query.
+fn valid_client_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 36
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b':' | b'/' | b'_' | b'-'))
+}
+
+/// The query for a new order, without timestamp or signature.
+fn order_query(order: &NewOrder, instrument: &Instrument) -> String {
+    let side = match order.side {
+        Side::Buy => "BUY",
+        Side::Sell => "SELL",
+    };
+    let qty = decimal(order.qty.0.abs(), instrument.qty_scale);
+    let mut q = format!(
+        "symbol={}&side={side}&quantity={qty}&newClientOrderId={}",
+        order.symbol, order.client_id
+    );
+    match order.limit_price {
+        Some(price) => {
+            let tif = match order.tif {
+                TimeInForce::GoodTilCancel => "GTC",
+                TimeInForce::ImmediateOrCancel => "IOC",
+                TimeInForce::FillOrKill => "FOK",
+            };
+            q.push_str(&format!(
+                "&type=LIMIT&price={}&timeInForce={tif}",
+                decimal(price.0, instrument.price_scale)
+            ));
+        }
+        None => q.push_str("&type=MARKET"),
+    }
+    if order.reduce_only {
+        q.push_str("&reduceOnly=true");
+    }
+    q
+}
+
+impl Execution for Binance {
+    fn place(&self, order: &NewOrder, instrument: &Instrument) -> Placed {
+        if !valid_client_id(&order.client_id) {
+            // Refused here rather than by the venue. Sending it would
+            // not merely fail: an id containing `&` or `=` rewrites the
+            // query that gets signed.
+            return Placed::Rejected(Reject {
+                code: None,
+                message: format!(
+                    "client id {:?} is not usable: 1-36 characters of [A-Za-z0-9._:/-]",
+                    order.client_id
+                ),
+            });
+        }
+        let url = signed_url(
+            &self.base,
+            "/fapi/v1/order",
+            &order_query(order, instrument),
+            now_ms() + self.clock_offset_ms,
+            self.creds.secret_bytes(),
+        );
+        match self.send_method(Method::Post, &url, true) {
+            Ok(body) => ack_from(&body, &order.client_id),
+            Err(VenueError::Venue { status, body }) => classify(status, &body, &order.client_id),
+            Err(e) => Placed::Unknown(Unresolved {
+                client_id: order.client_id.clone(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    fn cancel(&self, symbol: &str, client_id: &str) -> Placed {
+        let url = signed_url(
+            &self.base,
+            "/fapi/v1/order",
+            &format!("symbol={symbol}&origClientOrderId={client_id}"),
+            now_ms() + self.clock_offset_ms,
+            self.creds.secret_bytes(),
+        );
+        match self.send_method(Method::Delete, &url, true) {
+            Ok(body) => ack_from(&body, client_id),
+            Err(VenueError::Venue { status, body }) => classify(status, &body, client_id),
+            Err(e) => Placed::Unknown(Unresolved {
+                client_id: client_id.to_string(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    fn order_status(&self, symbol: &str, client_id: &str) -> Result<Option<OrderAck>, VenueError> {
+        let body = match self.get_signed(
+            "/fapi/v1/order",
+            &format!("symbol={symbol}&origClientOrderId={client_id}"),
+        ) {
+            Ok(b) => b,
+            // -2013 is the venue saying it has never heard of this id,
+            // which after an unknown placement is the answer that the
+            // order never landed. Any other refusal is a real error and
+            // must not be read as "no such order".
+            Err(VenueError::Venue { status, body }) if field_i64(&body, "code") == Some(-2013) => {
+                let _ = status;
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        match ack_from(&body, client_id) {
+            Placed::Accepted(ack) => Ok(Some(ack)),
+            _ => Err(malformed("order status", &body)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod order_entry {
+    use super::*;
+    use oq_types::{PriceTicks, QtyLots};
+
+    fn btc() -> Instrument {
+        // 0.01 USDT price steps, 0.001 BTC quantity steps.
+        Instrument::linear(2, 3)
+    }
+
+    fn limit() -> NewOrder {
+        NewOrder {
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            limit_price: Some(PriceTicks(12_000_000)),
+            qty: QtyLots(2),
+            tif: TimeInForce::GoodTilCancel,
+            client_id: "oq-1".into(),
+            reduce_only: false,
+        }
+    }
+
+    #[test]
+    fn a_server_error_is_unknown_because_it_may_have_been_processed() {
+        // The failure that produces duplicate positions if read as a
+        // refusal: the venue fell over, possibly after accepting.
+        let p = classify(502, "Bad Gateway", "oq-1");
+        assert!(matches!(p, Placed::Unknown(_)), "got {p:?}");
+    }
+
+    #[test]
+    fn a_refusal_that_names_its_code_is_final() {
+        let body = r#"{"code":-2019,"msg":"Margin is insufficient."}"#;
+        match classify(400, body, "oq-1") {
+            Placed::Rejected(r) => {
+                assert_eq!(r.code, Some(-2019));
+                assert_eq!(r.message, "Margin is insufficient.");
+            }
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refusal_with_no_code_is_unknown_rather_than_assumed_final() {
+        // Costs a query. Assuming it final costs a live order nobody
+        // is tracking.
+        let p = classify(400, "<html>gateway timeout</html>", "oq-1");
+        assert!(matches!(p, Placed::Unknown(_)), "got {p:?}");
+    }
+
+    #[test]
+    fn an_acceptance_is_read_into_an_ack() {
+        let body =
+            r#"{"orderId":283194212,"clientOrderId":"oq-1","status":"NEW","executedQty":"0.000"}"#;
+        match ack_from(body, "oq-1") {
+            Placed::Accepted(a) => {
+                assert_eq!(a.venue_id, 283_194_212);
+                assert_eq!(a.client_id, "oq-1");
+                assert_eq!(a.status, "NEW");
+                assert_eq!(a.executed_qty, "0.000");
+            }
+            other => panic!("expected an acceptance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_success_that_cannot_be_read_is_unknown_not_success() {
+        // The order exists and this build cannot name it. Reporting
+        // success would lose it; reporting failure would duplicate it.
+        let p = ack_from(r#"{"orderId":283194212}"#, "oq-1");
+        assert!(matches!(p, Placed::Unknown(_)), "got {p:?}");
+    }
+
+    #[test]
+    fn a_limit_order_carries_its_price_and_time_in_force() {
+        let q = order_query(&limit(), &btc());
+        assert!(q.contains("type=LIMIT"), "{q}");
+        assert!(q.contains("price=120000.00"), "{q}");
+        assert!(q.contains("timeInForce=GTC"), "{q}");
+        assert!(q.contains("quantity=0.002"), "{q}");
+        assert!(q.contains("newClientOrderId=oq-1"), "{q}");
+        assert!(!q.contains("reduceOnly"), "{q}");
+    }
+
+    #[test]
+    fn a_market_order_names_no_price_at_all() {
+        // Not a price of zero. A zero that reaches a venue as a price
+        // is an order to buy at nothing.
+        let mut o = limit();
+        o.limit_price = None;
+        let q = order_query(&o, &btc());
+        assert!(q.contains("type=MARKET"), "{q}");
+        assert!(!q.contains("price="), "{q}");
+        assert!(!q.contains("timeInForce"), "{q}");
+    }
+
+    #[test]
+    fn a_short_sends_a_positive_quantity_and_a_sell_side() {
+        // The sign lives in the side. A negative quantity in the query
+        // is refused by the venue with a message about the quantity,
+        // which is a long way from the code that produced the sign.
+        let mut o = limit();
+        o.side = Side::Sell;
+        o.qty = QtyLots(-2);
+        let q = order_query(&o, &btc());
+        assert!(q.contains("side=SELL"), "{q}");
+        assert!(q.contains("quantity=0.002"), "{q}");
+    }
+
+    #[test]
+    fn a_client_id_that_could_rewrite_the_query_is_refused_before_sending() {
+        // `&` and `=` are the characters that matter: an id carrying
+        // them does not produce an invalid request, it produces a
+        // different one — and the signature covers the different one.
+        for bad in ["oq&quantity=99", "oq=1", "", &"x".repeat(37)] {
+            assert!(!valid_client_id(bad), "{bad:?} must not be accepted");
+        }
+        for good in ["oq-1", "oq_1", "a.b:c/d", &"y".repeat(36)] {
+            assert!(valid_client_id(good), "{good:?} must be accepted");
+        }
+    }
+
+    #[test]
+    fn the_signature_covers_the_order_parameters() {
+        // The invariant the read paths already assert, restated for the
+        // path that moves money: the bytes signed are the bytes sent,
+        // so a quantity cannot be altered after signing.
+        let url = signed_url(
+            "https://example.test",
+            "/fapi/v1/order",
+            &order_query(&limit(), &btc()),
+            1_700_000_000_000,
+            b"secret",
+        );
+        let (before_sig, sig) = url.split_once("&signature=").expect("signature present");
+        let query = before_sig.split_once('?').expect("query present").1;
+        assert_eq!(sig, hmac_sha256_hex(b"secret", query.as_bytes()));
+        assert!(query.contains("quantity=0.002"), "{query}");
+    }
+}
+
+// ---------------------------------------------------------------------
+// User data stream.
+//
+// The key is fetched over HTTPS and the events arrive over a websocket,
+// which is the shape the venue forces: nothing can be sent on the
+// socket, and nothing can be heard without it.
+// ---------------------------------------------------------------------
+
+impl Binance {
+    /// Mainnet user data stream host.
+    pub const MAINNET_STREAM: &'static str = "wss://fstream.binance.com";
+    /// Testnet user data stream host.
+    pub const TESTNET_STREAM: &'static str = "wss://stream.binancefuture.com";
+
+    /// The stream host matching this client's REST base.
+    ///
+    /// Derived rather than configured, so a client pointed at the
+    /// testnet cannot end up listening to production — a mismatch that
+    /// would show as an account that never trades while orders fill.
+    #[must_use]
+    pub fn stream_host(&self) -> &'static str {
+        if self.base == Self::TESTNET {
+            Self::TESTNET_STREAM
+        } else {
+            Self::MAINNET_STREAM
+        }
+    }
+
+    /// Open a user data stream and return where to connect.
+    ///
+    /// # Errors
+    /// Anything the request reports, or a body without a key.
+    pub fn open_user_stream(&self) -> Result<UserStream, VenueError> {
+        let url = format!("{}/fapi/v1/listenKey", self.base);
+        let body = self.send_method(Method::Post, &url, true)?;
+        let key = field_str(&body, "listenKey").ok_or_else(|| malformed("listen key", &body))?;
+        Ok(UserStream::new(
+            format!("{}/ws/{key}", self.stream_host()),
+            key,
+        ))
+    }
+
+    /// Renew a stream's key.
+    ///
+    /// The key lasts an hour. Renewal is not housekeeping: a stream
+    /// whose key lapsed stops delivering, and a consumer that treats
+    /// quiet as calm will trade against a position that has moved.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    pub fn keepalive_user_stream(&self) -> Result<(), VenueError> {
+        let url = format!("{}/fapi/v1/listenKey", self.base);
+        self.send_method(Method::Put, &url, true).map(|_| ())
+    }
+
+    /// Close a user data stream.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    pub fn close_user_stream(&self) -> Result<(), VenueError> {
+        let url = format!("{}/fapi/v1/listenKey", self.base);
+        self.send_method(Method::Delete, &url, true).map(|_| ())
+    }
+}
+
+/// Read one message from the user data stream.
+///
+/// Pure, so every event this build claims to understand is checked
+/// against a recorded message without a socket. Returns `None` for
+/// messages that are not account events at all — the venue also sends
+/// responses to subscription frames down the same connection.
+#[must_use]
+pub fn parse_user_event(payload: &str) -> Option<UserEvent> {
+    let kind = field_str(payload, "e")?;
+    match kind.as_str() {
+        "ORDER_TRADE_UPDATE" => {
+            // The order sits under "o"; every field below is inside it,
+            // and the outer object carries only the type and the times.
+            let inner = payload.split_once(r#""o":{"#).map(|(_, rest)| rest)?;
+            Some(UserEvent::Order(OrderUpdate {
+                symbol: field_str(inner, "s")?,
+                client_id: field_str(inner, "c")?,
+                venue_id: field_i64(inner, "i")?,
+                status: field_str(inner, "X")?,
+                last_qty: field_str(inner, "l").unwrap_or_else(|| "0".into()),
+                cumulative_qty: field_str(inner, "z").unwrap_or_else(|| "0".into()),
+                last_price: field_str(inner, "L").unwrap_or_else(|| "0".into()),
+                // Absent, or -1 when the event is not a fill. Both mean
+                // the same thing and both must map to None, or a
+                // deduplication table acquires an entry for "-1" that
+                // swallows every subsequent non-fill.
+                trade_id: field_i64(inner, "t").filter(|id| *id > 0),
+                event_ms: field_i64(payload, "E").unwrap_or_default(),
+            }))
+        }
+        "listenKeyExpired" => Some(UserEvent::Expired),
+        other => Some(UserEvent::Other {
+            kind: other.to_string(),
+            payload: payload.to_string(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod user_stream {
+    use super::*;
+
+    const FILL: &str = r#"{"e":"ORDER_TRADE_UPDATE","E":1786891783639,"T":1786891783630,"o":{"s":"BTCUSDT","c":"oq-1","S":"BUY","o":"LIMIT","f":"GTC","q":"0.002","p":"120000.00","X":"FILLED","i":283194212,"l":"0.002","z":"0.002","L":"119999.90","t":481923,"n":"0.00479999","N":"USDT"}}"#;
+
+    #[test]
+    fn a_fill_carries_the_ids_that_join_it_to_an_order_and_deduplicate_it() {
+        match parse_user_event(FILL) {
+            Some(UserEvent::Order(u)) => {
+                assert_eq!(u.client_id, "oq-1", "the id the caller chose");
+                assert_eq!(u.venue_id, 283_194_212);
+                assert_eq!(u.status, "FILLED");
+                assert_eq!(u.cumulative_qty, "0.002");
+                assert_eq!(u.last_price, "119999.90");
+                assert_eq!(u.trade_id, Some(481_923), "the deduplication key");
+                assert_eq!(u.event_ms, 1_786_891_783_639);
+            }
+            other => panic!("expected an order update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_fill_has_no_trade_id_rather_than_a_sentinel_one() {
+        // The venue sends -1 here for events that are not fills.
+        // Keeping it would put a row keyed "-1" in the deduplication
+        // table, and the second non-fill would be discarded as a
+        // duplicate of the first.
+        let placed = FILL.replace(r#""t":481923"#, r#""t":-1"#);
+        match parse_user_event(&placed) {
+            Some(UserEvent::Order(u)) => assert_eq!(u.trade_id, None),
+            other => panic!("expected an order update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_expired_key_is_an_event_and_not_silence() {
+        assert_eq!(
+            parse_user_event(r#"{"e":"listenKeyExpired","E":1786891783639}"#),
+            Some(UserEvent::Expired)
+        );
+    }
+
+    #[test]
+    fn an_unmapped_event_is_kept_whole_rather_than_dropped() {
+        let m = r#"{"e":"ACCOUNT_UPDATE","E":1,"a":{"B":[]}}"#;
+        match parse_user_event(m) {
+            Some(UserEvent::Other { kind, payload }) => {
+                assert_eq!(kind, "ACCOUNT_UPDATE");
+                assert_eq!(payload, m, "the whole message survives for a reader");
+            }
+            other => panic!("expected an unmapped event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn something_that_is_not_an_account_event_is_none() {
+        assert_eq!(parse_user_event(r#"{"result":null,"id":1}"#), None);
+    }
+
+    #[test]
+    fn the_stream_host_follows_the_rest_base() {
+        // A client pointed at the testnet must not listen to production.
+        let creds = Credentials::new("k", "s");
+        let test = Binance::at(Endpoint::Testnet, creds);
+        assert_eq!(test.stream_host(), Binance::TESTNET_STREAM);
+        let live = Binance::at(Endpoint::Live, Credentials::new("k", "s"));
+        assert_eq!(live.stream_host(), Binance::MAINNET_STREAM);
+    }
+
+    #[test]
+    fn a_stream_does_not_print_its_own_credential() {
+        let s = UserStream::new("wss://x/ws/SECRETKEY".into(), "SECRETKEY".into());
+        let shown = format!("{s:?}");
+        assert!(!shown.contains("SECRETKEY"), "{shown}");
     }
 }
