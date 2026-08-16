@@ -12,6 +12,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::day::UtcDay;
 use crate::frame::Record;
@@ -38,7 +39,17 @@ pub struct CaptureWriter {
     stream: StreamId,
     software: Software,
     open: Option<OpenDay>,
+    /// The day that just rolled over, kept open for late arrivals.
+    previous: Option<OpenDay>,
+    /// How far into a new day late records for the previous one are
+    /// still accepted.
+    grace_ns: i64,
 }
+
+/// Default grace period after a day boundary: one minute, which covers
+/// clock skew between the venue and the host plus a reconnect backlog,
+/// and is far short of anything that would blur two days together.
+pub const DEFAULT_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 struct OpenDay {
@@ -46,6 +57,8 @@ struct OpenDay {
     path: PathBuf,
     file: BufWriter<File>,
     builder: ManifestBuilder,
+    /// Records that arrived after the day had already rolled over.
+    late_records: u64,
 }
 
 impl CaptureWriter {
@@ -62,7 +75,16 @@ impl CaptureWriter {
             stream,
             software,
             open: None,
+            previous: None,
+            grace_ns: i64::try_from(DEFAULT_GRACE.as_nanos()).unwrap_or(i64::MAX),
         })
+    }
+
+    /// Set how long the previous day stays open for late records.
+    #[must_use]
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.grace_ns = i64::try_from(grace.as_nanos()).unwrap_or(i64::MAX);
+        self
     }
 
     /// Append a record, rotating first if it belongs to a new day.
@@ -75,23 +97,49 @@ impl CaptureWriter {
     pub fn append(&mut self, record: &Record) -> io::Result<Option<SealedDay>> {
         let day = UtcDay::from_nanos(record.day_ts());
 
+        // A record for the day that just rolled over is normal, not an
+        // error. Exchange timestamps and the host clock cross midnight
+        // at slightly different moments, and a reconnect can deliver a
+        // backlog stamped just before the boundary. The previous day
+        // therefore stays open for a grace period.
+        //
+        // The alternative — refusing the record — killed the capture
+        // process, since a write failure is fatal by design. Losing a
+        // whole stream at midnight to preserve tidiness at a boundary is
+        // the wrong trade: a late record in the right file costs
+        // nothing, and a dead capture costs the rest of the day.
+        if let Some(previous) = &mut self.previous
+            && previous.day == day
+        {
+            let mut buffer = Vec::with_capacity(record.encoded_len());
+            record.encode(&mut buffer);
+            previous.file.write_all(&buffer)?;
+            previous.builder.observe(record);
+            previous.late_records += 1;
+            return Ok(None);
+        }
+
         let mut sealed = None;
         match &self.open {
             Some(open) if open.day == day => {}
             Some(open) if day < open.day => {
-                // Out-of-order across a day boundary. Writing it into the
-                // current file would put a record in the wrong day and
-                // corrupt the archive's meaning; dropping it would lose
-                // data. Refusing is the only honest option.
+                // Older than even the grace window: the archive's
+                // meaning depends on a file holding its own day, and
+                // this record cannot be placed without breaking that.
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "record for {} arrived after {} was already open",
+                        "record for {} arrived after {} was already open, beyond the grace window",
                         day, open.day
                     ),
                 ));
             }
-            Some(_) => sealed = Some(self.seal()?),
+            Some(_) => {
+                // Rotating: seal whatever was already waiting, then keep
+                // the outgoing day open for late arrivals.
+                sealed = self.seal_previous()?;
+                self.previous = self.open.take();
+            }
             None => {}
         }
 
@@ -104,6 +152,15 @@ impl CaptureWriter {
         record.encode(&mut buffer);
         open.file.write_all(&buffer)?;
         open.builder.observe(record);
+
+        // Once the new day is far enough along, nothing more can
+        // legitimately belong to the old one.
+        if self.previous.is_some() {
+            let day_start = day.start_nanos();
+            if record.day_ts().saturating_sub(day_start) > self.grace_ns {
+                sealed = self.seal_previous()?;
+            }
+        }
 
         Ok(sealed)
     }
@@ -200,11 +257,30 @@ impl CaptureWriter {
     /// Propagates I/O failures from flushing, reading back, or writing
     /// the manifest.
     pub fn seal(&mut self) -> io::Result<SealedDay> {
-        let mut open = self
+        // Any day still waiting for late records is finished too: the
+        // caller is closing up, so nothing more can arrive.
+        self.seal_previous()?;
+
+        let open = self
             .open
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no day is open"))?;
+        self.seal_day(open)
+    }
 
+    /// Seal the day kept open for late arrivals, if there is one.
+    ///
+    /// # Errors
+    ///
+    /// As [`CaptureWriter::seal`].
+    pub fn seal_previous(&mut self) -> io::Result<Option<SealedDay>> {
+        match self.previous.take() {
+            Some(day) => Ok(Some(self.seal_day(day)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn seal_day(&self, mut open: OpenDay) -> io::Result<SealedDay> {
         open.file.flush()?;
         open.file.get_ref().sync_all()?;
         drop(open.file);
@@ -244,6 +320,7 @@ impl CaptureWriter {
             path,
             file: BufWriter::with_capacity(1 << 20, file),
             builder: ManifestBuilder::new(),
+            late_records: 0,
         });
         Ok(())
     }
@@ -306,14 +383,21 @@ mod tests {
         let second = Record::payload(day * DAY_NS + 20, (day + 1) * DAY_NS + 1, b"b".to_vec());
 
         assert!(w.append(&first).expect("append").is_none());
-        let sealed = w.append(&second).expect("append").expect("rotation");
+        assert!(
+            w.append(&second).expect("append").is_none(),
+            "rotation switches days but defers sealing, since late records may still arrive"
+        );
+        assert_eq!(w.current_day(), Some(UtcDay(day + 1)));
 
+        let sealed = w
+            .seal_previous()
+            .expect("seal")
+            .expect("the outgoing day was still open");
         assert_eq!(sealed.day, UtcDay(day));
         assert_eq!(
             sealed.manifest.records, 1,
             "only the first record belongs to that day"
         );
-        assert_eq!(w.current_day(), Some(UtcDay(day + 1)));
 
         let files: Vec<_> = fs::read_dir(StreamId::new("venue", "SYM", "depth").directory(&root))
             .expect("dir")
@@ -325,13 +409,67 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_record_belonging_to_an_already_closed_day() {
-        let (mut w, root) = writer("backwards");
+    fn a_late_record_at_the_boundary_lands_in_its_own_day_rather_than_killing_capture() {
+        // Midnight, as it actually happens: the exchange clock and the
+        // host clock cross the boundary moments apart, and a reconnect
+        // delivers a backlog stamped just before it. Refusing that
+        // record used to fail the write, and a failed write ends the
+        // capture — losing the rest of the day to keep a boundary tidy.
+        let (mut w, root) = writer("boundary");
         let day = 20_000i64;
-        w.append(&Record::payload(0, (day + 1) * DAY_NS, b"a".to_vec()))
+        let midnight = (day + 1) * DAY_NS;
+
+        w.append(&Record::payload(0, midnight - 1_000, b"before".to_vec()))
             .expect("append");
+        // First record of the new day: rotates, keeps the old day open.
+        assert!(
+            w.append(&Record::payload(0, midnight + 1_000, b"after".to_vec()))
+                .expect("append")
+                .is_none(),
+            "the outgoing day is not sealed while late records may still arrive"
+        );
+        // The backlog, stamped before midnight, must be accepted.
+        w.append(&Record::payload(0, midnight - 500, b"late".to_vec()))
+            .expect("a late record must not fail the write");
+
+        let sealed = w.seal().expect("seal");
+        assert_eq!(sealed.day, UtcDay(day + 1));
+
+        // Both pre-midnight records are in the old day's file, and only
+        // those.
+        let old = fs::read(StreamId::new("venue", "SYM", "depth").file_for(&root, UtcDay(day)))
+            .expect("read");
+        let (records, _) = decode_all(&old).expect("decode");
+        let payloads: Vec<_> = records.iter().map(|r| r.payload.clone()).collect();
+        assert_eq!(payloads, vec![b"before".to_vec(), b"late".to_vec()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_grace_window_closes_once_the_new_day_is_under_way() {
+        let (mut w, root) = writer("graceclose");
+        let day = 20_000i64;
+        let midnight = (day + 1) * DAY_NS;
+
+        w.append(&Record::payload(0, midnight - 1_000, b"before".to_vec()))
+            .expect("append");
+        w.append(&Record::payload(0, midnight + 1_000, b"after".to_vec()))
+            .expect("append");
+        // Well past the grace window: the old day is sealed now.
+        let sealed = w
+            .append(&Record::payload(
+                0,
+                midnight + 120 * 1_000_000_000,
+                b"later".to_vec(),
+            ))
+            .expect("append")
+            .expect("the previous day is sealed once grace expires");
+        assert_eq!(sealed.day, UtcDay(day));
+
+        // And a record older than that is refused, because it can no
+        // longer be placed in a file that still claims its own day.
         let err = w
-            .append(&Record::payload(0, day * DAY_NS, b"late".to_vec()))
+            .append(&Record::payload(0, midnight - 500, b"too late".to_vec()))
             .expect_err("must refuse");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         fs::remove_dir_all(root).ok();

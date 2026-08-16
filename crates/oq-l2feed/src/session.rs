@@ -133,7 +133,6 @@ impl SessionStats {
 
 /// Nanoseconds since the Unix epoch, from the host clock.
 ///
-/// The only wall-clock read in the capture path, and it is deliberate:
 /// `local_ts` exists to record when *this host* saw the message, which
 /// is what latency modelling needs and what no other clock can supply.
 #[must_use]
@@ -142,6 +141,29 @@ pub fn now_ns() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
+}
+
+/// The source of `local_ts`.
+///
+/// Injected rather than read directly, for the same reason the event
+/// kernel forbids clock reads: a test that reads the wall clock is not
+/// reproducible from `(seed, commit)`. This one was not hypothetical —
+/// the first version of these tests passed on the day they were written
+/// and failed the next morning, because fixtures dated one day met a
+/// session record stamped with the next.
+pub trait Clock {
+    /// Nanoseconds since the Unix epoch.
+    fn now_ns(&self) -> i64;
+}
+
+/// The host clock. What production uses.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ns(&self) -> i64 {
+        now_ns()
+    }
 }
 
 /// A source of messages, so the loop can be tested without a network.
@@ -181,6 +203,20 @@ pub fn run<C: Connector>(
     connector: &mut C,
     writer: &mut CaptureWriter,
 ) -> io::Result<SessionStats> {
+    run_with_clock(config, connector, writer, &SystemClock)
+}
+
+/// Run a capture session against a supplied clock.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_with_clock<C: Connector, K: Clock>(
+    config: &SessionConfig,
+    connector: &mut C,
+    writer: &mut CaptureWriter,
+    clock: &K,
+) -> io::Result<SessionStats> {
     let started = Instant::now();
     let mut stats = SessionStats {
         payloads: 0,
@@ -194,7 +230,7 @@ pub fn run<C: Connector>(
     let mut since_disk_check = 0u64;
     let mut last_flush = Instant::now();
 
-    writer.append_session_start(now_ns())?;
+    writer.append_session_start(clock.now_ns())?;
 
     'outer: loop {
         if let Some(limit) = config.duration
@@ -231,7 +267,7 @@ pub fn run<C: Connector>(
 
             match source.next_message() {
                 Ok(payload) => {
-                    let local_ts = now_ns();
+                    let local_ts = clock.now_ns();
                     let exch_ts =
                         binance_event_time_ns(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
                     stats.payload_bytes += payload.len() as u64;
@@ -263,7 +299,7 @@ pub fn run<C: Connector>(
                     stats.gaps += 1;
                     stats.outage += outage;
                     writer.append_gap(
-                        now_ns(),
+                        clock.now_ns(),
                         "connection lost",
                         None,
                         i64::try_from(outage.as_nanos()).unwrap_or(i64::MAX),
@@ -284,6 +320,29 @@ pub fn run<C: Connector>(
 mod tests {
     use super::*;
     use crate::frame::decode_all;
+
+    /// A clock the test sets, so a fixture states the day it means
+    /// instead of inheriting whatever day the suite happens to run on.
+    struct FixedClock(std::cell::Cell<i64>);
+
+    impl FixedClock {
+        fn at(ns: i64) -> Self {
+            Self(std::cell::Cell::new(ns))
+        }
+    }
+
+    impl Clock for FixedClock {
+        fn now_ns(&self) -> i64 {
+            // Advance a microsecond per read so ordering is still
+            // strictly increasing, as a real clock would be.
+            let now = self.0.get();
+            self.0.set(now + 1_000);
+            now
+        }
+    }
+
+    /// The instant every fixture in this module is anchored to.
+    const FIXTURE_NS: i64 = 1_786_780_800_000_000_000;
 
     /// A source that yields a scripted set of messages, then fails.
     struct Scripted {
@@ -355,7 +414,8 @@ mod tests {
         config.reconnect_wait = Duration::from_millis(1);
         config.disk_floor_bytes = 0;
 
-        let stats = run(&config, &mut connector, &mut writer).expect("run");
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
         writer.seal().expect("seal");
 
         assert_eq!(stats.payloads, 3, "every scripted message was written");
@@ -404,7 +464,8 @@ mod tests {
         config.max_consecutive_failures = 1;
         config.reconnect_wait = Duration::from_millis(1);
 
-        let stats = run(&config, &mut connector, &mut writer).expect("run");
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
         assert_eq!(stats.stop, StopReason::DiskFloor);
         assert_eq!(
             stats.payloads, 5,
@@ -488,7 +549,13 @@ mod tests {
         config.max_consecutive_failures = 1;
         config.reconnect_wait = Duration::from_millis(1);
 
-        run(&config, &mut connector, &mut writer).expect("run");
+        run_with_clock(
+            &config,
+            &mut connector,
+            &mut writer,
+            &FixedClock::at(FIXTURE_NS),
+        )
+        .expect("run");
         assert!(
             seen.get() > 0,
             "records must reach the disk during the run, not only at the end"
@@ -527,7 +594,8 @@ mod tests {
         config.reconnect_wait = Duration::from_millis(1);
         config.disk_floor_bytes = 0;
 
-        let stats = run(&config, &mut connector, &mut writer).expect("run");
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
         assert_eq!(stats.payloads, 1);
         let sealed = writer.seal().expect("seal");
         // Day attribution fell back to local time rather than dropping
