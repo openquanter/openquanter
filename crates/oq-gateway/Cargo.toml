@@ -10,6 +10,7 @@ description = "Venue adapter: account access and reconciliation. Read-only for n
 [dependencies]
 oq-hash.workspace = true
 oq-types.workspace = true
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = "3.4"
 
 [lints]
