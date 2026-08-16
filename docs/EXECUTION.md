@@ -141,6 +141,29 @@ Startup is the strictest case: an unrecognised position at startup is
 fatal, not a warning. A process that begins trading beside a position it
 does not know about is a process whose risk limits mean nothing.
 
+## Two things a running system taught the predecessor
+
+Both were found by reading the platform this project replaces, which
+traded live for years. Neither is derivable from the API documentation.
+
+**A hedged account refuses an order that does not name its leg.** A
+venue can carry one net position per contract or two. The modes take
+different parameters, and an order built for the wrong one is refused
+with a message about a position side the caller never set. The mode is
+therefore asked for at connect, not assumed. `reduceOnly` and a hedged
+leg are mutually exclusive at the venue, so they are refused together
+here, where the answer can explain itself.
+
+**An open socket is not a delivering socket.** The connection stands,
+the reads time out, and the account has been moving the whole time —
+indistinguishable, from inside, from a quiet account. The only
+resolution is a second source: the venue's own view of the positions,
+fetched on a schedule and compared against the view the stream has
+built. Three consecutive disagreements condemn the stream, not one,
+because a fill in flight is visible to one side before the other and a
+check that acted on the first difference would reconnect constantly
+under load — which is exactly when it must not.
+
 ## What is not here yet
 
 - The risk gate itself (`oq-risk`): limits, kill switch, and the

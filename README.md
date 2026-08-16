@@ -178,10 +178,37 @@ Pre-alpha, and specific about it. **Built and tested today:**
 - **Parity** — trade-by-trade diffing with difference attribution, over
   baselines identified by code, data and configuration together.
 
+- **The order path** — a venue-independent execution contract with one
+  venue behind it. Placement returns three outcomes, not two: accepted,
+  rejected, and *unknown*, because a timeout does not mean the order
+  failed, it means nobody knows, and folding that into an error is what
+  produces duplicate positions. Every order carries an id the caller
+  chose before sending, which is the only handle that survives a request
+  whose answer never came back. Fills arrive on a separate socket, a
+  disconnect is reported as a gap rather than papered over, and an open
+  socket that has stopped delivering is caught by disagreeing with the
+  venue's own view of the positions three times running.
+- **A pre-trade gate** — order size, resulting position, notional, a
+  price band that catches the missing digit a notional cap waves
+  through, a resting-order cap, a rate limit, and a kill switch that
+  stays down until a person clears it. A passing check returns a permit
+  carrying the order it approved, so a check cannot validate one order
+  while a different one is sent. Limits nobody set refuse everything.
+
 **Designed but not built:** fidelity tiers L1 and L2 (only L0 exists), the
-Python strategy tier, a sweep runner, live trading, and everything under
-*AI-native* above. The pillars section describes where this is going; this
-section describes where it is.
+Python strategy tier, a sweep runner, and everything under *AI-native*
+above. The pillars section describes where this is going; this section
+describes where it is.
+
+**On live trading specifically,** because the pieces above make it easy to
+overstate: the order path, the gate and the account reader exist and are
+tested, and **nothing composes them into a running process** — that is
+`oq-live`, which does not exist. Nor has any of it been exercised against
+a real account yet: `oq-order-check` places, confirms and cancels one
+order against the testnet end to end, and it has not been run, because
+that needs credentials this repository does not have. Until it has, the
+claim is that the parts are built and unit-tested, not that the framework
+has traded.
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, not the L2 fidelity
