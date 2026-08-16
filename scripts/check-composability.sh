@@ -34,6 +34,10 @@ BUDGETS=(
   "oq-backtest:0"
   "oq-data:0"
   "oq-parity:0"
+  # The pre-trade gate. Zero because it is the layer everything else is
+  # checked against: a risk gate that cannot be built from the workspace
+  # alone is a risk gate whose availability depends on a registry.
+  "oq-risk:0"
   "oq-stats:0"
   # The strategy contract. Zero, and it has to stay zero for a reason
   # the other zeros do not share: this is the crate a user writes
