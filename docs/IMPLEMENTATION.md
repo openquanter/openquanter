@@ -275,7 +275,7 @@ does not lie about when the strategy knew things.
 | Columnar data | `arrow-rs` + `parquet-rs` | Zero-copy interchange with the Python analysis ecosystem |
 | Numerics | `i64` fixed point on the hot path; decimal at ledger boundaries | Exact money arithmetic without float error; float never touches money |
 | Inference | ONNX runtime and compiled decision trees | Chosen per model class by measured latency, not by framework preference |
-| Testing | `proptest`, `criterion`, purpose-built fault simulator | Invariants, benchmarks, and whole-system fuzzing respectively |
+| Testing | `criterion` (adopted); `proptest` and a purpose-built fault simulator (planned) | Benchmarks today; generated-input invariants and whole-system fuzzing are intended and not yet built |
 | Venue adapters | Written per venue against a thin contract | Universal abstraction layers hide exactly the venue-specific semantics that cause incidents |
 
 ---
@@ -345,18 +345,31 @@ openquanter/
         book.rs         price-time priority order book
         l0.rs           tick-replay matching; l1.rs, l2.rs follow
         matching/       submodules appear as the ladder grows
+    oq-l2feed/
+      src/
+        *.rs            framing, sealing, depth parsing, reconstruction
+        bin/            oq-capture, oq-book-check
+    oq-examples/
+      examples/         runnable teaching strategies
+      benches/          criterion benchmarks
+      tests/golden.rs   pins every number the documentation quotes
     oq-gateway/
       src/
         contract.rs     the connector contract every venue implements
         binance/        market_data.rs, orders.rs, user_stream.rs, reconcile.rs
     ...
-  docs/                 requirements, roadmap, implementation plan
-  scripts/              repository tooling (DCO check, name reservation)
-  examples/             example strategies
-  data/                 sample datasets and golden baselines
-  crates/*/tests/       integration tests, separate from in-module unit tests
-  crates/*/benches/     criterion benchmarks, tracked in CI
+  docs/                 requirements, roadmap, formats, quickstart
+  scripts/              repository tooling: DCO check, secret scan,
+                        composability check, crate-name reservation
+  .github/workflows/    CI: test, hygiene, composability, throughput floor
 ```
+
+Two things are deliberately *not* in this tree. There is no top-level
+`examples/` or `data/`: runnable examples are a crate, so they compile
+under `cargo test --workspace` and cannot rot, and the sample market is
+**generated from a seed** rather than stored, which is why golden tests
+can pin exact numbers without shipping a dataset or inheriting anyone's
+redistribution terms.
 
 Unit tests live beside the code they test, in a `#[cfg(test)]` module in
 the same file — the Rust convention, and it keeps an invariant next to
@@ -409,7 +422,7 @@ does not belong on a shared or bandwidth-constrained link.
 | P1.6 | `oq-margin` skeleton | Tier tables bitemporal; per-tick usage and liquidation price; liquidation order path |
 | P1.7 | `oq-backtest` | End-to-end run on sample data with fidelity report |
 | P1.8 | `oq-sim` prototype | First three catalogue scenarios reproduce from seed |
-| P1.9 | Benchmarks in CI | `criterion` baselines tracked; regressions fail the build |
+| P1.9 | Benchmarks in CI | **Landed.** `criterion` benches in `crates/oq-examples/benches/`, plus a CI job asserting a throughput floor. A floor rather than a tracked baseline, deliberately — see the [roadmap](ROADMAP.md#milestone-overview) |
 
 **Gate:** G1 and G2 met; first public preview tag.
 
@@ -473,7 +486,7 @@ Four layers, each answering a different question.
 | Layer | Question | Mechanism |
 |---|---|---|
 | **Unit** | Does this function do what it says? | Standard `cargo test`, fast, per-crate |
-| **Property** | Are the invariants preserved under arbitrary inputs? | `proptest`: quantity conservation, price-time priority, no crossed book, non-negative margin, monotonic liquidation price |
+| **Property** | Are the invariants preserved under arbitrary inputs? | Quantity conservation, price-time priority, no crossed book, non-negative margin, monotonic liquidation price. **Hand-written cases today**; `proptest` is the intended generator and is not yet a dependency |
 | **Golden** | Did observable behavior change? | Sample data replayed, full output compared; baselines carry the identity triple (D13) and regenerate only with recorded human confirmation |
 | **Parity** | Do two implementations or two modes agree? | `oq-parity` trade-by-trade diff with attribution; used for ports, refactors, throughput mode, and Python/Rust inference. A stale baseline is reported as stale, never as a difference |
 | **Simulation** | Does the whole system survive hostile conditions? | `oq-sim` randomized fault injection, every failure reproducible from `(seed, commit)` |
@@ -488,8 +501,11 @@ Rules that are not negotiable:
   or configuration moved, the output says so (D13) instead of blaming the code.
 - Public CI runs entirely on sample data. No quality gate may depend on a
   private dataset.
-- Benchmarks run in CI with tracked baselines; a performance regression is a
-  build failure, not a note.
+- Benchmarks run in CI against a **floor**, and falling below it is a build
+  failure. The floor is set far below any real machine on purpose: shared
+  runners vary by several times from hour to hour, and a gate that fails on
+  noise gets disabled. Precise version-to-version comparison is `cargo bench`
+  on one machine, not a CI job.
 
 ---
 

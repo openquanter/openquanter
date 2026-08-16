@@ -17,7 +17,9 @@ whole engine — domain types, journal, event core, matching, margin, backtest
 host, data plane, parity, statistics — is plain std Rust. The one crate with a
 dependency tree is the one that has to speak to an exchange, and it is
 isolated there on purpose. This is checked in CI, not asserted:
-[`scripts/check-composability.sh`](scripts/check-composability.sh).
+[`scripts/check-composability.sh`](scripts/check-composability.sh). (The
+examples crate additionally pulls `criterion` to run its benchmarks; that is a
+dev-dependency of documentation, and nothing you would depend on.)
 
 So you can use the margin model without the engine. The overfitting statistics
 without the backtester. The capture toolkit with no engine at all. Or the whole
@@ -109,8 +111,9 @@ deciding whether to use this now.
 | Document | Contents |
 |---|---|
 | [Requirements Specification](docs/REQUIREMENTS.md) | What the framework must do, and how acceptance is measured |
-| [Roadmap](docs/ROADMAP.md) | Milestones, entry triggers, exit gates, path to 1.0 |
+| [Roadmap](docs/ROADMAP.md) | Milestones, entry triggers, exit gates, path to 2.0 |
 | [Implementation Plan](docs/IMPLEMENTATION.md) | Architecture, design decisions, crate map, task plan |
+| [Changelog](CHANGELOG.md) | What changed, and every note a semantics change is required to carry |
 
 Full index: [docs/](docs/README.md).
 
@@ -132,6 +135,9 @@ Pre-alpha, and specific about it. **Built and tested today:**
   reference data.
 - **Capture** — verbatim venue records with local timestamps, UTC-day
   sealing, manifests with content hashes. Proven against a live venue.
+  `oq-book-check` replays an archive back into an order book, because
+  bytes on disk prove the messages arrived and only a reconstruction
+  proves they can be used.
 - **Statistics** — deflated Sharpe ratio, probability of backtest
   overfitting, trial registry.
 - **Parity** — trade-by-trade diffing with difference attribution, over
@@ -141,6 +147,11 @@ Pre-alpha, and specific about it. **Built and tested today:**
 Python strategy tier, a sweep runner, live trading, and everything under
 *AI-native* above. The pillars section describes where this is going; this
 section describes where it is.
+
+One clarification, because the names collide: the order book reconstruction
+in `oq-l2feed` is a tool for **verifying an archive**, not the L2 fidelity
+tier. It rebuilds a book to prove captured data is usable; matching against
+a reconstructed book is M4 work and does not exist.
 
 Start with the [Quickstart](docs/QUICKSTART.md) — three examples, no data to
 download, a running backtest in a few minutes. See the

@@ -4,7 +4,14 @@
 
 ## 1. 构建
 
-Rust 2024 edition，最低版本 1.85。没有其他依赖，不需要起服务，不需要下载数据。
+Rust 2024 edition，最低版本 1.85。不需要起服务，不需要下载数据——示例的行情由
+种子自己生成。
+
+Cargo 只会为两个 crate 拉依赖树，其余一个都没有：`oq-l2feed` 带 WebSocket 与 TLS
+栈，因为它必须和交易所通信；`oq-examples` 把 `criterion` 作为 dev-dependency，
+用于跑基准。引擎本身——类型、journal、内核、撮合、保证金、回测、数据、parity、
+统计——是纯 std Rust，这一点由 `scripts/check-composability.sh` 在 CI 里强制。
+只要引擎的话，`cargo build -p oq-core` 什么都不拉。
 
 ```bash
 git clone https://github.com/openquanter/openquanter
@@ -70,6 +77,23 @@ cargo run --example ma_cross
 ——因为一个调过参的示例，本质是把过拟合的教训包装成教程。如果你改了窗口发现结果
 变好了，那你刚做的正是 `oq-stats` 要惩罚的那种搜索。
 
+### 上面这些数字漏掉了一件事
+
+**这些示例不收手续费。** 本页每一个数字都是不含成本的毛数，因为没有一个示例
+设置了费率表。手续费**是被建模的**——maker 与 taker 两档，而且 maker 费率可以为负，
+因为返佣是存在的——但它默认为零，必须显式要：
+
+```rust
+use oq_backtest::Fees;
+use oq_types::Ratio;
+
+let config = config.with_fees(Fees::flat(Ratio::from_ppm(500))); // 0.05%
+```
+
+默认为零，是为了让"一次没有费率表的运行"**显然就是**一次没有费率表的运行，而不是
+一次悄悄用了某个没人选过的、看起来还挺合理的数字的运行。对交易频繁的策略，这个
+差别不是装饰性的；这样一个项目的文档应该把它说出来，而不是让你自己撞见。
+
 ## 5. 写你自己的
 
 一个策略就是一个 trait，只有一个必须实现的方法：
@@ -110,6 +134,22 @@ cargo run --bin oq-capture -- \
   --root ./archive --symbol BTCUSDT --stream depth --minutes 10 --floor-gb 10
 ```
 
+然后检查采到的东西是不是真的能用：
+
+```bash
+cargo run --bin oq-book-check -- --file ./archive/<venue>/BTCUSDT/depth/<date>.oqcap
+```
+
+它把每一条深度更新重放进订单簿，报告结果——应用了多少条、采集端**声明**了多少
+个 gap、有多少个**没人声明**的序列断裂、订单簿有没有交叉过——最后给出一行结论：
+`RECONSTRUCTS CLEANLY`，或者具体是哪条规则没过。计数取决于你自己的采集，所以
+这里不引用具体数字。
+
+**第一天就跑，别等半年。** 文件躺在磁盘上只能证明消息到过；只有把它们重放进订单簿
+才能证明它们**可用**。一个采集缺陷——重连没处理好、序列号字段读错了、某个流其实是
+被合并过的——在磁盘上看起来完全健康，而等它暴露出来时，被它毁掉的那段窗口已经无法
+重采。归档名不副实时这个命令会以非零码退出，所以它应该被放进采集之后的流程里。
+
 归档布局、密封与校验流程、以及**交易所实际提供了什么**（包括那些接受订阅之后
 什么都不发的流），见[采集格式规范](CAPTURE-FORMAT.zh-CN.md)。
 
@@ -117,9 +157,12 @@ cargo run --bin oq-capture -- \
 
 | 你想 | 读 |
 |---|---|
+| 知道现在有什么、还没有什么 | [README 当前状态](../README.zh-CN.md#当前状态) |
 | 知道这个框架承诺什么 | [需求规格说明](REQUIREMENTS.zh-CN.md) |
-| 知道现在有什么、还没有什么 | [路线图](ROADMAP.zh-CN.md) |
+| 知道每个里程碑解锁什么 | [路线图](ROADMAP.zh-CN.md) |
 | 理解架构 | [实施方案](IMPLEMENTATION.zh-CN.md) |
+| 知道 `2.0.0-alpha` 承诺了什么 | [版本规则](VERSIONING.zh-CN.md) |
+| 读写归档与 tick 文件 | [采集格式规范](CAPTURE-FORMAT.zh-CN.md) · [Tick 格式规范](TICK-FORMAT.zh-CN.md) |
 | 参与贡献 | [CONTRIBUTING.zh-CN.md](../CONTRIBUTING.zh-CN.md) |
 
 ## 关于这些示例

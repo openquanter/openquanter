@@ -3,6 +3,13 @@
 The data plane: dual-timestamp tick streams, leakage-free as-of joins,
 and bitemporal reference data.
 
+`ticks.rs` implements the `.oqtk` format. `docs/TICK-FORMAT.md` §1–§3
+describe what is here — **v2**, a 32-byte header and 64-byte records.
+§4 onward specifies a *proposed* v3 with a header-declared `record_len`
+so a ninth field stops costing a format break; it is not implemented,
+and `read_header` refuses any version but its own. If you implement v3,
+that document is the specification and this line is what should change.
+
 ## Commands
 
 ```bash

@@ -22,3 +22,7 @@ pub mod strategy;
 pub use deviation::{DeviationReport, Verdict};
 pub use run::{Liquidation, MarginMode, RunConfig, RunResult, run, tick_at};
 pub use strategy::{Context, Intent, Strategy};
+
+/// Re-exported because [`RunConfig::with_fees`] takes it. Configuring a
+/// run should not require naming a second crate.
+pub use oq_core::Fees;

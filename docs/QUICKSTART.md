@@ -4,8 +4,16 @@
 
 ## 1. Build
 
-Rust 2024 edition, minimum version 1.85. No other dependencies, no
-services, no data to download.
+Rust 2024 edition, minimum version 1.85. No services to run and no data
+to download — the examples generate their own market from a seed.
+
+Cargo will fetch a dependency tree for two crates and no others:
+`oq-l2feed` carries a WebSocket and TLS stack because it has to speak to
+a venue, and `oq-examples` carries `criterion` as a dev-dependency for
+its benchmarks. The engine itself — types, journal, core, matching,
+margin, backtest, data, parity, statistics — is plain std Rust, which
+`scripts/check-composability.sh` enforces in CI. If you only want the
+engine, `cargo build -p oq-core` pulls nothing.
 
 ```bash
 git clone https://github.com/openquanter/openquanter
@@ -79,6 +87,27 @@ adjusted, because a tuned example is a lesson in overfitting dressed as
 a tutorial. If you change the windows and the result improves, you have
 just performed the search that `oq-stats` exists to penalise.
 
+### One thing the numbers above leave out
+
+**The examples charge no trading fees.** Every figure on this page is
+gross of costs, because none of them sets a fee schedule. Fees are
+modelled — maker and taker rates, and a maker rate may be negative
+because rebates exist — but they default to zero and have to be asked
+for:
+
+```rust
+use oq_backtest::Fees;
+use oq_types::Ratio;
+
+let config = config.with_fees(Fees::flat(Ratio::from_ppm(500))); // 0.05%
+```
+
+Zero is the default so that a run with no fee schedule is obviously a
+run with no fee schedule, rather than one quietly using a plausible
+number nobody chose. On a strategy that trades often the difference is
+not decorative, and a page in this project should say so rather than
+let you discover it.
+
 ## 5. Write your own
 
 A strategy is one trait with one required method:
@@ -121,6 +150,26 @@ cargo run --bin oq-capture -- \
   --root ./archive --symbol BTCUSDT --stream depth --minutes 10 --floor-gb 10
 ```
 
+Then check that what you captured is actually usable:
+
+```bash
+cargo run --bin oq-book-check -- --file ./archive/<venue>/BTCUSDT/depth/<date>.oqcap
+```
+
+It replays every depth update into a book and reports what it found —
+updates applied, gap markers the capture declared, sequence breaks
+nobody declared, and whether the book ever crossed — ending in a
+verdict line, `RECONSTRUCTS CLEANLY` or the specific reason it does not.
+Counts depend on your capture, so nothing is quoted here.
+
+Run this on day one, not in six months. Files on disk prove the messages
+arrived; only replaying them into an order book proves they can be
+*used*. A capture defect — a mishandled reconnect, a misread sequence
+field, a stream that turned out to be coalesced — looks perfectly
+healthy on disk, and by the time it surfaces the window it corrupted
+cannot be recaptured. The check exits non-zero when the archive is not
+what it claims, so it belongs in whatever runs after a capture.
+
 See [Capture Format](CAPTURE-FORMAT.md) for the archive layout, the
 sealing and verification pipeline, and what the venue actually serves —
 including the streams that accept a subscription and then send nothing.
@@ -129,9 +178,12 @@ including the streams that accept a subscription and then send nothing.
 
 | If you want to | Read |
 |---|---|
+| Know what exists and what does not | [README Status](../README.md#status) |
 | Know what the framework promises | [Requirements](REQUIREMENTS.md) |
-| Know what exists and what does not | [Roadmap](ROADMAP.md) |
+| Know what each milestone unlocks | [Roadmap](ROADMAP.md) |
 | Understand the architecture | [Implementation Plan](IMPLEMENTATION.md) |
+| Know what `2.0.0-alpha` promises | [Versioning](VERSIONING.md) |
+| Read or write archive and tick files | [Capture Format](CAPTURE-FORMAT.md) · [Tick Format](TICK-FORMAT.md) |
 | Contribute | [CONTRIBUTING.md](../CONTRIBUTING.md) |
 
 ## A word about the examples

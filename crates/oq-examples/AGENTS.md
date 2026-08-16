@@ -33,6 +33,15 @@ cargo test -p oq-examples          # includes the golden tests
   series is identical on every machine, which is what golden tests need;
   and a crash of exactly the depth a lesson requires can be scripted
   rather than waited for.
+- **The examples run with no trading fees, and that is a known
+  omission, not an oversight.** None of them calls
+  `RunConfig::with_fees`, so every quoted number is gross of costs. The
+  numbers are pinned as they are because the documentation and the video
+  course quote them; changing the fee schedule changes all of them at
+  once. If you add a fee-charging example, add it *alongside* these
+  rather than editing one, and give it its own golden coverage. Saying
+  so here matters more than it would elsewhere: this is the crate for a
+  project whose central claim is that backtests flatter you.
 - **SplitMix64, not a bare LCG.** An LCG consumed at a fixed stride
   leaks lattice structure into anything generated in a loop, which is
   how synthetic "noise" acquires structure nobody intended. This bit the

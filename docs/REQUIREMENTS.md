@@ -202,7 +202,7 @@ the rest honestly.
 | NFR-9 **Onboarding** | A new user reaches a running example backtest in ≤ 30 minutes from a clean machine, using shipped sample data. |
 | NFR-10 **Agent-friendly codebase** | Each crate carries a short `AGENTS.md` (<200 lines) stating local commands and invariants. Verification is layered: unit → property → golden → parity. Golden baselines change only with explicit human confirmation. |
 | NFR-11 **Bus-factor resistance** | Design rationale lives in the repository, not in anyone's head. Behavioral knowledge is encoded in deterministic tests, not tribal memory. |
-| NFR-12 **Versioning** | One version across the workspace, currently `2.0.0-alpha.N`. Before `2.0.0` APIs may break in any release, with changes listed in the changelog; from `2.0.0` semantic versioning is enforced for public crate APIs and the Python binding surface. See [Versioning](VERSIONING.md). |
+| NFR-12 **Versioning** | One version across the workspace, currently `2.0.0-alpha.N`. Before `2.0.0` APIs may break in any release, with changes listed in the [changelog](../CHANGELOG.md); from `2.0.0` semantic versioning is enforced for public crate APIs and the Python binding surface. See [Versioning](VERSIONING.md). |
 
 ---
 

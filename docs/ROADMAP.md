@@ -3,7 +3,7 @@
 > Status: **Draft for review** · [中文版](ROADMAP.zh-CN.md)
 > Companion documents: [Requirements](REQUIREMENTS.md) · [Implementation Plan](IMPLEMENTATION.md)
 
-This roadmap describes the path from the current pre-alpha skeleton to a 1.0
+This roadmap describes the path from where the project is today to a 2.0
 release, and the research directions beyond it. It is organized by
 **milestone**, not by date. Milestones have **entry triggers** and **exit
 gates**; work does not start because a calendar says so, and does not finish
@@ -50,10 +50,20 @@ commitments.
 not that the exit gate has passed. As of the latest revision: the
 deterministic core, L0 matching, the margin overlay, the backtest host, the
 parity harness, the capture toolkit and the overfitting statistics are in
-and green. Still open on M1's gate are `criterion` benchmarks in CI, and
-trade-by-trade parity against a reference run — close, but not passed, and
-a gate that is nearly met is not met. Continuous capture is still a trial
-rather than a service. See the README for the built/not-built split.
+and green, and `criterion` benchmarks now exist with a throughput floor
+enforced in CI. Still open on M1's gate is trade-by-trade parity against a
+reference implementation run — close, but not passed, and a gate that is
+nearly met is not met. Continuous capture is still a trial rather than a
+service. See the README for the built/not-built split.
+
+One M1 item was deliberately built smaller than planned. The benchmark job
+asserts a **floor**, not a tracked baseline: shared CI runners vary by
+several times from hour to hour, so a tight comparison would fail on noise
+and be switched off within a week. The floor catches the engine becoming an
+order of magnitude slower, which is the regression that actually happens.
+Comparing two versions precisely is a local `cargo bench` job on one
+machine. This is a change to the plan, recorded rather than quietly
+dropped.
 
 "Committed" means it is the current default plan. "Triggered" means the
 milestone has an entry condition stated below and will not be started before
@@ -127,7 +137,7 @@ depends on the invariants established here.
 - **G2** — parity harness demonstrates trade-by-trade equality with relative
   P&L error ≤ 1e-6 against a reference implementation run.
 - Property test suite green, including margin invariants.
-- **First public preview release (0.x tag)** with sample data and one example
+- **First public preview release** — a `2.0.0-alpha.N` tag, with sample data and one example
   strategy.
 
 ---
@@ -279,7 +289,7 @@ after the model's training cutoff.
 | Patch | As needed | Correctness fixes; never silently changes engine semantics |
 
 Any change to L0 matching semantics, margin computation, or the event schema
-requires an explicit note in the changelog and a parity report showing the
+requires an explicit note in the [changelog](../CHANGELOG.md) and a parity report showing the
 behavioral delta. Golden baselines are regenerated only with human
 confirmation recorded in the pull request.
 

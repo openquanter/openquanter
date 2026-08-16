@@ -197,6 +197,7 @@ impl Book {
         }
         self.snapshot_id = Some(update_id);
         self.last_id = None;
+        self.applied = 0;
     }
 
     /// Apply an incremental update.
@@ -224,8 +225,12 @@ impl Book {
             }
             Some(last) => {
                 // The venue supplies the previous final id; when it does
-                // not, fall back to requiring contiguity.
-                let previous = update.prev_final_id.unwrap_or(update.first_id - 1);
+                // not, fall back to requiring contiguity. Saturating
+                // rather than subtracting: `first_id` is venue data, and
+                // a zero there must report a gap, not overflow.
+                let previous = update
+                    .prev_final_id
+                    .unwrap_or(update.first_id.saturating_sub(1));
                 if previous != last {
                     return Err(SequenceError::Gap {
                         expected: last,
@@ -413,6 +418,39 @@ mod tests {
         book.install_snapshot(2_000, &[level(50, 4)], &[level(51, 4)]);
         assert_eq!(book.bids().levels(), &[level(50, 4)]);
         assert_eq!(book.asks().levels(), &[level(51, 4)]);
+    }
+
+    #[test]
+    fn a_snapshot_resets_the_applied_count() {
+        // `applied()` reports updates since the last snapshot, so a
+        // resynchronization has to start the count again — otherwise
+        // "how far did this book get before it broke" is unanswerable.
+        let mut book = Book::new();
+        book.install_snapshot(1_000, &[level(100, 1)], &[level(101, 1)]);
+        book.apply(&update(1_000, 1_001, None, vec![level(100, 2)]))
+            .expect("straddles");
+        assert_eq!(book.applied(), 1);
+
+        book.install_snapshot(2_000, &[level(100, 1)], &[level(101, 1)]);
+        assert_eq!(book.applied(), 0);
+    }
+
+    #[test]
+    fn a_first_id_of_zero_reports_a_gap_rather_than_overflowing() {
+        // `first_id` is venue data. Without `pu` the fallback derives
+        // the previous id from it, and a zero must produce a gap report
+        // rather than an underflow.
+        let mut book = Book::new();
+        book.install_snapshot(0, &[level(100, 1)], &[level(101, 1)]);
+        book.apply(&update(0, 1, None, vec![level(100, 2)]))
+            .expect("straddles");
+        assert_eq!(
+            book.apply(&update(0, 1, None, vec![])),
+            Err(SequenceError::Gap {
+                expected: 1,
+                found: 0
+            })
+        );
     }
 
     #[test]

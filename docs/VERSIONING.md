@@ -53,7 +53,7 @@ rather than a warning in a README.
 
 | Stage | Promise |
 |---|---|
-| `2.0.0-alpha.N` | Nothing. Any API may change in any release. Changes appear in the changelog; there is no deprecation period |
+| `2.0.0-alpha.N` | Nothing. Any API may change in any release. Changes appear in the [changelog](../CHANGELOG.md); there is no deprecation period |
 | `2.0.0-beta.N` | APIs documented and unlikely to move, but breaking changes are still allowed and will be called out |
 | `2.0.0` | Public crate APIs and the Python binding surface are stable. Breaking changes require a major version |
 

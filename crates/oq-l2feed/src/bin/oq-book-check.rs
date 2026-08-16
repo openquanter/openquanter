@@ -21,7 +21,7 @@
 
 use std::process::ExitCode;
 
-use oq_l2feed::book::{Applied, Book, SequenceError};
+use oq_l2feed::book::{Applied, Book};
 use oq_l2feed::depth::{Scales, parse_depth};
 use oq_l2feed::frame::{Kind, decode_all};
 use oq_l2feed::manifest::is_gap;
@@ -118,6 +118,10 @@ fn main() -> ExitCode {
     let mut book = Book::new();
     let mut stats = Stats::default();
     let mut problems: Vec<String> = Vec::new();
+    // The archive holds diffs. Without a captured REST snapshot the
+    // next update has to bootstrap the book — true at the start of the
+    // file, and true again after every marked gap.
+    let mut needs_bootstrap = true;
 
     for (index, record) in records.iter().enumerate() {
         if record.kind == Kind::Control {
@@ -125,8 +129,10 @@ fn main() -> ExitCode {
                 stats.gap_markers += 1;
                 // A marked gap means the capture knows it stopped
                 // listening. The book cannot span it, so it is dropped
-                // and waits for a fresh snapshot.
+                // and rebuilt from the next update. This is not a
+                // sequence error: the capture declared it.
                 book = Book::new();
+                needs_bootstrap = true;
             }
             continue;
         }
@@ -143,14 +149,15 @@ fn main() -> ExitCode {
         };
         stats.updates += 1;
 
-        // The archive holds diffs; without a captured REST snapshot the
-        // first update bootstraps the book. Prices are still exact and
-        // sequencing is still checked — only the levels that existed
-        // before the capture began are missing, and they are not
-        // knowable from this file.
-        if stats.updates == 1 {
+        // Prices are still exact and sequencing is still checked from
+        // here on — only the levels that existed before this point are
+        // missing, and they are not knowable from this file.
+        if needs_bootstrap {
             book.install_snapshot(update.first_id.saturating_sub(1), &[], &[]);
-            stats.bootstrapped = true;
+            needs_bootstrap = false;
+            if stats.updates == 1 {
+                stats.bootstrapped = true;
+            }
         }
 
         match book.apply(&update) {
@@ -167,15 +174,22 @@ fn main() -> ExitCode {
             }
             Ok(Applied::AlreadyInSnapshot) => stats.pre_snapshot += 1,
             Err(e) => {
+                // Reached only for a break the capture did *not*
+                // declare: marked gaps bootstrap above and never land
+                // here. So every error counted here is a message lost
+                // silently, which is the defect this tool exists to
+                // find.
                 stats.sequence_errors += 1;
                 if problems.len() < max_report {
                     problems.push(format!("  [{index}] {e}"));
                 }
                 // Resynchronize the way a live consumer would: drop the
-                // book and rebuild from the next update.
+                // book and rebuild from this update.
                 book = Book::new();
                 book.install_snapshot(update.first_id.saturating_sub(1), &[], &[]);
-                let _ = book.apply(&update);
+                if book.apply(&update).is_ok() {
+                    stats.applied += 1;
+                }
                 stats.resyncs += 1;
             }
         }
@@ -192,8 +206,14 @@ fn main() -> ExitCode {
     println!("  applied       {}", stats.applied);
     println!("  pre-snapshot  {}", stats.pre_snapshot);
     println!("  unparseable   {}", stats.unparseable);
-    println!("gap markers     {}", stats.gap_markers);
-    println!("sequence errors {}", stats.sequence_errors);
+    println!(
+        "gap markers     {} (declared by the capture)",
+        stats.gap_markers
+    );
+    println!(
+        "sequence errors {} (breaks nobody declared)",
+        stats.sequence_errors
+    );
     println!("resyncs         {}", stats.resyncs);
     println!("crossed book    {}", stats.crossed);
     println!(
@@ -222,7 +242,7 @@ fn main() -> ExitCode {
         "UNPARSEABLE MESSAGES — the archive holds bytes this build cannot read"
     } else if stats.crossed > 0 {
         "CROSSED BOOK — reconstruction is wrong, not the market"
-    } else if stats.sequence_errors > stats.gap_markers {
+    } else if stats.sequence_errors > 0 {
         "SEQUENCE BREAKS BEYOND THE MARKED GAPS — messages were lost silently"
     } else {
         "RECONSTRUCTS CLEANLY"
@@ -230,12 +250,10 @@ fn main() -> ExitCode {
     println!("verdict: {verdict}");
 
     // A crossed book or an unreadable message means the archive is not
-    // what it claims. Sequence breaks that line up with marked gaps are
-    // normal and do not fail.
-    if stats.updates == 0
-        || stats.unparseable > 0
-        || stats.crossed > 0
-        || stats.sequence_errors > stats.gap_markers
+    // what it claims. Marked gaps are normal and do not fail — they are
+    // handled above and never reach the sequence-error counter, so any
+    // error left here is a break nobody recorded.
+    if stats.updates == 0 || stats.unparseable > 0 || stats.crossed > 0 || stats.sequence_errors > 0
     {
         return ExitCode::FAILURE;
     }
@@ -274,6 +292,3 @@ struct Stats {
     max_ask_depth: usize,
     bootstrapped: bool,
 }
-
-#[allow(dead_code)]
-fn assert_error_is_used(_: SequenceError) {}

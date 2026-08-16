@@ -35,6 +35,10 @@ BUDGETS=(
   "oq-data:0"
   "oq-parity:0"
   "oq-stats:0"
+  # Zero at runtime. The budget is measured over `--edges normal`, so
+  # the `criterion` dev-dependency behind `cargo bench` is out of scope
+  # by design: nothing that depends on a crate inherits its dev-deps,
+  # and the property being defended is what a *consumer* pulls in.
   "oq-examples:0"
   # Speaks WebSocket and HTTP to a venue, so it carries a TLS stack.
   # Isolated here on purpose: the engine must not inherit it.
