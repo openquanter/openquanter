@@ -49,6 +49,36 @@ pub enum Endpoint {
     Live,
 }
 
+/// Which leg of a hedged account an order applies to.
+///
+/// A venue can hold one position per contract or two — a long leg and a
+/// short leg carried at once. Under the second, an order that does not
+/// say which leg it belongs to is refused, and the refusal talks about
+/// a position side the caller never mentioned.
+///
+/// [`PositionSide::OneWay`] omits the parameter, which is what an
+/// account holding a single net position expects. It is not a default
+/// that happens to work: sending a leg on a one-way account is refused
+/// just as surely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PositionSide {
+    /// One net position per contract.
+    #[default]
+    OneWay,
+    /// The long leg of a hedged account.
+    Long,
+    /// The short leg of a hedged account.
+    Short,
+}
+
+impl PositionSide {
+    /// Whether this account carries both legs at once.
+    #[must_use]
+    pub const fn is_hedged(self) -> bool {
+        matches!(self, Self::Long | Self::Short)
+    }
+}
+
 /// An order to send.
 ///
 /// Prices and quantities are fixed-point integers, formatted against
@@ -69,7 +99,13 @@ pub struct NewOrder {
     /// survives a request whose answer never came back.
     pub client_id: String,
     /// Refuse to open or increase a position with this order.
+    ///
+    /// Mutually exclusive with a hedged [`NewOrder::position_side`]: a
+    /// venue that carries both legs expresses "close" by naming the leg
+    /// rather than by this flag, and refuses an order that sets both.
     pub reduce_only: bool,
+    /// Which leg, on a hedged account.
+    pub position_side: PositionSide,
 }
 
 /// What the venue said, or the fact that it did not say.

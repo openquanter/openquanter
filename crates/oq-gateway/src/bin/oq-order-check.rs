@@ -28,7 +28,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use oq_gateway::binance::Binance;
-use oq_gateway::exec::{Endpoint, Execution, NewOrder, Placed};
+use oq_gateway::exec::{Endpoint, Execution, NewOrder, Placed, PositionSide};
 use oq_gateway::{Credentials, StreamOutcome, UserEvent, UserStreamReader};
 use oq_types::{Instrument, PriceTicks, QtyLots, Side, TimeInForce};
 
@@ -148,6 +148,19 @@ fn main() -> ExitCode {
     // 4. An order that cannot fill: twenty percent below the mark, and
     //    large enough to clear the venue's minimum notional. Both
     //    matter — too close fills, too small is refused.
+    // Asked, not assumed. A hedged account refuses an order that does
+    // not name its leg, and a one-way account refuses one that does.
+    let hedged = match venue.is_hedged_account() {
+        Ok(h) => {
+            println!("position mode    {}", if h { "hedged" } else { "one-way" });
+            h
+        }
+        Err(e) => {
+            eprintln!("position mode    FAILED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let price = PriceTicks(mark.0 * 8 / 10);
     let qty = min_qty_for_notional(&instrument, price);
     let client_id = format!("oq-check-{}", std::process::id());
@@ -159,6 +172,11 @@ fn main() -> ExitCode {
         tif: TimeInForce::GoodTilCancel,
         client_id: client_id.clone(),
         reduce_only: false,
+        position_side: if hedged {
+            PositionSide::Long
+        } else {
+            PositionSide::OneWay
+        },
     };
     println!(
         "order            buy {} @ {} (id {client_id})",

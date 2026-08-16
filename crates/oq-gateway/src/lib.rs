@@ -51,10 +51,12 @@ pub use binance::parse_user_event;
 pub use binance::{AccountSnapshot, Binance, OpenOrder, PositionSnapshot, Trade, VenueError};
 pub use creds::Credentials;
 pub use exec::{
-    Endpoint, Execution, NewOrder, OrderAck, OrderUpdate, Placed, Reject, Unresolved, UserEvent,
-    UserStream,
+    Endpoint, Execution, NewOrder, OrderAck, OrderUpdate, Placed, PositionSide, Reject, Unresolved,
+    UserEvent, UserStream,
 };
 pub use reconcile::{Divergence, Expectation, ExpectedLeg, Reconciliation, Tolerance, reconcile};
 pub use snapshot::{Part, Snapshot, SnapshotBuilder};
-pub use stream::{KEY_LIFETIME, KEY_RENEWAL, StreamOutcome, UserStreamReader};
+pub use stream::{
+    Health, KEY_LIFETIME, KEY_RENEWAL, StreamHealth, StreamOutcome, UserStreamReader,
+};
 pub use watch::{Change, Tally, Watcher};

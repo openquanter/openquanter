@@ -26,8 +26,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::creds::Credentials;
 use crate::exec::{
-    Endpoint, Execution, NewOrder, OrderAck, OrderUpdate, Placed, Reject, Unresolved, UserEvent,
-    UserStream, decimal,
+    Endpoint, Execution, NewOrder, OrderAck, OrderUpdate, Placed, PositionSide, Reject, Unresolved,
+    UserEvent, UserStream, decimal,
 };
 use oq_types::{Instrument, Side, TimeInForce};
 
@@ -832,8 +832,13 @@ fn order_query(order: &NewOrder, instrument: &Instrument) -> String {
         Side::Sell => "SELL",
     };
     let qty = decimal(order.qty.0.abs(), instrument.qty_scale);
+    // `RESULT` rather than the default `ACK`: the venue then answers
+    // with the order's final state, so an order that filled on arrival
+    // says so in the response instead of only on the stream. Without
+    // it, a fast fill is known to the socket before it is known to the
+    // caller that placed it.
     let mut q = format!(
-        "symbol={}&side={side}&quantity={qty}&newClientOrderId={}",
+        "symbol={}&side={side}&quantity={qty}&newClientOrderId={}&newOrderRespType=RESULT",
         order.symbol, order.client_id
     );
     match order.limit_price {
@@ -850,8 +855,17 @@ fn order_query(order: &NewOrder, instrument: &Instrument) -> String {
         }
         None => q.push_str("&type=MARKET"),
     }
-    if order.reduce_only {
-        q.push_str("&reduceOnly=true");
+    match order.position_side {
+        PositionSide::OneWay => {
+            // Only meaningful on an account holding one net position.
+            // On a hedged one the venue refuses it, which is why the
+            // two are checked against each other before sending.
+            if order.reduce_only {
+                q.push_str("&reduceOnly=true");
+            }
+        }
+        PositionSide::Long => q.push_str("&positionSide=LONG"),
+        PositionSide::Short => q.push_str("&positionSide=SHORT"),
     }
     q
 }
@@ -868,6 +882,17 @@ impl Execution for Binance {
                     "client id {:?} is not usable: 1-36 characters of [A-Za-z0-9._:/-]",
                     order.client_id
                 ),
+            });
+        }
+        if order.reduce_only && order.position_side.is_hedged() {
+            // The venue refuses this combination, and its message names
+            // the position side rather than the conflict. Caught here
+            // so the answer arrives from the layer that can explain it.
+            return Placed::Rejected(Reject {
+                code: None,
+                message: "reduceOnly and a hedged position side are mutually exclusive: \
+                          a hedged account expresses a close by naming the leg"
+                    .to_string(),
             });
         }
         let url = signed_url(
@@ -947,6 +972,7 @@ mod order_entry {
             tif: TimeInForce::GoodTilCancel,
             client_id: "oq-1".into(),
             reduce_only: false,
+            position_side: PositionSide::OneWay,
         }
     }
 
@@ -1278,5 +1304,86 @@ impl Binance {
     /// Anything the request reports.
     pub fn ticker_price(&self, symbol: &str) -> Result<String, VenueError> {
         self.get_public("/fapi/v1/ticker/price", &format!("symbol={symbol}"))
+    }
+}
+
+impl Binance {
+    /// Whether this account carries a long and a short leg at once.
+    ///
+    /// Asked rather than assumed. The two modes take different order
+    /// parameters, and an order built for the wrong one is refused with
+    /// a message about a position side the caller never set — which is
+    /// a long way from the setting that actually caused it.
+    ///
+    /// # Errors
+    /// Anything the request reports, or a body without the field.
+    pub fn is_hedged_account(&self) -> Result<bool, VenueError> {
+        let body = self.get_signed("/fapi/v1/positionSide/dual", "")?;
+        field_bool(&body, "dualSidePosition").ok_or_else(|| malformed("position mode", &body))
+    }
+}
+
+#[cfg(test)]
+mod hedged_accounts {
+    use super::*;
+    use oq_types::{PriceTicks, QtyLots};
+
+    fn order(side: PositionSide, reduce_only: bool) -> NewOrder {
+        NewOrder {
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            limit_price: Some(PriceTicks(12_000_000)),
+            qty: QtyLots(2),
+            tif: TimeInForce::GoodTilCancel,
+            client_id: "oq-1".into(),
+            reduce_only,
+            position_side: side,
+        }
+    }
+
+    #[test]
+    fn a_one_way_account_names_no_leg() {
+        let q = order_query(
+            &order(PositionSide::OneWay, false),
+            &Instrument::linear(2, 3),
+        );
+        assert!(!q.contains("positionSide"), "{q}");
+    }
+
+    #[test]
+    fn a_hedged_account_names_the_leg() {
+        let q = order_query(&order(PositionSide::Long, false), &Instrument::linear(2, 3));
+        assert!(q.contains("positionSide=LONG"), "{q}");
+        let q = order_query(
+            &order(PositionSide::Short, false),
+            &Instrument::linear(2, 3),
+        );
+        assert!(q.contains("positionSide=SHORT"), "{q}");
+    }
+
+    #[test]
+    fn reduce_only_is_sent_only_where_the_venue_accepts_it() {
+        // One-way: the flag is how a close is expressed.
+        let q = order_query(
+            &order(PositionSide::OneWay, true),
+            &Instrument::linear(2, 3),
+        );
+        assert!(q.contains("reduceOnly=true"), "{q}");
+        // Hedged: naming the leg is how a close is expressed, and the
+        // flag is refused. It must not reach the wire even if set.
+        let q = order_query(&order(PositionSide::Long, true), &Instrument::linear(2, 3));
+        assert!(!q.contains("reduceOnly"), "{q}");
+    }
+
+    #[test]
+    fn the_final_state_is_requested_rather_than_a_bare_acknowledgement() {
+        // Without this the venue answers before it knows whether the
+        // order filled, and a fill that happened on arrival reaches the
+        // socket before it reaches the caller that placed it.
+        let q = order_query(
+            &order(PositionSide::OneWay, false),
+            &Instrument::linear(2, 3),
+        );
+        assert!(q.contains("newOrderRespType=RESULT"), "{q}");
     }
 }
