@@ -13,8 +13,8 @@
 #                         before stopping the old one, so both are
 #                         recording during the changeover and no message
 #                         is missed. Costs double bandwidth and CPU for
-#                         the overlap window, and leaves two trees to
-#                         merge afterwards.
+#                         the overlap window. The two trees are merged
+#                         automatically by oq-merge afterwards.
 #
 # Overlap does NOT mean two processes on one file. Each writer holds a
 # 1 MiB buffer and appends in buffer-sized chunks; two of them on the
@@ -35,6 +35,7 @@ ROOT="${ROOT:-/home/ubuntu/capture}"
 OVERLAP_ROOT="${OVERLAP_ROOT:-/home/ubuntu/capture-overlap}"
 SUPERVISOR="${SUPERVISOR:-/home/ubuntu/oq/capture-supervisor.sh}"
 OVERLAP_SECONDS="${OVERLAP_SECONDS:-120}"
+MERGE="${MERGE:-/home/ubuntu/oq-merge}"
 MODE=restart
 
 while [ $# -gt 0 ]; do
@@ -108,8 +109,32 @@ ROOT="$ROOT" "$SUPERVISOR" | tail -1
 
 if [ "$MODE" = overlap ]; then
   echo
-  echo "Overlap data is under $OVERLAP_ROOT and still needs merging into"
-  echo "$ROOT. It is left in place rather than merged automatically: the"
-  echo "two trees hold the same window from two processes, and deciding"
-  echo "which copy wins is not something to do unattended."
+  echo "$(stamp) merging the overlap"
+  [ -x "$MERGE" ] || { echo "upgrade: $MERGE not found; overlap tree left at $OVERLAP_ROOT" >&2; exit 1; }
+
+  # The old generation is the primary: within the overlap both trees
+  # hold the same messages, and keeping one connection's timeline
+  # rather than choosing per message is what stops local_ts from
+  # becoming a biased mixture. See oq-merge for the reasoning.
+  MERGED="$ROOT.merged.$(date -u +%Y%m%dT%H%M%SZ)"
+  if ! "$MERGE" --primary "$ROOT" --secondary "$OVERLAP_ROOT" --out "$MERGED"; then
+    echo "upgrade: merge failed; both trees left in place ($ROOT, $OVERLAP_ROOT)" >&2
+    exit 1
+  fi
+
+  # Swap the merged tree in only after it exists and the merge reported
+  # success. The originals are moved aside, never deleted here: an
+  # archive that cannot be regenerated does not get removed by a script
+  # on the strength of its own exit code.
+  ASIDE="$ROOT.pre-merge.$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$ROOT" "$ASIDE" && mv "$MERGED" "$ROOT" || {
+    echo "upgrade: could not swap the merged tree into place" >&2
+    exit 1
+  }
+  echo "$(stamp) merged tree is now $ROOT"
+  echo
+  echo "Originals kept at:"
+  echo "  $ASIDE          (old generation)"
+  echo "  $OVERLAP_ROOT   (new generation)"
+  echo "Remove them once the merged tree has been archived and verified."
 fi
