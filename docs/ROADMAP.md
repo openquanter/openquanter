@@ -38,13 +38,22 @@ commitments.
 
 | Milestone | Theme | Cumulative effort | Status |
 |---|---|---|---|
-| **M0** | Foundations: repository, capture, statistics | 3–6 pw | In progress |
-| **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Committed |
+| **M0** | Foundations: repository, capture, statistics | 3–6 pw | Mostly landed |
+| **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
 | **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | Committed |
 | **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | Triggered |
 | **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
 | **1.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
+
+"Largely landed" on M0 and M1 means most of the scope is built and tested,
+not that the exit gate has passed. As of the latest revision: the
+deterministic core, L0 matching, the margin overlay, the backtest host, the
+parity harness, the capture toolkit and the overfitting statistics are in
+and green. Still open on M1's gate are `criterion` benchmarks in CI, and
+trade-by-trade parity against a reference run — close, but not passed, and
+a gate that is nearly met is not met. Continuous capture is still a trial
+rather than a service. See the README for the built/not-built split.
 
 "Committed" means it is the current default plan. "Triggered" means the
 milestone has an entry condition stated below and will not be started before

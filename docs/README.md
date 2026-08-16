@@ -7,6 +7,7 @@ document links to its counterpart at the top.
 
 | Document | Contents |
 |---|---|
+| [Quickstart](QUICKSTART.md) · [中文](QUICKSTART.zh-CN.md) | Clone to a running backtest, three worked examples, how to write your own strategy |
 | [Requirements Specification](REQUIREMENTS.md) · [中文](REQUIREMENTS.zh-CN.md) | Positioning, users, functional and non-functional requirements, acceptance goals, fidelity ladder, non-goals |
 | [Roadmap](ROADMAP.md) · [中文](ROADMAP.zh-CN.md) | Milestones M0–M5 and 1.0, entry triggers and exit gates, release cadence, risk register |
 | [Implementation Plan](IMPLEMENTATION.md) · [中文](IMPLEMENTATION.zh-CN.md) | Architecture, design decisions, crate map, phase-by-phase task plan, testing strategy, performance budgets |
