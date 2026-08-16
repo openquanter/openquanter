@@ -113,10 +113,20 @@ pub struct State {
     pub engine: L0Engine,
     pub contract: Contract,
     pub table: TierTable,
+    /// How opposing exposure is accounted for.
+    pub mode: PositionMode,
     /// Signed position; zero when flat.
+    ///
+    /// Under [`PositionMode::OneWay`] this is the whole position. Under
+    /// [`PositionMode::Hedge`] it is the long leg, and never negative.
     pub qty: QtyLots,
     /// Average entry price of the open position.
     pub entry: PriceTicks,
+    /// The short leg, never positive. Unused under one-way netting,
+    /// where opposing fills offset into `qty` instead.
+    pub short_qty: QtyLots,
+    /// Average entry price of the short leg.
+    pub short_entry: PriceTicks,
     /// Free collateral plus position margin.
     pub balance: Cash,
     /// Realized profit and loss, cumulative.
@@ -158,8 +168,11 @@ impl State {
             engine: L0Engine::new(instrument),
             contract,
             table,
+            mode: PositionMode::OneWay,
             qty: QtyLots::ZERO,
             entry: PriceTicks::ZERO,
+            short_qty: QtyLots::ZERO,
+            short_entry: PriceTicks::ZERO,
             balance: starting_balance,
             realized: Cash::ZERO,
             funding: Cash::ZERO,
@@ -201,20 +214,71 @@ impl State {
         MarginedPosition::new(self.contract, self.entry, self.qty, self.balance)
     }
 
-    /// Account equity at the current mark.
+    /// Account for opposing exposure as two legs rather than one net.
     #[must_use]
-    pub fn equity(&self) -> Cash {
-        self.position().equity(self.mark)
+    pub fn with_mode(mut self, mode: PositionMode) -> Self {
+        self.mode = mode;
+        self
     }
 
-    /// Unrealized profit at the current mark.
+    /// The short leg as a margined position. Flat under one-way netting.
+    #[must_use]
+    pub fn short_position(&self) -> MarginedPosition {
+        MarginedPosition::new(self.contract, self.short_entry, self.short_qty, self.balance)
+    }
+
+    /// Account equity at the current mark.
+    ///
+    /// Both legs count. Under hedge accounting an account can hold a
+    /// profitable long and a losing short at once, and equity is what
+    /// remains after both — which is also what the venue liquidates
+    /// against.
+    #[must_use]
+    pub fn equity(&self) -> Cash {
+        self.balance.add(self.unrealized())
+    }
+
+    /// Unrealized profit at the current mark, across both legs.
     #[must_use]
     pub fn unrealized(&self) -> Cash {
-        if self.qty.is_zero() {
+        let long = if self.qty.is_zero() {
             Cash::ZERO
         } else {
             self.contract.unrealized(self.entry, self.mark, self.qty)
-        }
+        };
+        let short = if self.short_qty.is_zero() {
+            Cash::ZERO
+        } else {
+            self.contract
+                .unrealized(self.short_entry, self.mark, self.short_qty)
+        };
+        long.add(short)
+    }
+
+    /// Maintenance margin the venue requires, across both legs.
+    ///
+    /// Summed rather than netted: a hedged account posts margin for each
+    /// leg, which is the whole reason the mode changes what a strategy
+    /// can survive.
+    #[must_use]
+    pub fn maintenance(&self, mark: PriceTicks) -> Cash {
+        let long = if self.qty.is_zero() {
+            Cash::ZERO
+        } else {
+            self.table.maintenance(self.contract, mark, self.qty)
+        };
+        let short = if self.short_qty.is_zero() {
+            Cash::ZERO
+        } else {
+            self.table.maintenance(self.contract, mark, self.short_qty)
+        };
+        long.add(short)
+    }
+
+    /// Whether the account is flat on both legs.
+    #[must_use]
+    pub fn is_flat(&self) -> bool {
+        self.qty.is_zero() && self.short_qty.is_zero()
     }
 
     /// Apply a fill to the position, realizing profit on the part that
@@ -226,6 +290,10 @@ impl State {
     /// position's entry price is the fill price rather than a blend of
     /// the two sides.
     fn apply_fill(&mut self, fill: &Fill) {
+        if matches!(self.mode, PositionMode::Hedge) {
+            self.apply_fill_hedged(fill);
+            return;
+        }
         let signed = fill.position_delta();
         let old = self.qty;
         let new = old.add(signed);
@@ -261,15 +329,109 @@ impl State {
         self.qty = new;
     }
 
+    /// Apply a fill to whichever leg it names.
+    ///
+    /// The leg follows from side and offset together, the same pairing
+    /// the venue uses: a buy that opens grows the long, a sell that
+    /// closes shrinks it, a sell that opens grows the short, a buy that
+    /// closes shrinks it. Neither field alone is enough — a buy while a
+    /// short is open is ambiguous without the offset, which is why the
+    /// order carries it.
+    ///
+    /// A leg is never crossed through flat here. Closing more than the
+    /// leg holds realizes what it holds and stops, rather than opening
+    /// the opposite side by accident: under hedge accounting the other
+    /// side is a separate position with its own entry, and rolling into
+    /// it would invent one.
+    fn apply_fill_hedged(&mut self, fill: &Fill) {
+        let qty = fill.qty;
+        let opens = matches!(fill.offset, oq_types::Offset::Open);
+        let long_leg = match (fill.side, opens) {
+            (oq_types::Side::Buy, true) | (oq_types::Side::Sell, false) => true,
+            (oq_types::Side::Sell, true) | (oq_types::Side::Buy, false) => false,
+        };
+
+        if opens {
+            if long_leg {
+                let (q, e) = Self::blend(self.qty, self.entry, qty, fill.price, 1);
+                self.qty = q;
+                self.entry = e;
+            } else {
+                let (q, e) = Self::blend(self.short_qty, self.short_entry, qty, fill.price, -1);
+                self.short_qty = q;
+                self.short_entry = e;
+            }
+            return;
+        }
+
+        let (held, entry) = if long_leg {
+            (self.qty, self.entry)
+        } else {
+            (self.short_qty, self.short_entry)
+        };
+        if held.0 == 0 {
+            return;
+        }
+        let closing = qty.0.min(held.0.abs());
+        let signed_closed = QtyLots(closing * if held.0 > 0 { 1 } else { -1 });
+        let pnl = self.contract.unrealized(entry, fill.price, signed_closed);
+        self.realized = self.realized.add(pnl);
+        self.balance = self.balance.add(pnl);
+
+        let left = QtyLots(held.0 - signed_closed.0);
+        if long_leg {
+            self.qty = left;
+            if left.0 == 0 {
+                self.entry = PriceTicks::ZERO;
+            }
+        } else {
+            self.short_qty = left;
+            if left.0 == 0 {
+                self.short_entry = PriceTicks::ZERO;
+            }
+        }
+    }
+
+    /// Size-weighted average of an existing leg and an addition.
+    fn blend(
+        held: QtyLots,
+        entry: PriceTicks,
+        add: QtyLots,
+        price: PriceTicks,
+        sign: i64,
+    ) -> (QtyLots, PriceTicks) {
+        let held_abs = held.0.abs();
+        let total = held_abs + add.0;
+        if total == 0 {
+            return (QtyLots::ZERO, PriceTicks::ZERO);
+        }
+        let notional = i128::from(entry.0) * i128::from(held_abs) + i128::from(price.0) * i128::from(add.0);
+        (
+            QtyLots(sign * total),
+            PriceTicks((notional / i128::from(total)) as i64),
+        )
+    }
+
     /// Close the position at `price` because the venue liquidated it.
     fn liquidate(&mut self, price: PriceTicks) -> Output {
-        let qty = self.qty;
-        let pnl = self.contract.unrealized(self.entry, price, qty);
+        // Both legs close. A venue liquidating a hedged account does not
+        // leave one side running, and reporting only the long would
+        // understate what the account lost.
+        let pnl = self
+            .contract
+            .unrealized(self.entry, price, self.qty)
+            .add(self.contract.unrealized(self.short_entry, price, self.short_qty));
         self.realized = self.realized.add(pnl);
         self.balance = self.balance.add(pnl);
         let equity = self.balance;
+        // Reported as the net exposure that was closed out, which is the
+        // number a reader compares against the position they thought
+        // they had.
+        let qty = QtyLots(self.qty.0 + self.short_qty.0);
         self.qty = QtyLots::ZERO;
         self.entry = PriceTicks::ZERO;
+        self.short_qty = QtyLots::ZERO;
+        self.short_entry = PriceTicks::ZERO;
         self.engine.cancel_all();
         Output::Liquidated {
             at: self.now,
@@ -420,11 +582,19 @@ impl Kernel {
     /// there, and a model that only checks periodically reports
     /// survival through moves that ended the account.
     fn check_liquidation(&mut self, mark: PriceTicks) {
-        if !self.state.enforce_liquidation || self.state.qty.is_zero() {
+        if !self.state.enforce_liquidation || self.state.is_flat() {
             return;
         }
-        let position = self.state.position();
-        if position.is_liquidatable(&self.state.table, mark) {
+        let liquidatable = if matches!(self.state.mode, PositionMode::Hedge) {
+            // Equity against the sum of both legs' requirements. Netting
+            // them would let a hedged account carry exposure the venue
+            // charges twice for and this would not notice — which is the
+            // failure this mode exists to stop reporting as survival.
+            self.state.equity() < self.state.maintenance(mark)
+        } else {
+            self.state.position().is_liquidatable(&self.state.table, mark)
+        };
+        if liquidatable {
             let out = self.state.liquidate(mark);
             self.working.clear();
             self.outputs.push(out);
@@ -482,6 +652,23 @@ impl Kernel {
             now: self.state.now,
         }
     }
+}
+
+/// How the venue accounts for opposing exposure.
+///
+/// Not a preference: it is a property of the account at the venue, and
+/// it changes what a given sequence of fills means. The same buys and
+/// sells net to one position under [`PositionMode::OneWay`] and stand as
+/// two under [`PositionMode::Hedge`], holding margin for each and
+/// realizing profit against different entries. A backtest that models
+/// the wrong one reports a margin requirement the account never had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PositionMode {
+    /// Opposing fills offset; one signed position.
+    #[default]
+    OneWay,
+    /// Long and short stand separately, as Binance calls hedge mode.
+    Hedge,
 }
 
 /// Everything about a kernel that a replay must reproduce.
@@ -819,6 +1006,154 @@ mod tests {
         assert!(
             s.entry.0 >= 1_010_000,
             "the new short's entry is the fill price, not a blend"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hedge_tests {
+    use super::*;
+    use oq_types::{Liquidity, Offset, Side, TradeId};
+
+    fn fill(side: Side, offset: Offset, price: i64, qty: i64) -> Fill {
+        Fill {
+            stamp: oq_types::Stamp::synthetic(0),
+            instrument: InstrumentId::new(1),
+            order: OrderId::new(1),
+            trade: TradeId::new(1),
+            side,
+            offset,
+            price: PriceTicks(price),
+            qty: QtyLots(qty),
+            liquidity: Liquidity::Maker,
+        }
+    }
+
+    fn state() -> State {
+        State::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(20_000),
+        )
+        .with_mode(PositionMode::Hedge)
+    }
+
+    /// The point of the mode: opposing fills do not cancel out.
+    #[test]
+    fn a_long_and_a_short_stand_side_by_side() {
+        let mut s = state();
+        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
+        s.apply_fill(&fill(Side::Sell, Offset::Open, 6_100_000, 4));
+
+        assert_eq!(s.qty, QtyLots(10), "the long is untouched by the short");
+        assert_eq!(s.entry, PriceTicks(6_000_000));
+        assert_eq!(s.short_qty, QtyLots(-4));
+        assert_eq!(s.short_entry, PriceTicks(6_100_000));
+        assert_eq!(
+            s.realized,
+            Cash::ZERO,
+            "opening a short against a long realizes nothing"
+        );
+    }
+
+    /// Under netting the same fills leave one position and no short leg,
+    /// which is the difference the mode makes.
+    #[test]
+    fn netting_gives_a_different_position_from_the_same_fills() {
+        let mut hedged = state();
+        let mut netted = State::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(20_000),
+        );
+        for f in [
+            fill(Side::Buy, Offset::Open, 6_000_000, 10),
+            fill(Side::Sell, Offset::Open, 6_100_000, 4),
+        ] {
+            hedged.apply_fill(&f);
+            netted.apply_fill(&f);
+        }
+        assert_eq!(netted.qty, QtyLots(6), "netting offsets");
+        assert_eq!(netted.short_qty, QtyLots(0));
+        assert_eq!(hedged.qty, QtyLots(10));
+        assert_eq!(hedged.short_qty, QtyLots(-4));
+    }
+
+    #[test]
+    fn closing_a_leg_realizes_against_that_legs_entry() {
+        let mut s = state();
+        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
+        s.apply_fill(&fill(Side::Sell, Offset::Open, 6_100_000, 10));
+        // Close the short 100_000 ticks lower: a gain on the short leg,
+        // computed against 6_100_000 and not against the long's entry.
+        s.apply_fill(&fill(Side::Buy, Offset::Close, 6_000_000, 10));
+
+        assert_eq!(s.short_qty, QtyLots(0));
+        assert_eq!(s.qty, QtyLots(10), "the long is still open");
+        let expected = Contract::new(1_000).unrealized(
+            PriceTicks(6_100_000),
+            PriceTicks(6_000_000),
+            QtyLots(-10),
+        );
+        assert_eq!(s.realized, expected);
+    }
+
+    /// Closing more than a leg holds must not roll into the other side:
+    /// that side is a separate position with its own entry, and opening
+    /// it here would invent one.
+    #[test]
+    fn an_oversized_close_stops_at_flat() {
+        let mut s = state();
+        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 5));
+        s.apply_fill(&fill(Side::Sell, Offset::Close, 6_050_000, 12));
+        assert_eq!(s.qty, QtyLots(0));
+        assert_eq!(s.short_qty, QtyLots(0), "no short was invented");
+        assert_eq!(s.entry, PriceTicks::ZERO);
+    }
+
+    /// Margin is held for both legs, so a hedged account requires more
+    /// than the net exposure suggests. This is the reason the mode
+    /// matters to a tail report.
+    #[test]
+    fn maintenance_covers_both_legs_rather_than_the_net() {
+        let mut hedged = state();
+        hedged.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
+        hedged.apply_fill(&fill(Side::Sell, Offset::Open, 6_000_000, 10));
+        let mark = PriceTicks(6_000_000);
+
+        assert_eq!(
+            hedged.qty.0 + hedged.short_qty.0,
+            0,
+            "net exposure is zero, which is exactly the trap"
+        );
+        assert!(
+            hedged.maintenance(mark) > Cash::ZERO,
+            "a flat net still posts margin on both legs"
+        );
+    }
+
+    #[test]
+    fn equity_counts_both_legs() {
+        let mut s = state();
+        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
+        s.apply_fill(&fill(Side::Sell, Offset::Open, 6_000_000, 10));
+        s.mark = PriceTicks(6_100_000);
+        // Both entered at the same price, so the long's gain and the
+        // short's loss are the same size and cancel.
+        assert_eq!(s.unrealized(), Cash::ZERO);
+        assert_eq!(s.equity(), s.balance);
+
+        // Entered on opposite sides of the mark they do not cancel —
+        // they add, which is the case a netted view cannot express.
+        let mut both_winning = state();
+        both_winning.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
+        both_winning.apply_fill(&fill(Side::Sell, Offset::Open, 6_200_000, 10));
+        both_winning.mark = PriceTicks(6_100_000);
+        assert!(
+            both_winning.unrealized() > Cash::ZERO,
+            "a long bought below the mark and a short sold above it are both ahead"
         );
     }
 }
