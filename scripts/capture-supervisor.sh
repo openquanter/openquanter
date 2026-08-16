@@ -59,5 +59,21 @@ for sym in $SYMBOLS; do
 done
 
 sleep 2
-running=$(pgrep -xc oq-capture 2>/dev/null || echo 0)
-echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') alive=$alive started=$started running=$running"
+running=$(pgrep -xc oq-capture 2>/dev/null) || running=0
+expected=0
+for sym in $SYMBOLS; do
+  for _st in $STREAMS; do expected=$((expected + 1)); done
+done
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') alive=$alive started=$started running=$running/$expected"
+
+# Heartbeat only when every stream is up, and only from here.
+#
+# The archive job cannot stand in for this. If capture stops entirely --
+# the disk floor is hit, the binary is missing, the venue rejects every
+# connection -- the archive still runs, finds nothing to do, exits zero
+# and reports success. Both of the other monitors would stay green while
+# not a single message was being recorded. Liveness has to be asserted
+# by the thing that knows how many streams there should be.
+if [ -n "${CAPTURE_HEARTBEAT:-}" ] && [ "$running" -eq "$expected" ]; then
+  curl -fsS --max-time 8 "${CAPTURE_HEARTBEAT}&msg=streams-${running}" >/dev/null 2>&1 || true
+fi
