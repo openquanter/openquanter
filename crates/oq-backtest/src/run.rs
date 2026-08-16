@@ -714,7 +714,11 @@ mod hedge_mode_tests {
         let data = ticks();
 
         let mut s = BothSides::default();
-        let netted = run(&config(oq_core::PositionMode::OneWay, 20_000), &mut s, &data);
+        let netted = run(
+            &config(oq_core::PositionMode::OneWay, 20_000),
+            &mut s,
+            &data,
+        );
 
         let mut s = BothSides::default();
         let hedged = run(&config(oq_core::PositionMode::Hedge, 20_000), &mut s, &data);
@@ -740,10 +744,18 @@ mod hedge_mode_tests {
         let balance = 30;
 
         let mut s = BothSides::default();
-        let netted = run(&config(oq_core::PositionMode::OneWay, balance), &mut s, &data);
+        let netted = run(
+            &config(oq_core::PositionMode::OneWay, balance),
+            &mut s,
+            &data,
+        );
 
         let mut s = BothSides::default();
-        let hedged = run(&config(oq_core::PositionMode::Hedge, balance), &mut s, &data);
+        let hedged = run(
+            &config(oq_core::PositionMode::Hedge, balance),
+            &mut s,
+            &data,
+        );
 
         assert!(
             netted.liquidations.is_empty(),

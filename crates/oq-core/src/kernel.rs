@@ -224,7 +224,12 @@ impl State {
     /// The short leg as a margined position. Flat under one-way netting.
     #[must_use]
     pub fn short_position(&self) -> MarginedPosition {
-        MarginedPosition::new(self.contract, self.short_entry, self.short_qty, self.balance)
+        MarginedPosition::new(
+            self.contract,
+            self.short_entry,
+            self.short_qty,
+            self.balance,
+        )
     }
 
     /// Account equity at the current mark.
@@ -405,7 +410,8 @@ impl State {
         if total == 0 {
             return (QtyLots::ZERO, PriceTicks::ZERO);
         }
-        let notional = i128::from(entry.0) * i128::from(held_abs) + i128::from(price.0) * i128::from(add.0);
+        let notional =
+            i128::from(entry.0) * i128::from(held_abs) + i128::from(price.0) * i128::from(add.0);
         (
             QtyLots(sign * total),
             PriceTicks((notional / i128::from(total)) as i64),
@@ -417,10 +423,13 @@ impl State {
         // Both legs close. A venue liquidating a hedged account does not
         // leave one side running, and reporting only the long would
         // understate what the account lost.
-        let pnl = self
-            .contract
-            .unrealized(self.entry, price, self.qty)
-            .add(self.contract.unrealized(self.short_entry, price, self.short_qty));
+        let pnl =
+            self.contract
+                .unrealized(self.entry, price, self.qty)
+                .add(
+                    self.contract
+                        .unrealized(self.short_entry, price, self.short_qty),
+                );
         self.realized = self.realized.add(pnl);
         self.balance = self.balance.add(pnl);
         let equity = self.balance;
@@ -592,7 +601,9 @@ impl Kernel {
             // failure this mode exists to stop reporting as survival.
             self.state.equity() < self.state.maintenance(mark)
         } else {
-            self.state.position().is_liquidatable(&self.state.table, mark)
+            self.state
+                .position()
+                .is_liquidatable(&self.state.table, mark)
         };
         if liquidatable {
             let out = self.state.liquidate(mark);

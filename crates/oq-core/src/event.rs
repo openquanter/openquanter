@@ -351,7 +351,6 @@ mod tests {
         assert!(Event::decode(9_999, &[0u8; 8]).is_none());
     }
 
-    #[test]
     /// A journal written before orders stated open or close must still
     /// replay, and replay as what it meant: everything was an open.
     #[test]
