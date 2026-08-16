@@ -1,0 +1,19 @@
+[package]
+name = "oq-examples"
+version = "0.0.1"
+description = "Teaching examples for the OpenQuanter trading framework"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Examples are documentation, not a library anyone should depend on.
+publish = false
+
+[dependencies]
+oq-backtest = { path = "../oq-backtest", version = "0.0.1" }
+oq-engine = { path = "../oq-engine", version = "0.0.1" }
+oq-margin = { path = "../oq-margin", version = "0.0.1" }
+oq-types = { path = "../oq-types", version = "0.0.1" }
+
+[lints]
+workspace = true

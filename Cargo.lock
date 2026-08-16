@@ -241,6 +241,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oq-examples"
+version = "0.0.1"
+dependencies = [
+ "oq-backtest",
+ "oq-engine",
+ "oq-margin",
+ "oq-types",
+]
+
+[[package]]
 name = "oq-hash"
 version = "0.0.1"
 
