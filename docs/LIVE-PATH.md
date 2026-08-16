@@ -368,14 +368,18 @@ The reader was pointed at a live account for eight hours, placing
 nothing. Six observations are recorded here because each bears on a
 decision that until then rested on someone else's release notes.
 
-**Two orders left the book in the same millisecond, for opposite
-reasons.** One had filled; the other had been cancelled and replaced.
-The last snapshot before they disappeared reported zero executed
-quantity for both, and the venue offers no way to tell them apart from a
-snapshot. A reader that labelled both "filled" would have been wrong
-about one, and "cancelled" wrong about the other. L2 and L6 say to
-report the departure and refuse the cause; this is the instant that
-makes refusing the only answer that is not a fabrication.
+**Seven orders left the book in the same millisecond. One had filled;
+six had been cancelled.** The position closed, the resting ladder behind
+it was withdrawn, and the venue reported zero executed quantity for all
+seven — there is no way to tell them apart from a snapshot. Labelling
+them "filled" is wrong six times. Labelling them "cancelled" is wrong
+once, and that once is the only one that moved money: it misses the fill
+and reports a position that no longer exists as still open, which is the
+state L3 exists to refuse. An earlier instant in the same run had two
+orders leave together, one filled and one cancelled and replaced, so
+both guesses were wrong in the same breath. L2 and L6 say to report the
+departure and decline to name a cause. That was borrowed caution; it is
+now the only answer available that is not a fabrication.
 
 **A fill is invisible to polling. Only its consequence is.** The order
 that filled did so between two reads. It was never observed partially
