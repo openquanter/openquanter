@@ -102,6 +102,38 @@ A `gap` record is never omitted for being inconvenient. A reader must be
 able to tell "nothing happened in the market" from "we were not
 listening", and only an explicit marker makes that distinction possible.
 
+### A marker's position is part of what it says
+
+The marker does not say "this file has a gap somewhere". It says the
+capture stopped listening *at this point in the stream*, and readers use
+it that way: `oq-book-check` drops the book where it finds one and treats
+the next update as a bootstrap rather than as a sequence error. Presence
+alone is not enough. Any tool that rewrites a file must carry every
+control record with the data it sat between, or it moves the boundary
+between "declared" and "silently lost" without touching either.
+
+This is not hypothetical. `oq-resequence` first wrote the control records
+as a block at the front of the output. Four files damaged by a
+duplicate-writer incident then reported one undeclared break each, when
+in fact the repair had been complete:
+
+| file | before repair | markers written first | markers kept in place |
+|---|---|---|---|
+| BTCUSDT | 54 | 1 | 0 |
+| ETHUSDT | 56 | 1 | 0 |
+| BNBUSDT | 52 | 1 | 0 |
+| HYPEUSDT | 50 | 1 | 0 |
+
+Undeclared sequence breaks, measured with `oq-book-check`. Every file
+carried three gap markers.
+
+The residual break in each was the relocated marker, not a loss. Nothing
+from that hour was missing. The earlier record of this incident concluded
+that one break per instrument was churn no reordering could recover; that
+conclusion was wrong, and it was wrong in the direction that costs most —
+a tool reporting damage it had itself introduced, in a file it had just
+finished repairing correctly.
+
 ## 5. Sealing a day
 
 When rotation occurs, the completed day is sealed:
