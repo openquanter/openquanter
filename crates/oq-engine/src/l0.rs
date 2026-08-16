@@ -76,6 +76,8 @@ pub struct L0Engine {
     book: Book,
     ids: IdAllocator,
     prev_price: Option<PriceTicks>,
+    /// Timestamp of the previous tick, for stamping gap-crossed fills.
+    prev_stamp: Option<oq_types::Stamp>,
     /// Reused across ticks so the hot path does not allocate.
     fills: Vec<L0Fill>,
     /// Scratch for gap-fill candidate selection, likewise reused.
@@ -90,6 +92,7 @@ impl L0Engine {
             book: Book::new(),
             ids: IdAllocator::new(),
             prev_price: None,
+            prev_stamp: None,
             fills: Vec::with_capacity(16),
             candidates: Vec::with_capacity(16),
         }
@@ -159,6 +162,7 @@ impl L0Engine {
         // window's close against this window's extremes, so it must not
         // see this tick's price yet.
         self.prev_price = Some(tick.last);
+        self.prev_stamp = Some(tick.stamp);
         &self.fills
     }
 
@@ -221,12 +225,20 @@ impl L0Engine {
             // level, so that is where the trade happened. Filling at the
             // window's close instead would credit the strategy with a
             // price the market only reached later.
-            self.execute(
+            // Stamped with the *previous* tick's time, not this one. The
+            // crossing happened somewhere in the interval between the
+            // two observations, and neither endpoint is more true than
+            // the other; the reference this tier reproduces uses the
+            // earlier one, so L0 does too. A fill that appears to
+            // precede the tick which revealed it looks wrong at first
+            // glance and is exactly as defensible as the alternative.
+            let stamp = self.prev_stamp.unwrap_or(tick.stamp);
+            self.execute_at(
                 &resting,
                 price,
                 Liquidity::Maker,
                 FillReason::GapCrossed,
-                tick,
+                stamp,
             );
         }
     }
@@ -314,6 +326,21 @@ impl L0Engine {
         reason: FillReason,
         tick: &Tick,
     ) {
+        self.execute_at(resting, price, liquidity, reason, tick.stamp);
+    }
+
+    /// Execute with an explicit timestamp.
+    ///
+    /// Separated because gap-crossed fills carry the previous tick's
+    /// time; see the call site for why.
+    fn execute_at(
+        &mut self,
+        resting: &Resting,
+        price: PriceTicks,
+        liquidity: Liquidity,
+        reason: FillReason,
+        stamp: oq_types::Stamp,
+    ) {
         let qty = resting.order.remaining();
         if qty.0 <= 0 {
             self.book.replace(resting.id(), None);
@@ -331,7 +358,7 @@ impl L0Engine {
         self.book.replace(resting.id(), still_working);
 
         let fill = Fill {
-            stamp: tick.stamp,
+            stamp,
             instrument: self.instrument,
             order: resting.id(),
             trade: self.ids.trade(),
@@ -460,6 +487,48 @@ mod tests {
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].fill.qty, QtyLots(2));
         assert!(e.book().is_empty(), "a filled order leaves the book");
+    }
+
+    #[test]
+    fn a_gap_crossed_fill_carries_the_previous_tick_time() {
+        // The crossing happened between two observations, and the tier
+        // this engine reproduces stamps it with the earlier one. A fill
+        // that appears to precede the tick which revealed it is the
+        // intended behaviour, not an off-by-one.
+        let mut e = engine();
+        e.on_tick(&tick(1_000, 100, 100, 100));
+        e.submit_limit(
+            OrderId::new(1),
+            Side::Buy,
+            PriceTicks(95),
+            QtyLots(1),
+            Stamp::synthetic(1_000),
+        );
+        let fills = e.on_tick(&tick(2_000, 99, 100, 90)).to_vec();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].reason, FillReason::GapCrossed);
+        assert_eq!(
+            fills[0].fill.stamp,
+            Stamp::synthetic(1_000),
+            "gap-crossed fills carry the previous tick's stamp"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_crossing_carries_the_current_tick_time() {
+        let mut e = engine();
+        e.on_tick(&tick(1_000, 100, 100, 100));
+        e.submit_limit(
+            OrderId::new(1),
+            Side::Buy,
+            PriceTicks(100),
+            QtyLots(1),
+            Stamp::synthetic(1_000),
+        );
+        let fills = e.on_tick(&tick(2_000, 110, 110, 100)).to_vec();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].reason, FillReason::Crossed);
+        assert_eq!(fills[0].fill.stamp, Stamp::synthetic(2_000));
     }
 
     #[test]
