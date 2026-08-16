@@ -212,6 +212,27 @@ pub trait Venue {
         payload: &[u8],
         scales: crate::depth::Scales,
     ) -> Result<crate::depth::DepthUpdate, crate::depth::ParseError>;
+
+    /// Which archive window a record at `ts` belongs to.
+    ///
+    /// The default divides the clock: one file per UTC day, or per UTC
+    /// hour. That is right for a market that never closes and wrong for
+    /// every market that does. A US equities session is six and a half
+    /// hours inside a UTC day, mostly empty; a futures session opens the
+    /// evening before and crosses UTC midnight, so one trading day
+    /// becomes two files under this rule.
+    ///
+    /// The archive's central invariant is that a file holds one whole
+    /// period — `oq-merge`, `oq-book-check` and `oq-ingest` all lean on
+    /// it — so a venue whose day is not the clock's day overrides this
+    /// rather than having the invariant bent around it.
+    ///
+    /// It lives on the venue because a session belongs to a market, not
+    /// to a capture process, and because the alternative is a global
+    /// enum that grows a variant per exchange calendar.
+    fn window_of(&self, ts: i64, rotation: crate::day::Rotation) -> crate::day::Window {
+        crate::day::Window::from_nanos(ts, rotation)
+    }
 }
 
 /// One trade, reduced to what a tick is built from.
