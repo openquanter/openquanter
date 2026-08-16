@@ -15,7 +15,7 @@
 //! exactly; it is preserved rather than improved, because an L0 that
 //! is *better* than the reference is an L0 that fails parity.
 
-use oq_types::{PriceTicks, Stamp};
+use oq_types::{PriceTicks, QtyLots, Stamp};
 
 /// One aggregated market observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -31,6 +31,16 @@ pub struct Tick {
     pub bid: PriceTicks,
     /// Best ask at the end of the window; zero when unknown.
     pub ask: PriceTicks,
+    /// Traded volume as the venue reports it for this window.
+    ///
+    /// Carried because a whole family of strategies triggers on traded
+    /// volume, and a tick stream without it cannot express them at all.
+    /// The accumulation convention is the venue's — some reset it at a
+    /// period boundary, some run it cumulatively — so consumers take
+    /// *differences* between consecutive ticks rather than reading the
+    /// absolute value, and a difference that comes out negative means a
+    /// reset rather than a trade.
+    pub volume: QtyLots,
 }
 
 impl Tick {
@@ -45,6 +55,7 @@ impl Tick {
             low: PriceTicks(low),
             bid: PriceTicks::ZERO,
             ask: PriceTicks::ZERO,
+            volume: QtyLots::ZERO,
         }
     }
 
@@ -58,6 +69,30 @@ impl Tick {
             low: PriceTicks(low),
             bid: PriceTicks(bid),
             ask: PriceTicks(ask),
+            volume: QtyLots::ZERO,
+        }
+    }
+
+    /// The same tick with traded volume attached.
+    #[must_use]
+    pub const fn with_volume(mut self, volume: i64) -> Self {
+        self.volume = QtyLots(volume);
+        self
+    }
+
+    /// Volume traded since `previous`.
+    ///
+    /// A negative raw difference means the venue reset its accumulator
+    /// at a period boundary, not that volume went backwards; the delta
+    /// is reported as zero for that tick, which is what a consumer
+    /// counting traded volume wants.
+    #[must_use]
+    pub const fn volume_since(&self, previous: &Self) -> QtyLots {
+        let delta = self.volume.0 - previous.volume.0;
+        if delta < 0 {
+            QtyLots::ZERO
+        } else {
+            QtyLots(delta)
         }
     }
 
@@ -153,5 +188,28 @@ mod tests {
         assert_eq!(t.sell_trigger(), PriceTicks(100));
         assert_eq!(t.up_extent(), PriceTicks(100));
         assert_eq!(t.dn_extent(), PriceTicks(100));
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+    use oq_types::Stamp;
+
+    #[test]
+    fn volume_deltas_are_differences() {
+        let a = Tick::trades_only(Stamp::synthetic(1), 100, 100, 100).with_volume(500);
+        let b = Tick::trades_only(Stamp::synthetic(2), 100, 100, 100).with_volume(1_200);
+        assert_eq!(b.volume_since(&a), QtyLots(700));
+    }
+
+    #[test]
+    fn a_reset_reads_as_no_volume_not_negative_volume() {
+        // Venues that reset an accumulator at a period boundary produce
+        // a backwards step. Reporting that as negative traded volume
+        // would make a volume trigger fire on the reset itself.
+        let a = Tick::trades_only(Stamp::synthetic(1), 100, 100, 100).with_volume(9_000);
+        let b = Tick::trades_only(Stamp::synthetic(2), 100, 100, 100).with_volume(0);
+        assert_eq!(b.volume_since(&a), QtyLots::ZERO);
     }
 }

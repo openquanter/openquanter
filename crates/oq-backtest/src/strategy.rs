@@ -17,7 +17,7 @@
 //! on top of this, not a widening of the boundary the engine has to
 //! trust.
 
-use oq_types::{OrderId, PriceTicks, QtyLots, Side};
+use oq_types::{Fill, OrderId, PriceTicks, QtyLots, Side};
 
 /// What a strategy wants to happen next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +65,21 @@ pub trait Strategy {
     /// buffer's lifetime. Returning intents rather than a `Vec` keeps
     /// the per-tick path free of allocation.
     fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>);
+
+    /// Called once per fill, before [`Strategy::on_tick`] for the tick
+    /// that produced it.
+    ///
+    /// Position management lives here for most strategies — a ladder
+    /// that extends when an entry fills, a take-profit that re-prices
+    /// as the average moves. A strategy that could not observe its own
+    /// executions would be able to open positions and never manage
+    /// them.
+    ///
+    /// The ordering matters and is fixed: every fill from a tick is
+    /// delivered before the tick itself, and `ctx` already reflects the
+    /// fill. A strategy therefore never sees a stale position, and
+    /// never has to reconstruct one.
+    fn on_fill(&mut self, _fill: &Fill, _ctx: &Context, _out: &mut Vec<Intent>) {}
 
     /// A name for reports.
     fn name(&self) -> &str;
