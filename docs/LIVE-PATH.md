@@ -362,6 +362,55 @@ ones that matter: an adapter that turns a timeout into a rejection fails.
 Both are cheaper than the alternative, which is discovering the same
 things from the release history above.
 
+## What the first live run observed
+
+The reader was pointed at a live account for eight hours, placing
+nothing. Six observations are recorded here because each bears on a
+decision that until then rested on someone else's release notes.
+
+**Two orders left the book in the same millisecond, for opposite
+reasons.** One had filled; the other had been cancelled and replaced.
+The last snapshot before they disappeared reported zero executed
+quantity for both, and the venue offers no way to tell them apart from a
+snapshot. A reader that labelled both "filled" would have been wrong
+about one, and "cancelled" wrong about the other. L2 and L6 say to
+report the departure and refuse the cause; this is the instant that
+makes refusing the only answer that is not a fabrication.
+
+**A fill is invisible to polling. Only its consequence is.** The order
+that filled did so between two reads. It was never observed partially
+filled and never observed terminal — resting, then gone, with the
+position changed. When it happened, at what price, in how many pieces:
+all of that existed only in the stream. L6 argued this; the run
+demonstrates it.
+
+**A partial read is routine, not exotic.** Four of one hundred and
+twenty-four reads came back missing a part, each missing a different
+one. The next two thousand three hundred were whole. That the failures
+were an episode rather than a rate is itself the finding: a standing
+three percent would justify a backoff the evidence does not support.
+None of the four were diffed, so none reported orders vanishing that had
+not.
+
+**The balance moved while nothing else did.** At a funding boundary,
+with no fill, no order change and no position change, the account was
+charged. Reconciliation that compares only positions and orders is blind
+to every event of this shape, and that shape covers every fee,
+settlement and transfer the strategy did not cause.
+
+**The venue's average entry matched the computed blend exactly** — to
+the last bit of the float, on a position that had just doubled. That
+computation had been checked against another implementation of the same
+intent, never against a venue.
+
+**The gate reported success on a read that never happened.** Single-shot
+mode exited zero when a read came back partial, and single-shot is the
+mode a startup gate uses: it would have reported agreement about an
+account it had not seen. This is L8's shape — the third outcome that is
+neither pass nor fail — surfacing in a place L8 had not been applied to.
+It exits distinctly now. The defect came from running the thing, not
+from reading it.
+
 ## Order
 
 1. **Read path + reconciler.** Runs against a live account, changes
