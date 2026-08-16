@@ -7,6 +7,7 @@
 | 文档 | 内容 |
 |---|---|
 | [快速上手](QUICKSTART.zh-CN.md) · [English](QUICKSTART.md) | 从克隆到跑通回测、三个示例、如何写自己的策略 |
+| [版本规则](VERSIONING.zh-CN.md) · [English](VERSIONING.md) | 全工作区一个版本、为什么从 2 开始、每个阶段承诺什么 |
 | [需求规格说明](REQUIREMENTS.zh-CN.md) · [English](REQUIREMENTS.md) | 定位、目标用户、功能与非功能需求、验收目标、保真度阶梯、非目标 |
 | [路线图](ROADMAP.zh-CN.md) · [English](ROADMAP.md) | M0–M5 与 1.0 各里程碑、启动触发条件与验收门、发布节奏、风险清单 |
 | [实施方案](IMPLEMENTATION.zh-CN.md) · [English](IMPLEMENTATION.md) | 架构、设计决策、crate 划分、分阶段任务计划、测试策略、性能预算 |

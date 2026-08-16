@@ -202,7 +202,7 @@ the rest honestly.
 | NFR-9 **Onboarding** | A new user reaches a running example backtest in ≤ 30 minutes from a clean machine, using shipped sample data. |
 | NFR-10 **Agent-friendly codebase** | Each crate carries a short `AGENTS.md` (<200 lines) stating local commands and invariants. Verification is layered: unit → property → golden → parity. Golden baselines change only with explicit human confirmation. |
 | NFR-11 **Bus-factor resistance** | Design rationale lives in the repository, not in anyone's head. Behavioral knowledge is encoded in deterministic tests, not tribal memory. |
-| NFR-12 **Versioning** | Pre-1.0: APIs may break at any minor version, with changes listed in the changelog. Post-1.0: semantic versioning is enforced for public crate APIs and the Python binding surface. |
+| NFR-12 **Versioning** | One version across the workspace, currently `2.0.0-alpha.N`. Before `2.0.0` APIs may break in any release, with changes listed in the changelog; from `2.0.0` semantic versioning is enforced for public crate APIs and the Python binding surface. See [Versioning](VERSIONING.md). |
 
 ---
 
@@ -230,7 +230,7 @@ one use among several rather than something the framework promises.
 | **G8** | HFT fidelity | L1 queue + latency + impact; L2 book reconstruction; stylized-facts test set passes | Fidelity test suite + calibration report |
 | **G9** | Inference | Single-row GBDT inference ≤ 10 µs in-process; Python/Rust prediction parity gate passes | Inference benchmark + parity test |
 | **G10** | RL environments | Vectorized batch environments with full seed propagation and reproducible training runs | Training throughput benchmark + reproduction test |
-| **G11** | Adoption readiness | Cold start to first backtest ≤ 30 minutes; public CI green; semantic versioning after 1.0 | External-user cold-start trial |
+| **G11** | Adoption readiness | Cold start to first backtest ≤ 30 minutes; public CI green; semantic versioning from 2.0 | External-user cold-start trial |
 
 ---
 
@@ -275,7 +275,7 @@ Fidelity is two independent axes: **execution realism** (the ladder) and
 - **Not doing:** generative simulators as a P&L judgment source.
 - **Not doing:** hosted execution of user strategies with custody of user API
   keys. Custodial key handling is a liability class this project will not take on.
-- **Not promising:** API stability before 1.0, or a support SLA. Community
+- **Not promising:** API stability before 2.0, or a support SLA. Community
   support is best-effort.
 - **Not shipping:** trading strategies with production parameters, proprietary
   datasets, or anything resembling investment advice.

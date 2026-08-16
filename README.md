@@ -4,7 +4,7 @@
 
 [English](README.md) · [中文](README.zh-CN.md)
 
-> ⚠️ Early development. APIs are unstable before 1.0. Not financial advice; use at your own risk.
+> ⚠️ Early development. APIs are unstable before 2.0. Not financial advice; use at your own risk.
 
 ## What is OpenQuanter?
 
@@ -145,7 +145,7 @@ section describes where it is.
 Start with the [Quickstart](docs/QUICKSTART.md) — three examples, no data to
 download, a running backtest in a few minutes. See the
 [Roadmap](docs/ROADMAP.md) for what each milestone unlocks and what triggers
-it.
+it, and [Versioning](docs/VERSIONING.md) for what `2.0.0-alpha` promises.
 
 ## Building
 
@@ -164,4 +164,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). By contributing you agree to the
 project's contribution terms: a DCO sign-off on every commit, and the
-[CLA](CLA.md) for substantial contributions. Support is best-effort; there is no SLA before 1.0.
+[CLA](CLA.md) for substantial contributions. Support is best-effort; there is no SLA before 2.0.

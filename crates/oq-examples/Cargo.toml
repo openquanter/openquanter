@@ -1,6 +1,6 @@
 [package]
 name = "oq-examples"
-version = "0.0.1"
+version.workspace = true
 description = "Teaching examples for the OpenQuanter trading framework"
 edition.workspace = true
 rust-version.workspace = true
@@ -10,10 +10,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-oq-backtest = { path = "../oq-backtest", version = "0.0.1" }
-oq-engine = { path = "../oq-engine", version = "0.0.1" }
-oq-margin = { path = "../oq-margin", version = "0.0.1" }
-oq-types = { path = "../oq-types", version = "0.0.1" }
+oq-backtest.workspace = true
+oq-engine.workspace = true
+oq-margin.workspace = true
+oq-types.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }

@@ -43,4 +43,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 贡献是：带复现 seed 的精确 bug 报告、交易所适配器、描述通用失败模式的仿真场景、
 以及文档。
 
-社区支持为 best-effort。开新 issue 前请先搜索已有 issue。
+社区支持为 best-effort，2.0 之前不承诺 SLA。开新 issue 前请先搜索已有 issue。

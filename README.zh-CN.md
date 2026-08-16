@@ -4,7 +4,7 @@
 
 [English](README.md) · [中文](README.zh-CN.md)
 
-> ⚠️ 早期开发阶段。1.0 之前 API 不保证稳定。本项目不构成投资建议，使用风险自负。
+> ⚠️ 早期开发阶段。2.0 之前 API 不保证稳定。本项目不构成投资建议，使用风险自负。
 
 ## OpenQuanter 是什么？
 
@@ -87,7 +87,7 @@ OpenQuanter 1.x 是一个**闭源的交易平台，已经实盘运行数年**。
 | 文档 | 内容 |
 |---|---|
 | [需求规格说明](docs/REQUIREMENTS.zh-CN.md) | 框架必须做到什么，以及如何验收 |
-| [路线图](docs/ROADMAP.zh-CN.md) | 里程碑、启动触发条件、验收门、通往 1.0 的路径 |
+| [路线图](docs/ROADMAP.zh-CN.md) | 里程碑、启动触发条件、验收门、通往 2.0 的路径 |
 | [实施方案](docs/IMPLEMENTATION.zh-CN.md) | 架构、设计决策、crate 划分、任务计划 |
 
 完整索引见 [docs/](docs/README.zh-CN.md)。
@@ -133,4 +133,4 @@ Apache-2.0，见 [LICENSE](LICENSE)。
 见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。提交贡献即表示你接受项目的贡献
 条款：每个 commit 需要 DCO sign-off，实质性贡献需同意
 [CLA](CLA.zh-CN.md)。社区支持为 best-effort，
-1.0 之前不承诺 SLA。
+2.0 之前不承诺 SLA。

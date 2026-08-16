@@ -16,10 +16,29 @@ members = [
 ]
 
 [workspace.package]
+# One version for the whole workspace: the crates are one release train,
+# and a reader asking "what version is this" should get one answer.
+# See docs/VERSIONING.md.
+version = "2.0.0-alpha.1"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/openquanter/openquanter"
+
+# Internal dependencies are declared once here so a version bump is a
+# single edit and cannot drift between crates.
+[workspace.dependencies]
+oq-backtest = { path = "crates/oq-backtest", version = "2.0.0-alpha.1" }
+oq-core = { path = "crates/oq-core", version = "2.0.0-alpha.1" }
+oq-data = { path = "crates/oq-data", version = "2.0.0-alpha.1" }
+oq-engine = { path = "crates/oq-engine", version = "2.0.0-alpha.1" }
+oq-hash = { path = "crates/oq-hash", version = "2.0.0-alpha.1" }
+oq-journal = { path = "crates/oq-journal", version = "2.0.0-alpha.1" }
+oq-l2feed = { path = "crates/oq-l2feed", version = "2.0.0-alpha.1" }
+oq-margin = { path = "crates/oq-margin", version = "2.0.0-alpha.1" }
+oq-parity = { path = "crates/oq-parity", version = "2.0.0-alpha.1" }
+oq-stats = { path = "crates/oq-stats", version = "2.0.0-alpha.1" }
+oq-types = { path = "crates/oq-types", version = "2.0.0-alpha.1" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

@@ -1,6 +1,6 @@
 [package]
 name = "oq-engine"
-version = "0.0.1"
+version.workspace = true
 description = "Matching engine for the OpenQuanter trading framework: fidelity tier L0 (tick replay), with the ladder to orderbook simulation above it"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oq-types = { path = "../oq-types", version = "0.0.1" }
+oq-types.workspace = true
 
 [lints]
 workspace = true

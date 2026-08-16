@@ -541,7 +541,7 @@ welcome as issues.
    question.
 3. **Second and third venue priority.** Driven by user demand; the connector
    contract should be validated by at least two structurally different venues
-   before 1.0.
+   before 2.0.
 4. **Queue model selection policy.** How the framework should choose between
    conservative and probabilistic queue models when calibration data is thin —
    currently a manual setting, arguably should be automatic with a warning.

@@ -44,7 +44,7 @@ commitments.
 | **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | Triggered |
 | **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
-| **1.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
+| **2.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
 
 "Largely landed" on M0 and M1 means most of the scope is built and tested,
 not that the exit gate has passed. As of the latest revision: the
@@ -252,9 +252,9 @@ after the model's training cutoff.
 
 ---
 
-## Road to 1.0
+## Road to 2.0
 
-1.0 is an **API stability commitment**, not a feature count. It requires:
+2.0 is an **API stability commitment**, not a feature count. It requires:
 
 - M3 complete, with the framework running live somewhere other than the
   maintainers' machines.
@@ -275,7 +275,7 @@ after the model's training cutoff.
 | Track | Cadence | Contents |
 |---|---|---|
 | `main` | Continuous | Always green; property tests and goldens gate every merge |
-| Preview `0.x` | Per milestone | Tagged at each milestone exit gate |
+| Preview `2.0.0-alpha.N` / `-beta.N` | Per milestone | Tagged at each milestone exit gate |
 | Patch | As needed | Correctness fixes; never silently changes engine semantics |
 
 Any change to L0 matching semantics, margin computation, or the event schema
@@ -315,4 +315,4 @@ contributions right now are, in order:
 4. Documentation and translation.
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md). Support is best-effort; there is no
-SLA before 1.0.
+SLA before 2.0.

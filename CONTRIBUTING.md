@@ -49,4 +49,5 @@ completion criteria. The most useful contributions right now are precise bug
 reports with reproduction seeds, venue adapters, simulation scenarios
 describing generic failure modes, and documentation.
 
-Support is best-effort. Please search existing issues before opening new ones.
+Support is best-effort, and there is no SLA before 2.0. Please search existing
+issues before opening new ones.
