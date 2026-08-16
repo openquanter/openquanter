@@ -35,6 +35,11 @@ BUDGETS=(
   "oq-data:0"
   "oq-parity:0"
   "oq-stats:0"
+  # The bridge from captured archives to the tick format. It depends on
+  # oq-l2feed and inherits its transitive tree, which is why it is a
+  # separate crate: oq-data must stay at zero, and it would not if the
+  # conversion lived there.
+  "oq-ingest:60"
   # Zero at runtime. The budget is measured over `--edges normal`, so
   # the `criterion` dev-dependency behind `cargo bench` is out of scope
   # by design: nothing that depends on a crate inherits its dev-deps,

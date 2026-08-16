@@ -1,0 +1,17 @@
+[package]
+name = "oq-ingest"
+version.workspace = true
+description = "Turn captured venue archives into the tick format the OpenQuanter engine replays"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oq-data.workspace = true
+oq-engine.workspace = true
+oq-l2feed.workspace = true
+oq-types.workspace = true
+
+[lints]
+workspace = true
