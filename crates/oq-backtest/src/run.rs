@@ -43,6 +43,12 @@ pub struct RunConfig {
     pub starting_balance: Cash,
     pub margin: MarginMode,
     pub funding: FundingSchedule,
+    /// What the venue charges per fill.
+    ///
+    /// Zero by default and set deliberately. A fee schedule nobody
+    /// chose produces a result that is wrong in a way no reader can
+    /// see; a run with no fees is at least obviously that.
+    pub fees: oq_core::Fees,
 }
 
 impl RunConfig {
@@ -60,7 +66,14 @@ impl RunConfig {
             starting_balance,
             margin: MarginMode::Enforced,
             funding: FundingSchedule::default(),
+            fees: oq_core::Fees::none(),
         }
+    }
+
+    #[must_use]
+    pub const fn with_fees(mut self, fees: oq_core::Fees) -> Self {
+        self.fees = fees;
+        self
     }
 
     #[must_use]
@@ -88,6 +101,8 @@ pub struct RunResult {
     pub final_equity: Cash,
     pub realized: Cash,
     pub funding_paid: Cash,
+    /// Trading fees charged over the run, positive.
+    pub fees_paid: Cash,
     /// The lowest equity the account reached at any point.
     ///
     /// The number a drawdown statistic is computed from, and the one a
@@ -123,7 +138,8 @@ pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) ->
         config.contract,
         config.table.clone(),
         config.starting_balance,
-    );
+    )
+    .with_fees(config.fees);
     let mut kernel = Kernel::new(match config.margin {
         MarginMode::Enforced => state,
         MarginMode::Ignored => state.without_liquidation(),
@@ -275,6 +291,7 @@ pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) ->
         final_equity: summary.equity,
         realized: summary.realized,
         funding_paid: summary.funding,
+        fees_paid: summary.fees,
         min_equity,
         max_adverse_ticks: max_adverse,
     }

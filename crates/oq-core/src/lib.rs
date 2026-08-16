@@ -40,6 +40,6 @@ pub mod sequencer;
 pub mod sink;
 
 pub use event::{Event, kind};
-pub use kernel::{Fingerprint, Kernel, Output, RejectReason, State, Summary};
+pub use kernel::{Fees, Fingerprint, Kernel, Output, RejectReason, State, Summary};
 pub use sequencer::{ReplayResult, Sequencer, replay, replay_tolerating_unknown};
 pub use sink::{EventSink, MemorySink, file_sink};

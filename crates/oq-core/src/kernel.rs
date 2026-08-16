@@ -64,6 +64,49 @@ pub enum RejectReason {
     NoMargin,
 }
 
+/// What the venue charges per fill.
+///
+/// Recorded per side because the two differ by an order of magnitude,
+/// and a strategy that rests orders earns a different schedule from one
+/// that crosses the spread. A maker rate may be negative — a rebate —
+/// and the arithmetic must carry that through rather than clamping it,
+/// because being paid to provide liquidity is the entire economics of
+/// some strategies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Fees {
+    pub maker: oq_types::Ratio,
+    pub taker: oq_types::Ratio,
+}
+
+impl Fees {
+    #[must_use]
+    pub const fn flat(rate: oq_types::Ratio) -> Self {
+        Self {
+            maker: rate,
+            taker: rate,
+        }
+    }
+
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            maker: oq_types::Ratio::ZERO,
+            taker: oq_types::Ratio::ZERO,
+        }
+    }
+
+    /// The charge for a fill. Positive is a cost.
+    #[must_use]
+    pub const fn charge(&self, contract: Contract, fill: &Fill) -> Cash {
+        let notional = contract.notional(fill.price, fill.qty);
+        let rate = match fill.liquidity {
+            oq_types::Liquidity::Maker => self.maker,
+            oq_types::Liquidity::Taker => self.taker,
+        };
+        notional.scaled(rate)
+    }
+}
+
 /// Account and market state for one instrument.
 #[derive(Debug)]
 pub struct State {
@@ -80,6 +123,15 @@ pub struct State {
     pub realized: Cash,
     /// Funding paid (negative) or received (positive), cumulative.
     pub funding: Cash,
+    /// Trading fees charged, cumulative and positive.
+    ///
+    /// Tracked separately from realized profit because a strategy whose
+    /// gross edge is real and whose net result is negative is a
+    /// different problem from one with no edge, and a single number
+    /// cannot tell them apart.
+    pub fees: Cash,
+    /// What the venue charges.
+    pub fee_schedule: Fees,
     /// The last time the core was told about.
     pub now: Nanos,
     /// The most recent traded price.
@@ -113,8 +165,23 @@ impl State {
             funding: Cash::ZERO,
             now: Nanos::ZERO,
             mark: PriceTicks::ZERO,
+            fees: Cash::ZERO,
+            fee_schedule: Fees::none(),
             enforce_liquidation: true,
         }
+    }
+
+    /// The same state with a fee schedule.
+    ///
+    /// Fees default to zero and must be set deliberately. That is the
+    /// safer default only because the alternative — a plausible-looking
+    /// rate nobody chose — produces a result that is wrong in a way no
+    /// reader can see. A run with no fees is at least obviously a run
+    /// with no fees.
+    #[must_use]
+    pub const fn with_fees(mut self, fees: Fees) -> Self {
+        self.fee_schedule = fees;
+        self
     }
 
     /// The same state with liquidation disabled.
@@ -327,6 +394,12 @@ impl Kernel {
             .collect();
 
         for fill in &fills {
+            // Charged before the position update so the fee is computed
+            // against the fill that incurred it, not against whatever
+            // the position became afterwards.
+            let fee = self.state.fee_schedule.charge(self.state.contract, fill);
+            self.state.fees = self.state.fees.add(fee);
+            self.state.balance = self.state.balance.sub(fee);
             self.state.apply_fill(fill);
             self.working.retain(|w| *w != fill.order);
             self.outputs.push(Output::Filled(*fill));
@@ -398,6 +471,7 @@ impl Kernel {
             balance: self.state.balance,
             realized: self.state.realized,
             funding: self.state.funding,
+            fees: self.state.fees,
             equity: self.state.equity(),
             mark: self.state.mark,
             now: self.state.now,
@@ -433,6 +507,7 @@ pub struct Summary {
     pub balance: Cash,
     pub realized: Cash,
     pub funding: Cash,
+    pub fees: Cash,
     pub equity: Cash,
     pub mark: PriceTicks,
     pub now: Nanos,
@@ -482,6 +557,65 @@ mod tests {
             qty: QtyLots(qty),
             stamp: Stamp::synthetic(n),
         }
+    }
+
+    #[test]
+    fn fees_are_charged_per_fill_and_tracked_separately() {
+        // The gap a 608-day run surfaced: fills were free. Over a
+        // window with hundreds of round trips on a doubling ladder, the
+        // omission is not a rounding error — it was an order of
+        // magnitude on the reported result.
+        let mut k = Kernel::new(
+            State::new(InstrumentId::new(1), BTC, table(), Cash::from_units(10_000))
+                .with_fees(Fees::flat(Ratio::from_ppm(500))), // 0.05%
+        );
+        k.apply(&tick(1, 1_000_000));
+        k.apply(&buy(1, 1_000_000, 10, 1));
+        k.apply(&tick(2, 1_000_000));
+
+        // The fixture's tick-lot is 0.0001 of quote currency, so
+        // 1_000_000 ticks of price on 10 lots is 1000 USDT of notional,
+        // and 0.05% of that is 0.50 USDT.
+        let s = k.summary();
+        assert_eq!(s.fees, Cash::from_units(1).scaled(Ratio::from_percent(50)));
+        assert!(s.fees.0 > 0, "a fee is a cost, recorded positive");
+        assert_eq!(
+            s.balance,
+            Cash::from_units(10_000).sub(s.fees),
+            "the fee leaves the balance"
+        );
+    }
+
+    #[test]
+    fn a_maker_rebate_is_carried_through_rather_than_clamped() {
+        // Being paid to provide liquidity is the whole economics of
+        // some strategies; a fee model that floors at zero cannot
+        // express them.
+        let fees = Fees {
+            maker: Ratio::from_ppm(-200),
+            taker: Ratio::from_ppm(500),
+        };
+        let fill = Fill {
+            stamp: Stamp::synthetic(0),
+            instrument: InstrumentId::new(1),
+            order: OrderId::new(1),
+            trade: oq_types::TradeId::new(1),
+            side: Side::Buy,
+            offset: oq_types::Offset::Open,
+            price: PriceTicks(1_000_000),
+            qty: QtyLots(10),
+            liquidity: oq_types::Liquidity::Maker,
+        };
+        assert!(fees.charge(BTC, &fill).0 < 0, "a rebate must stay negative");
+    }
+
+    #[test]
+    fn no_fee_schedule_means_no_fees() {
+        let mut k = kernel(10_000);
+        k.apply(&tick(1, 1_000_000));
+        k.apply(&buy(1, 1_000_000, 10, 1));
+        k.apply(&tick(2, 1_000_000));
+        assert_eq!(k.summary().fees, Cash::ZERO);
     }
 
     #[test]
