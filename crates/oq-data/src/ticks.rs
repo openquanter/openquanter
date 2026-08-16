@@ -157,6 +157,129 @@ pub fn decode(bytes: &[u8]) -> Result<(Header, Vec<Tick>), Error> {
     Ok((header, ticks))
 }
 
+/// Read a tick file without holding its bytes and its ticks at once.
+///
+/// A multi-year window is tens of gigabytes on disk and several in
+/// memory as decoded ticks. Reading the whole file into a buffer and
+/// *then* decoding needs both at the same moment, which is where a long
+/// run dies — and it dies at the end of a slow read, having wasted the
+/// time. This decodes as it reads, so the peak is the ticks alone.
+///
+/// # Errors
+/// I/O failures, or anything [`decode`] reports about the header.
+/// Checksums are verified over the whole record region as it streams.
+pub fn read_file(path: &std::path::Path) -> Result<(Header, Vec<Tick>), Error> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|_| Error::Truncated {
+        needed: HEADER_LEN,
+        available: 0,
+    })?;
+    let mut header_bytes = [0u8; HEADER_LEN];
+    file.read_exact(&mut header_bytes)
+        .map_err(|_| Error::Truncated {
+            needed: HEADER_LEN,
+            available: 0,
+        })?;
+    let header = read_header(&header_bytes)?;
+
+    let mut ticks = Vec::with_capacity(header.count as usize);
+    let mut crc = crc32_streaming::Accumulator::new();
+    // A block of whole records, so a decode never straddles a read.
+    const RECORDS_PER_BLOCK: usize = 8192;
+    let mut buf = vec![0u8; RECORDS_PER_BLOCK * RECORD_LEN];
+    let mut remaining = header.count as usize;
+
+    while remaining > 0 {
+        let want = remaining.min(RECORDS_PER_BLOCK) * RECORD_LEN;
+        let block = &mut buf[..want];
+        file.read_exact(block).map_err(|_| Error::Truncated {
+            needed: HEADER_LEN + header.count as usize * RECORD_LEN,
+            available: HEADER_LEN + (header.count as usize - remaining) * RECORD_LEN,
+        })?;
+        crc.update(block);
+        for chunk in block.chunks_exact(RECORD_LEN) {
+            let at =
+                |i: usize| i64::from_le_bytes(chunk[i * 8..i * 8 + 8].try_into().expect("8 bytes"));
+            ticks.push(Tick {
+                stamp: Stamp::new(at(0), at(1)),
+                last: PriceTicks(at(2)),
+                high: PriceTicks(at(3)),
+                low: PriceTicks(at(4)),
+                bid: PriceTicks(at(5)),
+                ask: PriceTicks(at(6)),
+                volume: oq_types::QtyLots(at(7)),
+            });
+        }
+        remaining -= want / RECORD_LEN;
+    }
+
+    let computed = crc.finish();
+    if computed != header.checksum {
+        return Err(Error::ChecksumMismatch {
+            expected: header.checksum,
+            computed,
+        });
+    }
+    Ok((header, ticks))
+}
+
+/// Incremental CRC-32 over blocks.
+///
+/// The one-shot function in `oq-hash` needs the whole region at once,
+/// which is exactly what streaming exists to avoid. This accumulates
+/// the same checksum block by block, and a test pins it against the
+/// one-shot result at many block boundaries — the seam where such an
+/// implementation breaks.
+mod crc32_streaming {
+    pub struct Accumulator {
+        state: u32,
+    }
+
+    const POLYNOMIAL: u32 = 0xEDB8_8320;
+
+    const fn table() -> [u32; 256] {
+        let mut t = [0u32; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut crc = i as u32;
+            let mut bit = 0;
+            while bit < 8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ POLYNOMIAL
+                } else {
+                    crc >> 1
+                };
+                bit += 1;
+            }
+            t[i] = crc;
+            i += 1;
+        }
+        t
+    }
+
+    static TABLE: [u32; 256] = table();
+
+    impl Accumulator {
+        pub const fn new() -> Self {
+            Self { state: 0xFFFF_FFFF }
+        }
+
+        pub fn update(&mut self, bytes: &[u8]) {
+            let mut crc = self.state;
+            for &b in bytes {
+                let idx = ((crc ^ u32::from(b)) & 0xFF) as usize;
+                crc = (crc >> 8) ^ TABLE[idx];
+            }
+            self.state = crc;
+        }
+
+        pub const fn finish(self) -> u32 {
+            self.state ^ 0xFFFF_FFFF
+        }
+    }
+}
+
 /// A tick stream with the checks a replay depends on.
 ///
 /// Ordering is verified rather than assumed. Out-of-order ticks break
@@ -193,6 +316,18 @@ impl TickStream {
     /// Anything [`decode`] or [`TickStream::new`] reports.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let (header, ticks) = decode(bytes)?;
+        Self::new(header.instrument, ticks)
+    }
+
+    /// Load from a file without holding its bytes and its ticks at once.
+    ///
+    /// The right entry point for anything larger than a few hundred
+    /// megabytes; see [`read_file`].
+    ///
+    /// # Errors
+    /// Anything [`read_file`] or [`TickStream::new`] reports.
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let (header, ticks) = read_file(path.as_ref())?;
         Self::new(header.instrument, ticks)
     }
 
@@ -393,5 +528,87 @@ mod tests {
         let stream = TickStream::new(9, sample(64)).expect("ordered");
         let restored = TickStream::from_bytes(&stream.encode()).expect("round trip");
         assert_eq!(restored, stream);
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use oq_types::Stamp;
+
+    fn sample(n: usize) -> Vec<Tick> {
+        (0..n)
+            .map(|i| {
+                let t = i as i64;
+                Tick::quoted(
+                    Stamp::new(t * 1_000, t * 1_000 + 7),
+                    1_000 + t,
+                    1_010,
+                    990,
+                    999,
+                    1_001,
+                )
+                .with_volume(t * 3)
+            })
+            .collect()
+    }
+
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn temp_file(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "oq-ticks-{}-{}-{}.oqtk",
+            name,
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        p
+    }
+
+    #[test]
+    fn streaming_and_whole_file_decoding_agree() {
+        // Sizes chosen to straddle the block boundary in both
+        // directions, because that seam is where a streaming decoder
+        // and a streaming checksum break.
+        for n in [0usize, 1, 8_191, 8_192, 8_193, 20_000] {
+            let path = temp_file("agree");
+            let ticks = sample(n);
+            std::fs::write(&path, encode(3, &ticks)).expect("write");
+
+            let (h_stream, t_stream) = read_file(&path).expect("stream");
+            let (h_whole, t_whole) = decode(&std::fs::read(&path).expect("read")).expect("whole");
+
+            assert_eq!(h_stream, h_whole, "headers differ at n={n}");
+            assert_eq!(t_stream, t_whole, "ticks differ at n={n}");
+            assert_eq!(t_stream, ticks, "round trip differs at n={n}");
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn a_corrupted_record_is_caught_while_streaming() {
+        let path = temp_file("corrupt");
+        let mut bytes = encode(1, &sample(10_000));
+        // Past the first block, so the corruption is only reachable
+        // after several updates to the streaming checksum.
+        let at = HEADER_LEN + 9_000 * RECORD_LEN + 3;
+        bytes[at] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("write");
+
+        assert!(matches!(
+            read_file(&path),
+            Err(Error::ChecksumMismatch { .. })
+        ));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_truncated_file_is_reported_as_truncated() {
+        let path = temp_file("short");
+        let bytes = encode(1, &sample(1_000));
+        std::fs::write(&path, &bytes[..bytes.len() - 100]).expect("write");
+        assert!(matches!(read_file(&path), Err(Error::Truncated { .. })));
+        std::fs::remove_file(&path).ok();
     }
 }
