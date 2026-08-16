@@ -310,6 +310,18 @@ confirmation recorded in the pull request.
 | Proprietary content leaking into the public repository | High | Fresh history; secret and pattern scanning in CI; proprietary material only in private overlays; pre-release manual audit |
 | Bus factor of one | Medium-high | Agent-friendly codebase (per-crate `AGENTS.md`, layered verification anchors); behavior encoded in deterministic tests; all design rationale written down rather than remembered |
 | Building the framework becomes the goal instead of using it | High | Every milestone states the capability it unlocks; the question "what got measurably better because of this?" is asked at each gate |
+| No adapter seam on the execution side | High | Market data has `Venue`; order entry has no trait at all and `oq-gateway` exports a concrete `Binance`. A second venue would be a rewrite rather than an implementation. Extract the contract before M3 starts, not during it |
+| The instrument model is split in two, and neither half is in the core | High | `oq-margin::Contract` holds the economics — `tick_cash` is the contract multiplier, so a 300x index future is already expressible — and `oq-l2feed::Instrument` holds the quoting precision. They never meet, and `oq-types` names an instrument only as `InstrumentId(u32)`, so nothing below the two hosts knows what a contract is. Harder than either half: `Cash` carries no currency dimension, so a book settling in more than one currency cannot be expressed at all, which is what equities and FX require. Unify identity, precision and economics in the core and settle the currency question before the Python surface freezes |
+| `Strategy` is defined in the backtest host | Medium-high | Live execution would either depend on `oq-backtest` or need a second strategy trait, and G7 — the same strategy unchanged in both modes — cannot hold either way. Move the trait below both hosts before external code implements it |
+| L0 is the frozen regression anchor and has no matching seam | Medium | `oq-engine` has one matching path and no trait, so L1 and L2 require refactoring the anchor they are measured against. Introduce the seam with L0 as its first and only implementation, so the anchor's behaviour is unchanged by construction |
+
+
+The last four entries are not hypotheses. They are present-tense structural
+gaps found by reading the code against this plan, and they share a shape: each
+is cheap to fix now and grows more expensive with every crate, binding or
+external implementation that depends on the current arrangement. They are
+recorded here rather than in an issue because a risk register is where the
+project already asks "what will this cost us later".
 
 ---
 
