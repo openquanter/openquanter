@@ -49,6 +49,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Golden tests replay sample data and compare full output. Golden baselines
   may only be regenerated with explicit human confirmation in the PR.
 
+## Working on this repository
+
+Branch naming, branch lifetime, squash merges and the review requirement
+are in [CONTRIBUTING.md](CONTRIBUTING.md#branches-and-merging) — the same
+rules apply to agents and to people, and they live in one place so they
+cannot drift apart.
+
+Two that are easy to get wrong from a terminal:
+
+- **Run the full local gate before pushing**, not part of it. `cargo fmt
+  --all -- --check` is the one usually skipped, and generated or
+  script-edited Rust is what trips it. Then confirm the run actually went
+  green (`gh run list --limit 1`) rather than assuming.
+- **Never push straight to `main`.** Open a pull request even when your
+  token could bypass the protection.
+
 ## Boundaries
 
 - This is the public framework repository. Production strategies, exchange

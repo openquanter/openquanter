@@ -41,6 +41,37 @@ cargo clippy --workspace --all-targets -- -D warnings
 Documentation is authored in English and mirrored in Chinese (`*.zh-CN.md`).
 English is the source of truth; update both sides in the same pull request.
 
+## Branches and merging
+
+Trunk-based: `main` is always releasable, and branches are short-lived.
+
+| | |
+|---|---|
+| **Naming** | `feat/`, `fix/`, `docs/`, `chore/` + a short subject |
+| **Lifetime** | Merge within a day or two |
+| **Merging** | Squash, so one pull request becomes one commit on `main` |
+| **After merge** | The branch is deleted automatically |
+
+A branch's cost grows with its age, and not linearly. A day-old branch
+rebases cleanly; a week-old one has to be reconciled against work that
+assumed it did not exist, by someone who has forgotten why it was written.
+If a change is too large to land in a couple of days, land it in pieces
+behind whatever makes each piece safe on its own.
+
+`main` is protected: every change arrives by pull request with an approving
+review from a code owner, and CI must pass before it can merge. This applies
+to everyone; maintainers are not exempt from review by convention, only by
+mechanism, and the convention is the part that matters.
+
+Keep one pull request to one concern. A review that has to hold three
+unrelated changes in mind finds fewer problems in all three.
+
+## Tracking work
+
+Anything worth doing later belongs in an issue, not in a conversation.
+A decision that lives only in a chat log is invisible to the next person
+and to your future self, and it will be made again — differently.
+
 ## Where to start
 
 The [roadmap](docs/ROADMAP.md) lists what each milestone unlocks, and the
