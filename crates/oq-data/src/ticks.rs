@@ -876,9 +876,7 @@ mod reader_tests {
         bytes[victim] ^= 0xff;
         std::fs::write(&path, &bytes).expect("write");
 
-        let outcome: Result<Vec<Tick>, Error> = TickReader::open(&path)
-            .expect("open")
-            .collect();
+        let outcome: Result<Vec<Tick>, Error> = TickReader::open(&path).expect("open").collect();
         assert!(
             matches!(outcome, Err(Error::ChecksumMismatch { .. })),
             "expected a checksum failure, got {outcome:?}"
@@ -912,9 +910,7 @@ mod reader_tests {
         let bytes = std::fs::read(&path).expect("read");
         std::fs::write(&path, &bytes[..bytes.len() - RECORD_LEN * 10]).expect("write");
 
-        let outcome: Result<Vec<Tick>, Error> = TickReader::open(&path)
-            .expect("open")
-            .collect();
+        let outcome: Result<Vec<Tick>, Error> = TickReader::open(&path).expect("open").collect();
         assert!(
             matches!(outcome, Err(Error::Truncated { .. })),
             "expected truncation, got {outcome:?}"
