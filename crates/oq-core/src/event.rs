@@ -19,12 +19,16 @@
 //! reused**, because a journal outlives the build that wrote it.
 
 use oq_engine::Tick;
-use oq_types::{Nanos, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp};
+use oq_types::{Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp};
 
 /// Journal record kinds. Append-only; values are permanent.
 pub mod kind {
     pub const TICK: u16 = 1;
-    pub const SUBMIT: u16 = 2;
+    /// Submit as it was before orders stated open or close. Decoded, never
+    /// written: a payload of this kind means every order in that journal
+    /// was an open, which is what one-way netting made it.
+    pub const SUBMIT_LEGACY: u16 = 2;
+    pub const SUBMIT: u16 = 7;
     pub const CANCEL: u16 = 3;
     pub const FUNDING: u16 = 4;
     pub const TIME: u16 = 5;
@@ -43,6 +47,15 @@ pub enum Event {
         /// A limit price, or `None` for a market order.
         price: Option<PriceTicks>,
         qty: QtyLots,
+        /// Whether this order adds to a position or reduces one.
+        ///
+        /// Under one-way netting the distinction is derivable from the
+        /// side and the current position, and carrying it changes
+        /// nothing. Under hedge accounting it is not: a buy while a
+        /// short is open may be closing that short or opening a long,
+        /// and only the order knows which. The venue asks the same
+        /// question and calls the answer `positionSide`.
+        offset: Offset,
         stamp: Stamp,
     },
     /// Withdraw an order.
@@ -104,6 +117,7 @@ impl Event {
                 side,
                 price,
                 qty,
+                offset,
                 stamp,
             } => {
                 out.extend_from_slice(&id.0.to_le_bytes());
@@ -120,6 +134,14 @@ impl Event {
                 put_i64(&mut out, qty.0);
                 put_i64(&mut out, stamp.exch.0);
                 put_i64(&mut out, stamp.local.0);
+                // Appended last so that a journal written before this
+                // field existed is a prefix of one written after, and
+                // replays with the offset it implied: everything was
+                // Open.
+                out.push(match offset {
+                    Offset::Open => 0,
+                    Offset::Close => 1,
+                });
             }
             Self::Cancel { id, stamp } => {
                 out.extend_from_slice(&id.0.to_le_bytes());
@@ -167,10 +189,26 @@ impl Event {
                     volume: oq_types::QtyLots(i64_at(payload, 7)?),
                 }))
             }
-            kind::SUBMIT => {
-                if payload.len() != 42 {
+            kind::SUBMIT | kind::SUBMIT_LEGACY => {
+                // Length is exact per kind rather than "either of two".
+                // Accepting both lengths under one kind would make a
+                // truncated new record indistinguishable from a valid old
+                // one, and decode is where that has to be caught — the
+                // whole point of refusing a wrong length is that a record
+                // is never quietly read as something it is not.
+                let expected = if kind == kind::SUBMIT { 43 } else { 42 };
+                if payload.len() != expected {
                     return None;
                 }
+                let offset = if kind == kind::SUBMIT {
+                    match payload[42] {
+                        0 => Offset::Open,
+                        1 => Offset::Close,
+                        _ => return None,
+                    }
+                } else {
+                    Offset::Open
+                };
                 let id = OrderId(u64::from_le_bytes(
                     payload[0..8].try_into().expect("8 bytes"),
                 ));
@@ -187,6 +225,7 @@ impl Event {
                     side,
                     price: has_price.then_some(PriceTicks(price_raw)),
                     qty: QtyLots(i64_at(rest, 1)?),
+                    offset,
                     stamp: Stamp::new(i64_at(rest, 2)?, i64_at(rest, 3)?),
                 })
             }
@@ -247,6 +286,7 @@ mod tests {
                 price: Some(PriceTicks(950)),
                 qty: QtyLots(3),
                 stamp: Stamp::new(30, 31),
+                offset: oq_types::Offset::Open,
             },
             Event::Submit {
                 id: OrderId::new(8),
@@ -254,6 +294,7 @@ mod tests {
                 price: None,
                 qty: QtyLots(1),
                 stamp: Stamp::new(40, 41),
+                offset: oq_types::Offset::Open,
             },
             Event::Cancel {
                 id: OrderId::new(7),
@@ -288,6 +329,7 @@ mod tests {
             price: None,
             qty: QtyLots(1),
             stamp: Stamp::synthetic(0),
+            offset: oq_types::Offset::Open,
         };
         let zero_limit = Event::Submit {
             id: OrderId::new(1),
@@ -295,6 +337,7 @@ mod tests {
             price: Some(PriceTicks::ZERO),
             qty: QtyLots(1),
             stamp: Stamp::synthetic(0),
+            offset: oq_types::Offset::Open,
         };
         assert_ne!(market.encode(), zero_limit.encode());
         assert_eq!(
@@ -306,6 +349,59 @@ mod tests {
     #[test]
     fn an_unknown_kind_is_refused_rather_than_guessed() {
         assert!(Event::decode(9_999, &[0u8; 8]).is_none());
+    }
+
+    #[test]
+    /// A journal written before orders stated open or close must still
+    /// replay, and replay as what it meant: everything was an open.
+    #[test]
+    fn a_legacy_submit_decodes_as_an_open() {
+        let modern = Event::Submit {
+            id: OrderId::new(9),
+            side: Side::Buy,
+            price: Some(PriceTicks(1_234_500)),
+            qty: QtyLots(7),
+            offset: Offset::Open,
+            stamp: Stamp::new(11, 12),
+        };
+        // The legacy layout is the modern one without its last byte,
+        // which is what makes an old journal readable at all.
+        let bytes = modern.encode();
+        assert_eq!(bytes.len(), 43);
+        let legacy = &bytes[..42];
+
+        let decoded = Event::decode(kind::SUBMIT_LEGACY, legacy).expect("legacy decodes");
+        assert_eq!(decoded, modern);
+    }
+
+    /// And a legacy payload under the modern kind is a truncated modern
+    /// record, not an old one — the distinction the separate kind exists
+    /// to preserve.
+    #[test]
+    fn a_legacy_length_under_the_modern_kind_is_refused() {
+        let bytes = Event::Submit {
+            id: OrderId::new(9),
+            side: Side::Buy,
+            price: Some(PriceTicks(1_234_500)),
+            qty: QtyLots(7),
+            offset: Offset::Close,
+            stamp: Stamp::new(11, 12),
+        }
+        .encode();
+        assert!(Event::decode(kind::SUBMIT, &bytes[..42]).is_none());
+    }
+
+    #[test]
+    fn a_close_survives_the_round_trip() {
+        let e = Event::Submit {
+            id: OrderId::new(3),
+            side: Side::Sell,
+            price: None,
+            qty: QtyLots(2),
+            offset: Offset::Close,
+            stamp: Stamp::new(1, 2),
+        };
+        assert_eq!(Event::decode(e.kind(), &e.encode()), Some(e));
     }
 
     #[test]

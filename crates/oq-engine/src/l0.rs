@@ -363,10 +363,13 @@ impl L0Engine {
             order: resting.id(),
             trade: self.ids.trade(),
             side: resting.order.side(),
-            // L0 does not model position intent; the ledger decides
-            // open vs close from the resulting position, which is the
-            // only place that knows.
-            offset: Offset::Open,
+            // Carried from the order rather than derived here. A ledger
+            // that nets can work it out from the resulting position, and
+            // that is what this used to assume; one that keeps two legs
+            // cannot, because a buy while a short is open is either
+            // closing that short or opening a long and the position
+            // alone does not say which.
+            offset: resting.order.offset(),
             price,
             qty,
             liquidity,
@@ -402,13 +405,30 @@ impl L0Engine {
         qty: QtyLots,
         stamp: oq_types::Stamp,
     ) -> OrderId {
-        let order = oq_types::Order::new(
+        self.submit_limit_with(id, side, price, qty, stamp, Offset::Open)
+    }
+
+    /// Rest a limit order that states whether it opens or closes.
+    ///
+    /// # Panics
+    /// As [`L0Engine::submit_limit`].
+    pub fn submit_limit_with(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        price: PriceTicks,
+        qty: QtyLots,
+        stamp: oq_types::Stamp,
+        offset: Offset,
+    ) -> OrderId {
+        let order = oq_types::Order::with_offset(
             id,
             side,
             oq_types::OrderKind::Limit { price },
             qty,
             oq_types::TimeInForce::GoodTilCancel,
             stamp,
+            offset,
         )
         .expect("order quantity must be positive")
         .accept();
@@ -427,13 +447,29 @@ impl L0Engine {
         qty: QtyLots,
         stamp: oq_types::Stamp,
     ) -> OrderId {
-        let order = oq_types::Order::new(
+        self.submit_market_with(id, side, qty, stamp, Offset::Open)
+    }
+
+    /// Rest a market order that states whether it opens or closes.
+    ///
+    /// # Panics
+    /// As [`L0Engine::submit_limit`].
+    pub fn submit_market_with(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        qty: QtyLots,
+        stamp: oq_types::Stamp,
+        offset: Offset,
+    ) -> OrderId {
+        let order = oq_types::Order::with_offset(
             id,
             side,
             oq_types::OrderKind::Market,
             qty,
             oq_types::TimeInForce::GoodTilCancel,
             stamp,
+            offset,
         )
         .expect("order quantity must be positive")
         .accept();

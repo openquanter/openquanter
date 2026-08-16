@@ -316,6 +316,7 @@ impl Kernel {
                 side,
                 price,
                 qty,
+                offset,
                 stamp,
             } => {
                 if qty.0 <= 0 {
@@ -337,10 +338,14 @@ impl Kernel {
                 } else {
                     match price {
                         Some(p) => {
-                            self.state.engine.submit_limit(id, side, p, qty, stamp);
+                            self.state
+                                .engine
+                                .submit_limit_with(id, side, p, qty, stamp, offset);
                         }
                         None => {
-                            self.state.engine.submit_market(id, side, qty, stamp);
+                            self.state
+                                .engine
+                                .submit_market_with(id, side, qty, stamp, offset);
                         }
                     }
                     self.working.push(id);
@@ -556,6 +561,7 @@ mod tests {
             price: Some(PriceTicks(price)),
             qty: QtyLots(qty),
             stamp: Stamp::synthetic(n),
+            offset: oq_types::Offset::Open,
         }
     }
 
@@ -658,6 +664,7 @@ mod tests {
             price: Some(PriceTicks(1_010_000)),
             qty: QtyLots(10),
             stamp: Stamp::synthetic(2),
+            offset: oq_types::Offset::Open,
         });
         k.apply(&tick(3, 1_020_000));
         let s = k.summary();
@@ -803,6 +810,7 @@ mod tests {
             price: Some(PriceTicks(1_010_000)),
             qty: QtyLots(30),
             stamp: Stamp::synthetic(2),
+            offset: oq_types::Offset::Open,
         });
         k.apply(&tick(3, 1_020_000));
         let s = k.summary();

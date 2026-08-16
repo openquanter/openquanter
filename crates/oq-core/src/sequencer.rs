@@ -253,6 +253,7 @@ mod tests {
                 price: Some(PriceTicks(990_000)),
                 qty: QtyLots(10),
                 stamp: Stamp::synthetic(1),
+                offset: oq_types::Offset::Open,
             },
             Event::Tick(Tick::trades_only(
                 Stamp::synthetic(2),
@@ -271,6 +272,7 @@ mod tests {
                 price: Some(PriceTicks(1_005_000)),
                 qty: QtyLots(10),
                 stamp: Stamp::synthetic(3),
+                offset: oq_types::Offset::Open,
             },
             Event::Tick(Tick::quoted(
                 Stamp::synthetic(4),
@@ -291,6 +293,7 @@ mod tests {
                 price: Some(PriceTicks(500_000)),
                 qty: QtyLots(4),
                 stamp: Stamp::synthetic(5),
+                offset: oq_types::Offset::Open,
             },
             // And one that is cancelled, so the working set is exercised
             // in both directions.
@@ -300,6 +303,7 @@ mod tests {
                 price: Some(PriceTicks(2_000_000)),
                 qty: QtyLots(1),
                 stamp: Stamp::synthetic(5),
+                offset: oq_types::Offset::Open,
             },
             Event::Cancel {
                 id: OrderId::new(4),
@@ -366,6 +370,7 @@ mod tests {
                         price: Some(PriceTicks(limit)),
                         qty: QtyLots(1 + rng.below(8) as i64),
                         stamp: Stamp::synthetic(i as i64),
+                        offset: oq_types::Offset::Open,
                     });
                 }
                 4 => {
@@ -521,6 +526,7 @@ mod tests {
                 price: Some(PriceTicks(1_200_000)),
                 qty: QtyLots(10),
                 stamp: Stamp::synthetic(1),
+                offset: oq_types::Offset::Open,
             })
             .expect("submit");
             seq.submit(&Event::Tick(Tick::trades_only(

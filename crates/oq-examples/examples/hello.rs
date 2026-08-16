@@ -27,6 +27,7 @@ impl Strategy for BuyAndHold {
                 id: OrderId::new(1),
                 side: Side::Buy,
                 qty: QtyLots(10),
+                offset: oq_types::Offset::Open,
             });
         }
     }

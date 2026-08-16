@@ -66,6 +66,7 @@ impl Strategy for MartingaleLadder {
                 id,
                 side: Side::Buy,
                 qty: QtyLots(self.base_qty),
+                offset: oq_types::Offset::Open,
             });
             return;
         }
@@ -87,6 +88,7 @@ impl Strategy for MartingaleLadder {
                 id,
                 side: Side::Buy,
                 qty: QtyLots(qty),
+                offset: oq_types::Offset::Open,
             });
         }
     }

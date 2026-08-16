@@ -17,7 +17,7 @@
 //! on top of this, not a widening of the boundary the engine has to
 //! trust.
 
-use oq_types::{Fill, OrderId, PriceTicks, QtyLots, Side};
+use oq_types::{Fill, Offset, OrderId, PriceTicks, QtyLots, Side};
 
 /// What a strategy wants to happen next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,12 +28,17 @@ pub enum Intent {
         side: Side,
         price: PriceTicks,
         qty: QtyLots,
+        /// Whether this adds to a position or reduces one. Only matters
+        /// under hedge accounting, where a buy while short is ambiguous
+        /// without it; [`Intent::limit`] defaults it to `Open`.
+        offset: Offset,
     },
     /// Cross the spread now.
     Market {
         id: OrderId,
         side: Side,
         qty: QtyLots,
+        offset: Offset,
     },
     /// Withdraw a resting order.
     Cancel(OrderId),
@@ -54,6 +59,61 @@ pub struct Context {
     pub equity: oq_types::Cash,
     /// Orders currently resting.
     pub working: usize,
+}
+
+impl Intent {
+    /// A limit order that adds to a position.
+    ///
+    /// The common case, and the only one that exists under one-way
+    /// netting. Use the variant directly to close a specific leg.
+    #[must_use]
+    pub const fn limit(id: OrderId, side: Side, price: PriceTicks, qty: QtyLots) -> Self {
+        Self::Limit {
+            id,
+            side,
+            price,
+            qty,
+            offset: Offset::Open,
+        }
+    }
+
+    /// A market order that adds to a position.
+    #[must_use]
+    pub const fn market(id: OrderId, side: Side, qty: QtyLots) -> Self {
+        Self::Market {
+            id,
+            side,
+            qty,
+            offset: Offset::Open,
+        }
+    }
+
+    /// The same order, marked as reducing a position rather than adding.
+    #[must_use]
+    pub const fn closing(self) -> Self {
+        match self {
+            Self::Limit {
+                id,
+                side,
+                price,
+                qty,
+                ..
+            } => Self::Limit {
+                id,
+                side,
+                price,
+                qty,
+                offset: Offset::Close,
+            },
+            Self::Market { id, side, qty, .. } => Self::Market {
+                id,
+                side,
+                qty,
+                offset: Offset::Close,
+            },
+            other => other,
+        }
+    }
 }
 
 /// A strategy: observations in, intents out.
@@ -104,6 +164,7 @@ mod tests {
                     id: OrderId::new(1),
                     side: Side::Buy,
                     qty: QtyLots(1),
+                    offset: oq_types::Offset::Open,
                 });
             }
         }

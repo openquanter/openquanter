@@ -24,7 +24,7 @@
 //! over-fill is refused rather than silently producing a negative
 //! remainder that later reads as an enormous position.
 
-use crate::{PriceTicks, QtyLots, Side, ids::OrderId, time::Stamp};
+use crate::{Offset, PriceTicks, QtyLots, Side, ids::OrderId, time::Stamp};
 use core::marker::PhantomData;
 
 /// How long an order rests before it is withdrawn.
@@ -120,6 +120,16 @@ pub struct Order<S: OrderState> {
     pub filled: QtyLots,
     pub tif: TimeInForce,
     pub placed: Stamp,
+    /// Whether this order adds to a position or reduces one.
+    ///
+    /// Under one-way netting a ledger can derive this from the side and
+    /// the position it already holds, and for a long time this type did
+    /// not carry it. Under hedge accounting it cannot: a buy placed
+    /// while a short is open is either closing that short or opening a
+    /// long, and the two produce different positions, different margin
+    /// and different realized profit. Only the order knows, so the order
+    /// carries it.
+    pub offset: Offset,
     _state: PhantomData<S>,
 }
 
@@ -145,6 +155,7 @@ impl<S: OrderState> Order<S> {
             filled: self.filled,
             tif: self.tif,
             placed: self.placed,
+            offset: self.offset,
             _state: PhantomData,
         }
     }
@@ -165,6 +176,23 @@ impl Order<Pending> {
         tif: TimeInForce,
         placed: Stamp,
     ) -> Option<Self> {
+        Self::with_offset(id, side, kind, qty, tif, placed, Offset::Open)
+    }
+
+    /// Build an order that states whether it opens or closes.
+    ///
+    /// [`Order::new`] defaults to [`Offset::Open`], which is what every
+    /// caller meant before the field existed and what one-way netting
+    /// makes indistinguishable anyway.
+    pub fn with_offset(
+        id: OrderId,
+        side: Side,
+        kind: OrderKind,
+        qty: QtyLots,
+        tif: TimeInForce,
+        placed: Stamp,
+        offset: Offset,
+    ) -> Option<Self> {
         if qty.0 <= 0 {
             return None;
         }
@@ -176,6 +204,7 @@ impl Order<Pending> {
             filled: QtyLots::ZERO,
             tif,
             placed,
+            offset,
             _state: PhantomData,
         })
     }
@@ -305,6 +334,15 @@ impl Working {
         match self {
             Self::Live(o) => o.kind,
             Self::PartiallyFilled(o) => o.kind,
+        }
+    }
+
+    /// Whether this order adds to a position or reduces one.
+    #[must_use]
+    pub const fn offset(&self) -> Offset {
+        match self {
+            Self::Live(o) => o.offset,
+            Self::PartiallyFilled(o) => o.offset,
         }
     }
 

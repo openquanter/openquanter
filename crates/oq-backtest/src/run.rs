@@ -277,18 +277,26 @@ where
                     side,
                     price,
                     qty,
+                    offset,
                 } => Event::Submit {
                     id,
                     side,
                     price: Some(price),
                     qty,
+                    offset,
                     stamp: tick.stamp,
                 },
-                Intent::Market { id, side, qty } => Event::Submit {
+                Intent::Market {
+                    id,
+                    side,
+                    qty,
+                    offset,
+                } => Event::Submit {
                     id,
                     side,
                     price: None,
                     qty,
+                    offset,
                     stamp: tick.stamp,
                 },
                 Intent::Cancel(id) => Event::Cancel {
@@ -373,6 +381,7 @@ mod tests {
                     id: OrderId::new(1),
                     side: Side::Buy,
                     qty: QtyLots(self.qty),
+                    offset: oq_types::Offset::Open,
                 });
             }
         }
@@ -542,15 +551,15 @@ mod stream_tests {
         fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
             self.n += 1;
             if self.n % 50 == 0 {
-                out.push(Intent::Market {
-                    id: oq_types::OrderId(self.n as u64),
-                    side: if self.n % 100 == 0 {
+                out.push(Intent::market(
+                    oq_types::OrderId(self.n as u64),
+                    if self.n % 100 == 0 {
                         oq_types::Side::Sell
                     } else {
                         oq_types::Side::Buy
                     },
-                    qty: oq_types::QtyLots(1),
-                });
+                    oq_types::QtyLots(1),
+                ));
             }
             let _ = ctx;
         }

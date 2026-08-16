@@ -78,15 +78,15 @@ impl Strategy for MaCross {
         self.long = want_long;
         let id = OrderId::new(self.next_id);
         self.next_id += 1;
-        out.push(Intent::Market {
+        out.push(Intent::market(
             id,
-            side: if want_long { Side::Buy } else { Side::Sell },
-            qty: QtyLots(if ctx.position.0 == 0 {
+            if want_long { Side::Buy } else { Side::Sell },
+            QtyLots(if ctx.position.0 == 0 {
                 5
             } else {
                 ctx.position.0.abs()
             }),
-        });
+        ));
     }
 
     fn name(&self) -> &str {

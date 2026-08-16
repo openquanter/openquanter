@@ -227,6 +227,7 @@ mod tests {
                         id,
                         side: Side::Buy,
                         qty: QtyLots(2),
+                        offset: oq_types::Offset::Open,
                     });
                     self.covers = 1;
                 }
@@ -243,6 +244,7 @@ mod tests {
                         side: Side::Buy,
                         price: oq_types::PriceTicks(next),
                         qty,
+                        offset: oq_types::Offset::Open,
                     });
                     self.covers += 1;
                 }

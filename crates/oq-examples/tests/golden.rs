@@ -40,6 +40,7 @@ impl Strategy for BuyAndHold {
                 id: OrderId::new(1),
                 side: Side::Buy,
                 qty: QtyLots(10),
+                offset: oq_types::Offset::Open,
             });
         }
     }
@@ -101,6 +102,7 @@ impl Strategy for MartingaleLadder {
                 id,
                 side: Side::Buy,
                 qty: QtyLots(self.base_qty),
+                offset: oq_types::Offset::Open,
             });
             return;
         }
@@ -118,6 +120,7 @@ impl Strategy for MartingaleLadder {
                 id,
                 side: Side::Buy,
                 qty: QtyLots(qty),
+                offset: oq_types::Offset::Open,
             });
         }
     }
