@@ -10,7 +10,9 @@
 /// Version of the on-disk capture format, per `docs/CAPTURE-FORMAT.md`.
 pub const FORMAT_VERSION: u32 = 1;
 
+pub mod book;
 pub mod day;
+pub mod depth;
 pub mod disk;
 pub mod frame;
 pub mod manifest;
