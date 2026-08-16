@@ -88,6 +88,70 @@ impl Connector for WsConnector {
     }
 }
 
+/// A REST endpoint polled on an interval, presented as a message source.
+///
+/// Some data a margin model needs has no working stream — mark price and
+/// funding on this venue arrive only over REST. Rather than build a
+/// second capture path for it, the poller wears the same interface as a
+/// socket, so framing, day rotation, gap markers and manifests all apply
+/// unchanged. A failed poll is a disconnect, which is exactly right: the
+/// archive should record that we were not receiving.
+pub struct PollSource {
+    url: String,
+    interval: Duration,
+    next_due: std::time::Instant,
+}
+
+impl MessageSource for PollSource {
+    fn next_message(&mut self) -> io::Result<Vec<u8>> {
+        let now = std::time::Instant::now();
+        if self.next_due > now {
+            std::thread::sleep(self.next_due - now);
+        }
+        self.next_due = std::time::Instant::now() + self.interval;
+
+        let mut response = ureq::get(&self.url).call().map_err(io::Error::other)?;
+        let body = response
+            .body_mut()
+            .read_to_vec()
+            .map_err(io::Error::other)?;
+        if body.is_empty() {
+            return Err(io::Error::other("empty response"));
+        }
+        Ok(body)
+    }
+}
+
+/// Opens pollers against a fixed URL.
+pub struct PollConnector {
+    url: String,
+    interval: Duration,
+}
+
+impl PollConnector {
+    /// A connector polling `url` every `interval`.
+    #[must_use]
+    pub fn new(url: impl Into<String>, interval: Duration) -> Self {
+        Self {
+            url: url.into(),
+            interval,
+        }
+    }
+}
+
+impl Connector for PollConnector {
+    type Source = PollSource;
+
+    fn connect(&mut self) -> io::Result<Self::Source> {
+        Ok(PollSource {
+            url: self.url.clone(),
+            interval: self.interval,
+            // Poll immediately on connect, then on the interval.
+            next_due: std::time::Instant::now(),
+        })
+    }
+}
+
 /// Fetch an order book snapshot over REST.
 ///
 /// Called after every reconnect: the incremental stream only makes sense

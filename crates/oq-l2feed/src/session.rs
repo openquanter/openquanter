@@ -46,6 +46,16 @@ pub struct SessionConfig {
     pub disk_floor_bytes: u64,
     /// How often to check free space, in records.
     pub disk_check_every: u64,
+    /// How long buffered records may stay in memory before being
+    /// written out.
+    ///
+    /// Flushing only on a record count is not enough: a stream that
+    /// produces one message a second would hold sixteen minutes of data
+    /// in a buffer, where a crash loses it *silently* — the messages
+    /// were received, so nothing marks them missing. It also leaves an
+    /// operator unable to tell a working low-rate capture from one that
+    /// never connected, because the file stays empty either way.
+    pub flush_interval: Duration,
     /// Wait between reconnection attempts.
     pub reconnect_wait: Duration,
     /// Give up after this many consecutive failed connections.
@@ -70,6 +80,7 @@ impl SessionConfig {
             duration: None,
             disk_floor_bytes: 10 * 1024 * 1024 * 1024,
             disk_check_every: 1_000,
+            flush_interval: Duration::from_secs(5),
             reconnect_wait: Duration::from_secs(2),
             max_consecutive_failures: 10,
         }
@@ -122,7 +133,6 @@ impl SessionStats {
 
 /// Nanoseconds since the Unix epoch, from the host clock.
 ///
-/// The only wall-clock read in the capture path, and it is deliberate:
 /// `local_ts` exists to record when *this host* saw the message, which
 /// is what latency modelling needs and what no other clock can supply.
 #[must_use]
@@ -131,6 +141,29 @@ pub fn now_ns() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
+}
+
+/// The source of `local_ts`.
+///
+/// Injected rather than read directly, for the same reason the event
+/// kernel forbids clock reads: a test that reads the wall clock is not
+/// reproducible from `(seed, commit)`. This one was not hypothetical —
+/// the first version of these tests passed on the day they were written
+/// and failed the next morning, because fixtures dated one day met a
+/// session record stamped with the next.
+pub trait Clock {
+    /// Nanoseconds since the Unix epoch.
+    fn now_ns(&self) -> i64;
+}
+
+/// The host clock. What production uses.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ns(&self) -> i64 {
+        now_ns()
+    }
 }
 
 /// A source of messages, so the loop can be tested without a network.
@@ -170,6 +203,20 @@ pub fn run<C: Connector>(
     connector: &mut C,
     writer: &mut CaptureWriter,
 ) -> io::Result<SessionStats> {
+    run_with_clock(config, connector, writer, &SystemClock)
+}
+
+/// Run a capture session against a supplied clock.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_with_clock<C: Connector, K: Clock>(
+    config: &SessionConfig,
+    connector: &mut C,
+    writer: &mut CaptureWriter,
+    clock: &K,
+) -> io::Result<SessionStats> {
     let started = Instant::now();
     let mut stats = SessionStats {
         payloads: 0,
@@ -181,8 +228,9 @@ pub fn run<C: Connector>(
     };
     let mut consecutive_failures = 0u32;
     let mut since_disk_check = 0u64;
+    let mut last_flush = Instant::now();
 
-    writer.append_session_start(now_ns())?;
+    writer.append_session_start(clock.now_ns())?;
 
     'outer: loop {
         if let Some(limit) = config.duration
@@ -219,7 +267,7 @@ pub fn run<C: Connector>(
 
             match source.next_message() {
                 Ok(payload) => {
-                    let local_ts = now_ns();
+                    let local_ts = clock.now_ns();
                     let exch_ts =
                         binance_event_time_ns(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
                     stats.payload_bytes += payload.len() as u64;
@@ -230,6 +278,11 @@ pub fn run<C: Connector>(
                         payload,
                     })?;
                     stats.payloads += 1;
+
+                    if last_flush.elapsed() >= config.flush_interval {
+                        writer.flush()?;
+                        last_flush = Instant::now();
+                    }
 
                     since_disk_check += 1;
                     if since_disk_check >= config.disk_check_every {
@@ -246,7 +299,7 @@ pub fn run<C: Connector>(
                     stats.gaps += 1;
                     stats.outage += outage;
                     writer.append_gap(
-                        now_ns(),
+                        clock.now_ns(),
                         "connection lost",
                         None,
                         i64::try_from(outage.as_nanos()).unwrap_or(i64::MAX),
@@ -267,6 +320,29 @@ pub fn run<C: Connector>(
 mod tests {
     use super::*;
     use crate::frame::decode_all;
+
+    /// A clock the test sets, so a fixture states the day it means
+    /// instead of inheriting whatever day the suite happens to run on.
+    struct FixedClock(std::cell::Cell<i64>);
+
+    impl FixedClock {
+        fn at(ns: i64) -> Self {
+            Self(std::cell::Cell::new(ns))
+        }
+    }
+
+    impl Clock for FixedClock {
+        fn now_ns(&self) -> i64 {
+            // Advance a microsecond per read so ordering is still
+            // strictly increasing, as a real clock would be.
+            let now = self.0.get();
+            self.0.set(now + 1_000);
+            now
+        }
+    }
+
+    /// The instant every fixture in this module is anchored to.
+    const FIXTURE_NS: i64 = 1_786_780_800_000_000_000;
 
     /// A source that yields a scripted set of messages, then fails.
     struct Scripted {
@@ -338,7 +414,8 @@ mod tests {
         config.reconnect_wait = Duration::from_millis(1);
         config.disk_floor_bytes = 0;
 
-        let stats = run(&config, &mut connector, &mut writer).expect("run");
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
         writer.seal().expect("seal");
 
         assert_eq!(stats.payloads, 3, "every scripted message was written");
@@ -387,11 +464,101 @@ mod tests {
         config.max_consecutive_failures = 1;
         config.reconnect_wait = Duration::from_millis(1);
 
-        let stats = run(&config, &mut connector, &mut writer).expect("run");
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
         assert_eq!(stats.stop, StopReason::DiskFloor);
         assert_eq!(
             stats.payloads, 5,
             "stopped at the first check, not at the end"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A source that reports the size of the capture file as it goes, so
+    /// a test can see whether records reached the disk *during* the run
+    /// rather than only when it ended.
+    struct Watching {
+        messages: Vec<Vec<u8>>,
+        index: usize,
+        path: PathBuf,
+        size_seen_midway: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl MessageSource for Watching {
+        fn next_message(&mut self) -> io::Result<Vec<u8>> {
+            if self.index == self.messages.len() {
+                let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+                self.size_seen_midway.set(size);
+                return Err(io::Error::other("scripted end"));
+            }
+            let message = self.messages[self.index].clone();
+            self.index += 1;
+            Ok(message)
+        }
+    }
+
+    struct WatchingConnector {
+        messages: Vec<Vec<u8>>,
+        path: PathBuf,
+        size_seen_midway: std::rc::Rc<std::cell::Cell<u64>>,
+        attempts: usize,
+    }
+
+    impl Connector for WatchingConnector {
+        type Source = Watching;
+
+        fn connect(&mut self) -> io::Result<Self::Source> {
+            if self.attempts > 0 {
+                return Err(io::Error::other("one connection only"));
+            }
+            self.attempts += 1;
+            Ok(Watching {
+                messages: self.messages.clone(),
+                index: 0,
+                path: self.path.clone(),
+                size_seen_midway: self.size_seen_midway.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_low_rate_stream_reaches_disk_without_waiting_for_the_record_threshold() {
+        // The failure this guards against: a stream producing one
+        // message a second holds sixteen minutes of data in a buffer
+        // when flushing is driven by a record count alone. A crash then
+        // loses messages that were received, so nothing marks them
+        // missing, and an empty file looks the same as a dead feed.
+        let (root, stream, mut writer) = setup("timedflush");
+        let path = stream.file_for(&root, crate::UtcDay::from_nanos(1_786_780_800_000_000_000));
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let mut connector = WatchingConnector {
+            messages: (0..3)
+                .map(|i| depth(1_786_780_800_000 + i, i as u64))
+                .collect(),
+            path,
+            size_seen_midway: seen.clone(),
+            attempts: 0,
+        };
+
+        let mut config =
+            SessionConfig::new(&root, stream, Software::new("test", "commit"), "unused");
+        config.flush_interval = Duration::ZERO;
+        // Deliberately far above the message count: only the time-based
+        // flush can put anything on disk here.
+        config.disk_check_every = 1_000_000;
+        config.max_consecutive_failures = 1;
+        config.reconnect_wait = Duration::from_millis(1);
+
+        run_with_clock(
+            &config,
+            &mut connector,
+            &mut writer,
+            &FixedClock::at(FIXTURE_NS),
+        )
+        .expect("run");
+        assert!(
+            seen.get() > 0,
+            "records must reach the disk during the run, not only at the end"
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -427,7 +594,8 @@ mod tests {
         config.reconnect_wait = Duration::from_millis(1);
         config.disk_floor_bytes = 0;
 
-        let stats = run(&config, &mut connector, &mut writer).expect("run");
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
         assert_eq!(stats.payloads, 1);
         let sealed = writer.seal().expect("seal");
         // Day attribution fell back to local time rather than dropping

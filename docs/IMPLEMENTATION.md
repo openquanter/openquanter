@@ -333,8 +333,8 @@ uncaptured days are permanently lost):
 |---|---|---|
 | Required | Incremental depth updates + REST snapshot on connect + end-of-day snapshot | L2 book reconstruction; queue model input |
 | Required | Best bid/offer stream | True tick-level BBO — depth streams are coalesced and downsampled |
-| Required | Aggregated trades | Volume consuming the queue ahead of you: the other half of the queue model |
-| Required | Mark price / funding rate / index price | Margin engine input; liquidation uses mark price |
+| Required | Raw trades | What consumed the queue ahead of you: the other half of the queue model. Raw rather than aggregated — individual fills, not fills pre-grouped by price and time |
+| Required | Mark price / funding rate / index price | Margin engine input; liquidation uses mark price. Captured by **polling** where no stream carries it — see [Capture Format](CAPTURE-FORMAT.md) §10 |
 | Required | Forced liquidation stream | Scarce tail-behavior data, valuable even when rate-limited |
 | Recommended | Leverage and maintenance-margin tier tables (daily snapshot, bitemporal) | Margin rule source; rules change silently; storage cost is negligible |
 | Recommended | Open interest, long/short ratios (periodic REST) | Cheap research inputs |
