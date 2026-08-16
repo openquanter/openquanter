@@ -280,7 +280,7 @@ fn symbol_from_path(path: &str) -> Option<String> {
     let depth_idx = parts.iter().rposition(|p| {
         matches!(
             *p,
-            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice"
+            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice" | "fundingRate"
         )
     })?;
     parts
