@@ -29,16 +29,26 @@ specifies how captured data is framed, sealed, verified, and archived.
 ## 2. Layout
 
 ```
-raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap        active day
-raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap.zst    sealed day
-raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.manifest.json
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap          daily rotation
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>/<HH>.oqcap     hourly rotation
+                                          <HH>.manifest.json
 ```
 
-One file per venue, symbol, stream and UTC day. The split is deliberate
-on every axis:
+One file per venue, symbol, stream and **rotation period**. The period
+is a day by default and can be an hour; either way a day remains a
+browsable unit, as a file or as a directory. The split is deliberate on
+every axis:
 
-- **By day** because it gives archival a natural unit: seal, hash,
+- **By period** because it gives archival a natural unit: seal, hash,
   compress, transfer, verify, then let retention delete the local copy.
+  A day is the natural choice. An hour is for a capture host whose disk
+  cannot hold two periods of raw data — **the open file cannot be
+  compressed while it is being appended to, so the local peak is always
+  about two rotation periods**, and shortening the period is the only
+  lever that does not involve buying disk. Measured on four perpetual
+  symbols, a day of raw capture is 8 GiB at weekend rates and several
+  times that on an active weekday; two of those do not fit on a small
+  host, and two hours comfortably do.
 - **By stream** because streams have wildly different volumes and
   retention value. Incremental depth is gigabytes a day; the
   maintenance-margin rule table is bytes. Mixing them forces the cheap

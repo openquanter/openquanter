@@ -14,7 +14,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::day::UtcDay;
+use crate::day::{Rotation, Window};
 use crate::frame::Record;
 use crate::manifest::{Manifest, ManifestBuilder, control};
 use crate::stream::{Software, StreamId};
@@ -22,8 +22,8 @@ use crate::stream::{Software, StreamId};
 /// A day that finished and is ready to be sealed.
 #[derive(Debug, Clone)]
 pub struct SealedDay {
-    /// The day.
-    pub day: UtcDay,
+    /// The window it covers.
+    pub window: Window,
     /// Path of the raw file.
     pub path: PathBuf,
     /// Manifest describing it.
@@ -41,9 +41,11 @@ pub struct CaptureWriter {
     open: Option<OpenDay>,
     /// The day that just rolled over, kept open for late arrivals.
     previous: Option<OpenDay>,
-    /// How far into a new day late records for the previous one are
+    /// How far into a new window late records for the previous one are
     /// still accepted.
     grace_ns: i64,
+    /// How often a new file is started.
+    rotation: Rotation,
 }
 
 /// Default grace period after a day boundary: one minute, which covers
@@ -53,7 +55,7 @@ pub const DEFAULT_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 struct OpenDay {
-    day: UtcDay,
+    window: Window,
     path: PathBuf,
     file: BufWriter<File>,
     builder: ManifestBuilder,
@@ -77,10 +79,23 @@ impl CaptureWriter {
             open: None,
             previous: None,
             grace_ns: i64::try_from(DEFAULT_GRACE.as_nanos()).unwrap_or(i64::MAX),
+            rotation: Rotation::Daily,
         })
     }
 
-    /// Set how long the previous day stays open for late records.
+    /// Set how often a new file is started.
+    ///
+    /// Daily is the archival default. Hourly is for hosts that cannot
+    /// hold two days of raw capture, since the open file cannot be
+    /// compressed and the local peak is therefore about two rotation
+    /// periods.
+    #[must_use]
+    pub fn with_rotation(mut self, rotation: Rotation) -> Self {
+        self.rotation = rotation;
+        self
+    }
+
+    /// Set how long the previous window stays open for late records.
     #[must_use]
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace_ns = i64::try_from(grace.as_nanos()).unwrap_or(i64::MAX);
@@ -95,7 +110,7 @@ impl CaptureWriter {
     ///
     /// Propagates I/O failures from rotation and appending.
     pub fn append(&mut self, record: &Record) -> io::Result<Option<SealedDay>> {
-        let day = UtcDay::from_nanos(record.day_ts());
+        let window = Window::from_nanos(record.day_ts(), self.rotation);
 
         // A record for the day that just rolled over is normal, not an
         // error. Exchange timestamps and the host clock cross midnight
@@ -109,7 +124,7 @@ impl CaptureWriter {
         // the wrong trade: a late record in the right file costs
         // nothing, and a dead capture costs the rest of the day.
         if let Some(previous) = &mut self.previous
-            && previous.day == day
+            && previous.window == window
         {
             let mut buffer = Vec::with_capacity(record.encoded_len());
             record.encode(&mut buffer);
@@ -121,8 +136,8 @@ impl CaptureWriter {
 
         let mut sealed = None;
         match &self.open {
-            Some(open) if open.day == day => {}
-            Some(open) if day < open.day => {
+            Some(open) if open.window == window => {}
+            Some(open) if window < open.window => {
                 // Older than even the grace window: the archive's
                 // meaning depends on a file holding its own day, and
                 // this record cannot be placed without breaking that.
@@ -130,7 +145,7 @@ impl CaptureWriter {
                     io::ErrorKind::InvalidInput,
                     format!(
                         "record for {} arrived after {} was already open, beyond the grace window",
-                        day, open.day
+                        window, open.window
                     ),
                 ));
             }
@@ -144,7 +159,7 @@ impl CaptureWriter {
         }
 
         if self.open.is_none() {
-            self.open_day(day)?;
+            self.open_window(window)?;
         }
 
         let open = self.open.as_mut().expect("just opened");
@@ -156,8 +171,8 @@ impl CaptureWriter {
         // Once the new day is far enough along, nothing more can
         // legitimately belong to the old one.
         if self.previous.is_some() {
-            let day_start = day.start_nanos();
-            if record.day_ts().saturating_sub(day_start) > self.grace_ns {
+            let window_start = window.start_nanos();
+            if record.day_ts().saturating_sub(window_start) > self.grace_ns {
                 sealed = self.seal_previous()?;
             }
         }
@@ -290,33 +305,36 @@ impl CaptureWriter {
         let raw = fs::read(&open.path)?;
         let manifest = open
             .builder
-            .build(&self.stream, open.day, &self.software, &raw);
+            .build(&self.stream, open.window, &self.software, &raw);
 
-        let manifest_path = self.stream.manifest_for(&self.root, open.day);
+        let manifest_path = self.stream.manifest_for(&self.root, open.window);
         fs::write(&manifest_path, manifest.to_json())?;
 
         Ok(SealedDay {
-            day: open.day,
+            window: open.window,
             path: open.path,
             manifest,
             manifest_path,
         })
     }
 
-    /// The day currently open, if any.
+    /// The window currently open, if any.
     #[must_use]
-    pub fn current_day(&self) -> Option<UtcDay> {
-        self.open.as_ref().map(|o| o.day)
+    pub fn current_window(&self) -> Option<Window> {
+        self.open.as_ref().map(|o| o.window)
     }
 
-    fn open_day(&mut self, day: UtcDay) -> io::Result<()> {
-        let path = self.stream.file_for(&self.root, day);
+    fn open_window(&mut self, window: Window) -> io::Result<()> {
+        let path = self.stream.file_for(&self.root, window);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         // Append rather than truncate: a restart continues the day, and
         // the seam is visible in the data through a session_start record
         // rather than inferred from file timestamps.
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         self.open = Some(OpenDay {
-            day,
+            window,
             path,
             file: BufWriter::with_capacity(1 << 20, file),
             builder: ManifestBuilder::new(),
@@ -329,6 +347,7 @@ impl CaptureWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::day::UtcDay;
     use crate::frame::decode_all;
 
     const DAY_NS: i64 = 86_400_000_000_000;
@@ -387,13 +406,13 @@ mod tests {
             w.append(&second).expect("append").is_none(),
             "rotation switches days but defers sealing, since late records may still arrive"
         );
-        assert_eq!(w.current_day(), Some(UtcDay(day + 1)));
+        assert_eq!(w.current_window().map(|x| x.day), Some(UtcDay(day + 1)));
 
         let sealed = w
             .seal_previous()
             .expect("seal")
             .expect("the outgoing day was still open");
-        assert_eq!(sealed.day, UtcDay(day));
+        assert_eq!(sealed.window.day, UtcDay(day));
         assert_eq!(
             sealed.manifest.records, 1,
             "only the first record belongs to that day"
@@ -433,12 +452,18 @@ mod tests {
             .expect("a late record must not fail the write");
 
         let sealed = w.seal().expect("seal");
-        assert_eq!(sealed.day, UtcDay(day + 1));
+        assert_eq!(sealed.window.day, UtcDay(day + 1));
 
         // Both pre-midnight records are in the old day's file, and only
         // those.
-        let old = fs::read(StreamId::new("venue", "SYM", "depth").file_for(&root, UtcDay(day)))
-            .expect("read");
+        let old = fs::read(StreamId::new("venue", "SYM", "depth").file_for(
+            &root,
+            Window {
+                day: UtcDay(day),
+                hour: None,
+            },
+        ))
+        .expect("read");
         let (records, _) = decode_all(&old).expect("decode");
         let payloads: Vec<_> = records.iter().map(|r| r.payload.clone()).collect();
         assert_eq!(payloads, vec![b"before".to_vec(), b"late".to_vec()]);
@@ -464,7 +489,7 @@ mod tests {
             ))
             .expect("append")
             .expect("the previous day is sealed once grace expires");
-        assert_eq!(sealed.day, UtcDay(day));
+        assert_eq!(sealed.window.day, UtcDay(day));
 
         // And a record older than that is refused, because it can no
         // longer be placed in a file that still claims its own day.
@@ -519,7 +544,14 @@ mod tests {
             w.seal().expect("seal");
         }
 
-        let bytes = fs::read(stream.file_for(&root, UtcDay(20_000))).expect("read");
+        let bytes = fs::read(stream.file_for(
+            &root,
+            Window {
+                day: UtcDay(20_000),
+                hour: None,
+            },
+        ))
+        .expect("read");
         let (records, _) = decode_all(&bytes).expect("decode");
         assert_eq!(records.len(), 3, "first record survived the restart");
         assert_eq!(records[0].payload, b"first");

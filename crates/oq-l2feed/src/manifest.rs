@@ -8,7 +8,7 @@
 
 use oq_hash::sha256_hex;
 
-use crate::day::UtcDay;
+use crate::day::Window;
 use crate::frame::{Kind, Record};
 use crate::stream::{Software, StreamId};
 
@@ -38,8 +38,8 @@ pub struct Manifest {
     pub symbol: String,
     /// Stream name.
     pub stream: String,
-    /// The UTC day this file covers.
-    pub utc_day: UtcDay,
+    /// The window this file covers: a UTC day, or an hour within one.
+    pub window: Window,
     /// Records written, control records included.
     pub records: u64,
     /// Uncompressed size in bytes.
@@ -126,7 +126,7 @@ impl ManifestBuilder {
     pub fn build(
         self,
         stream: &StreamId,
-        utc_day: UtcDay,
+        window: Window,
         software: &Software,
         raw: &[u8],
     ) -> Manifest {
@@ -135,7 +135,7 @@ impl ManifestBuilder {
             venue: stream.venue.clone(),
             symbol: stream.symbol.clone(),
             stream: stream.stream.clone(),
-            utc_day,
+            window,
             records: self.records,
             bytes_raw: self.bytes_raw,
             exch_ts_range: self.exch_first.zip(self.exch_last),
@@ -167,7 +167,10 @@ impl Manifest {
         push_str_field(&mut out, "venue", &self.venue);
         push_str_field(&mut out, "symbol", &self.symbol);
         push_str_field(&mut out, "stream", &self.stream);
-        push_str_field(&mut out, "utc_day", &self.utc_day.to_string());
+        push_str_field(&mut out, "utc_day", &self.window.day.to_string());
+        if let Some(hour) = self.window.hour {
+            push_num(&mut out, "utc_hour", i64::from(hour));
+        }
         push_num(&mut out, "records", self.records as i64);
         push_num(&mut out, "bytes_raw", self.bytes_raw as i64);
         push_num(&mut out, "first_exch_ts", exch_first);
@@ -281,6 +284,7 @@ pub fn is_gap(record: &Record) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::day::UtcDay;
     use crate::frame::Record;
 
     #[test]
@@ -299,7 +303,10 @@ mod tests {
 
         let m = b.build(
             &StreamId::new("venue", "SYM", "depth"),
-            UtcDay(20_000),
+            Window {
+                day: UtcDay(20_000),
+                hour: None,
+            },
             &Software::new("test 0.1", "abc"),
             b"raw bytes",
         );
@@ -322,7 +329,10 @@ mod tests {
     fn json_has_the_documented_shape() {
         let m = ManifestBuilder::new().build(
             &StreamId::new("venue", "SYM", "depth"),
-            UtcDay(20_000),
+            Window {
+                day: UtcDay(20_000),
+                hour: None,
+            },
             &Software::new("test 0.1", "abc"),
             b"",
         );
@@ -354,7 +364,10 @@ mod tests {
     fn json_strings_are_escaped() {
         let m = ManifestBuilder::new().build(
             &StreamId::new("ven\"ue", "SY\\M", "de\npth"),
-            UtcDay(0),
+            Window {
+                day: UtcDay(0),
+                hour: None,
+            },
             &Software::new("v", "c"),
             b"",
         );

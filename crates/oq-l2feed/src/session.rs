@@ -422,9 +422,10 @@ mod tests {
         assert_eq!(stats.gaps, 2, "each closed connection left a marker");
         assert_eq!(stats.stop, StopReason::ConnectionLost);
 
-        let bytes = std::fs::read(
-            stream.file_for(&root, crate::UtcDay::from_nanos(1_786_780_800_000_000_000)),
-        )
+        let bytes = std::fs::read(stream.file_for(
+            &root,
+            crate::day::Window::from_nanos(1_786_780_800_000_000_000, crate::day::Rotation::Daily),
+        ))
         .expect("read");
         let (records, remainder) = decode_all(&bytes).expect("decode");
         assert_eq!(remainder, 0);
@@ -529,7 +530,10 @@ mod tests {
         // loses messages that were received, so nothing marks them
         // missing, and an empty file looks the same as a dead feed.
         let (root, stream, mut writer) = setup("timedflush");
-        let path = stream.file_for(&root, crate::UtcDay::from_nanos(1_786_780_800_000_000_000));
+        let path = stream.file_for(
+            &root,
+            crate::day::Window::from_nanos(1_786_780_800_000_000_000, crate::day::Rotation::Daily),
+        );
         let seen = std::rc::Rc::new(std::cell::Cell::new(0u64));
         let mut connector = WatchingConnector {
             messages: (0..3)

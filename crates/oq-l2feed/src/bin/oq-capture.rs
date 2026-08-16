@@ -18,6 +18,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+use oq_l2feed::day::Rotation;
 use oq_l2feed::session::{SessionConfig, StopReason, run};
 use oq_l2feed::stream::{Software, StreamId};
 use oq_l2feed::venue::{binance_perp_polls, binance_perp_streams, binance_perp_url};
@@ -38,6 +39,10 @@ OPTIONS:
     --venue <NAME>        Venue label for the archive path [default: binance-perp]
     --minutes <N>         Stop after N minutes [default: run until interrupted]
     --floor-gb <N>        Stop when free space falls below N GiB [default: 10]
+    --rotation <WHEN>     daily | hourly [default: daily]
+                          Hourly suits a host that cannot hold two days of raw
+                          capture: the open file cannot be compressed, so the
+                          local peak is always about two rotation periods.
     --help                Print this message
 ";
 
@@ -112,13 +117,20 @@ fn real_main() -> Result<ExitCode, String> {
     config.duration = minutes.map(|m| Duration::from_secs(m * 60));
     config.disk_floor_bytes = floor_gb * 1024 * 1024 * 1024;
 
-    let mut writer = CaptureWriter::new(&root, stream, software).map_err(|e| e.to_string())?;
+    let rotation = optional(&args, "--rotation")
+        .map(|v| Rotation::parse(&v).ok_or_else(|| format!("unknown rotation {v:?}")))
+        .transpose()?
+        .unwrap_or(Rotation::Daily);
+
+    let mut writer = CaptureWriter::new(&root, stream, software)
+        .map_err(|e| e.to_string())?
+        .with_rotation(rotation);
 
     eprintln!(
         "capturing {} {} from {url}",
         config.stream.symbol, config.stream.stream
     );
-    eprintln!("archive root {root}, stopping below {floor_gb} GiB free");
+    eprintln!("archive root {root}, rotating {rotation:?}, stopping below {floor_gb} GiB free");
 
     let stats = match poll_interval {
         Some(interval) => {
@@ -153,7 +165,7 @@ fn real_main() -> Result<ExitCode, String> {
     );
     eprintln!(
         "  sealed {} ({} records)",
-        sealed.day, sealed.manifest.records
+        sealed.window, sealed.manifest.records
     );
     eprintln!("  manifest {}", sealed.manifest_path.display());
 
