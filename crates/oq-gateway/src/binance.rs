@@ -1249,3 +1249,34 @@ mod user_stream {
         assert!(!shown.contains("SECRETKEY"), "{shown}");
     }
 }
+
+impl Binance {
+    /// The venue's listing for one symbol, as raw JSON.
+    ///
+    /// Read from the deployment being traded on rather than from a
+    /// table compiled into the binary. Precision tables belong in
+    /// source for replay, where the answer must not change; here the
+    /// question is what *this* venue accepts right now, and a testnet
+    /// does not always list a contract the way production does.
+    ///
+    /// # Errors
+    /// Anything the request reports, or a symbol the venue does not list.
+    pub fn exchange_info(&self, symbol: &str) -> Result<String, VenueError> {
+        let body = self.get_public("/fapi/v1/exchangeInfo", &format!("symbol={symbol}"))?;
+        objects(&body)
+            .into_iter()
+            .find(|o| field_str(o, "symbol").as_deref() == Some(symbol))
+            .ok_or_else(|| VenueError::Malformed {
+                what: "symbol not listed",
+                body: symbol.to_string(),
+            })
+    }
+
+    /// Last traded price for one symbol, as raw JSON.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    pub fn ticker_price(&self, symbol: &str) -> Result<String, VenueError> {
+        self.get_public("/fapi/v1/ticker/price", &format!("symbol={symbol}"))
+    }
+}
