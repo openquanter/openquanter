@@ -59,8 +59,9 @@ Pre-alpha, and specific about it. **Built and tested today:**
   torn-tail recovery, journal-before-apply enforced by fault injection.
 - **L0 matching** — tick replay with gap fill, price improvement and
   price-time priority. Frozen as the regression anchor.
-- **Margin** — tiered maintenance margin, liquidation pricing derived rather
-  than copied, funding with spike injection, bitemporal rule schedules.
+- **Margin and costs** — tiered maintenance margin, liquidation pricing derived
+  rather than copied, funding with spike injection, bitemporal rule schedules,
+  and maker/taker fees (a maker rate may be negative, because rebates exist).
 - **Backtest host** — including the margin deviation report, which runs a
   strategy twice and quantifies what a margin-free run overstates.
 - **Data plane** — dual timestamps, leakage-free as-of joins, bitemporal
