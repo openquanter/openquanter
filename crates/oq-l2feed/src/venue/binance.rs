@@ -83,7 +83,11 @@ impl Venue for BinancePerp {
     /// recoverable by re-sorting the archive, getting the bytes wrong is
     /// not.
     fn event_time_ns(&self, payload: &[u8]) -> Option<i64> {
-        find_int_field(payload, b"\"E\":")?.checked_mul(1_000_000)
+        event_time_ns(payload)
+    }
+
+    fn event_time_reader(&self) -> fn(&[u8]) -> Option<i64> {
+        event_time_ns
     }
 
     /// Precisions are per-contract on this venue and there is no way to
@@ -103,6 +107,10 @@ impl Venue for BinancePerp {
             qty_scale,
         })
     }
+}
+
+fn event_time_ns(payload: &[u8]) -> Option<i64> {
+    find_int_field(payload, b"\"E\":")?.checked_mul(1_000_000)
 }
 
 /// Find `key` in `payload` and parse the integer that follows it.
@@ -187,6 +195,9 @@ mod tests {
         // string, or data lands under a name that cannot select it back.
         assert_eq!(BinancePerp.id(), "binance-perp");
         assert!(super::super::by_id("binance-perp").is_some());
-        assert_eq!(super::super::by_id("binance-perp").unwrap().id(), "binance-perp");
+        assert_eq!(
+            super::super::by_id("binance-perp").unwrap().id(),
+            "binance-perp"
+        );
     }
 }

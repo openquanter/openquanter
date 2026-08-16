@@ -21,7 +21,7 @@ use std::time::Duration;
 use oq_l2feed::day::Rotation;
 use oq_l2feed::session::{SessionConfig, StopReason, install_signal_handlers, run};
 use oq_l2feed::stream::{Software, StreamId};
-use oq_l2feed::venue::{binance_perp_polls, binance_perp_streams, binance_perp_url};
+use oq_l2feed::venue;
 use oq_l2feed::writer::CaptureWriter;
 use oq_l2feed::ws::{PollConnector, WsConnector};
 
@@ -66,7 +66,16 @@ fn real_main() -> Result<ExitCode, String> {
     let root = required(&args, "--root")?;
     let symbol = required(&args, "--symbol")?;
     let stream_name = required(&args, "--stream")?;
-    let venue = optional(&args, "--venue").unwrap_or_else(|| "binance-perp".to_string());
+    let venue_id = optional(&args, "--venue").unwrap_or_else(|| "binance-perp".to_string());
+    // The flag selects the implementation, not just the folder it files
+    // under. It used to do only the latter, which meant --venue okx
+    // wrote Binance data into an okx directory.
+    let venue = venue::by_id(&venue_id).ok_or_else(|| {
+        format!(
+            "unknown venue {venue_id:?}; known venues: {}",
+            venue::known_ids().join(", ")
+        )
+    })?;
     let minutes = optional(&args, "--minutes")
         .map(|v| {
             v.parse::<u64>()
@@ -83,16 +92,18 @@ fn real_main() -> Result<ExitCode, String> {
 
     // Some data has a stream; some only has an endpoint to poll. Both
     // go through the same capture path.
-    let socket = binance_perp_streams(&symbol)
+    let socket = venue
+        .streams(&symbol)
         .into_iter()
         .find(|s| s.name == stream_name);
-    let poll = binance_perp_polls(&symbol)
+    let poll = venue
+        .polls(&symbol)
         .into_iter()
         .find(|p| p.name == stream_name);
 
     let (name, url, poll_interval) = match (socket, poll) {
         (Some(spec), _) => {
-            let url = binance_perp_url(&spec.topic);
+            let url = venue.transport(&spec).url;
             (spec.name, url, None)
         }
         (None, Some(spec)) => (
@@ -101,19 +112,24 @@ fn real_main() -> Result<ExitCode, String> {
             Some(Duration::from_secs(spec.interval_secs)),
         ),
         (None, None) => {
+            let mut known: Vec<String> =
+                venue.streams(&symbol).into_iter().map(|s| s.name).collect();
+            known.extend(venue.polls(&symbol).into_iter().map(|p| p.name));
             return Err(format!(
-                "unknown stream {stream_name:?}; expected one of depth, bookTicker, trade, forceOrder, markPrice"
+                "unknown stream {stream_name:?} for venue {venue_id}; expected one of {}",
+                known.join(", ")
             ));
         }
     };
 
-    let stream = StreamId::new(&venue, &symbol, &name);
+    let stream = StreamId::new(venue.id(), &symbol, &name);
     let software = Software::new(
         concat!("oq-l2feed ", env!("CARGO_PKG_VERSION")),
         option_env!("OQ_BUILD_COMMIT").unwrap_or("unknown"),
     );
 
-    let mut config = SessionConfig::new(&root, stream.clone(), software.clone(), &url);
+    let mut config = SessionConfig::new(&root, stream.clone(), software.clone(), &url)
+        .with_event_time(venue.event_time_reader());
     config.duration = minutes.map(|m| Duration::from_secs(m * 60));
     config.disk_floor_bytes = floor_gb * 1024 * 1024 * 1024;
 

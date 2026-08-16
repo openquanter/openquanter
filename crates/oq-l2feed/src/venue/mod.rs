@@ -158,6 +158,14 @@ pub trait Venue {
     /// the caller falls back to local time.
     fn event_time_ns(&self, payload: &[u8]) -> Option<i64>;
 
+    /// The same reader as a plain function, for the capture loop.
+    ///
+    /// The loop holds a `fn` rather than a trait object so that its
+    /// configuration stays `Copy` and free of lifetimes. Implementations
+    /// are stateless, so handing out a function pointer costs nothing
+    /// and keeps the loop from having to name a venue to get one.
+    fn event_time_reader(&self) -> fn(&[u8]) -> Option<i64>;
+
     /// Quoting precision for a symbol, when the venue is known to
     /// publish it.
     fn instrument(&self, symbol: &str) -> Option<Instrument>;

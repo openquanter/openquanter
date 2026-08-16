@@ -34,8 +34,10 @@ USAGE:
 
 OPTIONS:
     --file <PATH>        Capture file (.oqcap)
-    --price-scale <N>    Decimal places in a price [default: 2]
-    --qty-scale <N>      Decimal places in a quantity [default: 3]
+    --venue <NAME>       Venue whose instrument table to use [default: binance-perp]
+    --symbol <SYMBOL>    Symbol, for looking up quoting precision
+    --price-scale <N>    Override the looked-up price precision
+    --qty-scale <N>      Override the looked-up quantity precision
     --max-report <N>     Sequence problems to list [default: 10]
     --help
 ";
@@ -58,14 +60,41 @@ fn main() -> ExitCode {
         eprintln!("oq-book-check: missing --file\n\n{USAGE}");
         return ExitCode::FAILURE;
     };
+    // Precision comes from the venue's instrument table, not from a
+    // default. Guessing it is not a small error: replaying HYPEUSDT with
+    // two decimals reported eleven thousand unparseable messages for
+    // prices like "57.45300" that are valid at five, which reads as a
+    // corrupt archive rather than a mis-set flag.
+    let venue_id = value("--venue").unwrap_or_else(|| "binance-perp".to_string());
+    let symbol = value("--symbol").or_else(|| symbol_from_path(&path));
+    let looked_up = symbol
+        .as_deref()
+        .and_then(|s| oq_l2feed::venue::by_id(&venue_id).and_then(|v| v.instrument(s)));
+
+    if looked_up.is_none() && value("--price-scale").is_none() {
+        eprintln!(
+            "oq-book-check: no instrument definition for {:?} on {venue_id}; \
+             pass --symbol, or --price-scale and --qty-scale explicitly, \
+             rather than letting a default decide how to read prices",
+            symbol.as_deref().unwrap_or("<unknown>")
+        );
+        return ExitCode::FAILURE;
+    }
+
     let scales = Scales {
         price: value("--price-scale")
             .and_then(|v| v.parse().ok())
+            .or_else(|| looked_up.map(|i| u32::from(i.price_scale)))
             .unwrap_or(2),
         qty: value("--qty-scale")
             .and_then(|v| v.parse().ok())
+            .or_else(|| looked_up.map(|i| u32::from(i.qty_scale)))
             .unwrap_or(3),
     };
+    println!(
+        "scales          price {} / qty {}",
+        scales.price, scales.qty
+    );
     let max_report: usize = value("--max-report")
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
@@ -211,6 +240,24 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Recover the symbol from an archive path such as
+/// `.../binance-perp/BTCUSDT/depth/2026-08-16/09.oqcap`.
+///
+/// The archive layout already records it, so requiring the operator to
+/// repeat it is an invitation to repeat it wrongly.
+fn symbol_from_path(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let depth_idx = parts.iter().rposition(|p| {
+        matches!(
+            *p,
+            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice"
+        )
+    })?;
+    parts
+        .get(depth_idx.checked_sub(1)?)
+        .map(|s| (*s).to_string())
 }
 
 #[derive(Default)]
