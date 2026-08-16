@@ -27,7 +27,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::frame::Record;
 use crate::stream::{Software, StreamId};
-use crate::venue::binance_event_time_ns;
 use crate::writer::CaptureWriter;
 
 /// How the session decides when to stop.
@@ -61,6 +60,14 @@ pub struct SessionConfig {
     pub reconnect_wait: Duration,
     /// Give up after this many consecutive failed connections.
     pub max_consecutive_failures: u32,
+    /// How to read the exchange event time out of a payload.
+    ///
+    /// The loop is otherwise indifferent to what a venue sends, and this
+    /// is the one exception: a record has to be filed under the right
+    /// window. Supplied by the venue rather than called directly,
+    /// because a loop that names one exchange is not a loop that can
+    /// serve another — and this one did, until the seam existed.
+    pub event_time_ns: fn(&[u8]) -> Option<i64>,
 }
 
 impl SessionConfig {
@@ -84,7 +91,15 @@ impl SessionConfig {
             flush_interval: Duration::from_secs(5),
             reconnect_wait: Duration::from_secs(2),
             max_consecutive_failures: 10,
+            event_time_ns: |_| None,
         }
+    }
+
+    /// Read event times the way `venue` does.
+    #[must_use]
+    pub fn with_event_time(mut self, f: fn(&[u8]) -> Option<i64>) -> Self {
+        self.event_time_ns = f;
+        self
     }
 }
 
@@ -340,7 +355,7 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 Ok(payload) => {
                     let local_ts = clock.now_ns();
                     let exch_ts =
-                        binance_event_time_ns(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
+                        (config.event_time_ns)(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
                     stats.payload_bytes += payload.len() as u64;
                     writer.append(&Record {
                         kind: crate::frame::Kind::Payload,

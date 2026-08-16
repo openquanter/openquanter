@@ -127,7 +127,34 @@ pub struct Liquidation {
 ///
 /// Deterministic: the same strategy over the same ticks with the same
 /// configuration produces the same result, on any machine.
+///
+/// Takes a slice, so the caller has already decided to hold the whole
+/// window. For a window large enough that this is the binding
+/// constraint, [`run_stream`] consumes ticks one at a time instead and
+/// produces the identical result.
 pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) -> RunResult {
+    run_stream(config, strategy, ticks.iter().copied())
+}
+
+/// Run `strategy` over a stream of ticks.
+///
+/// The core has always consumed one tick at a time — `apply(State,
+/// Event)` never looks backwards — so holding the window was the
+/// harness's choice, not the engine's requirement. At 64 bytes a tick,
+/// two years of one instrument is 11 GB, and that number, not anything
+/// about the strategy, is what decides how long a window a given machine
+/// can run. The reference implementation walks a day at a time and its
+/// footprint is the same for two years as for two days.
+///
+/// Consuming a stream makes the peak a block rather than the window, so
+/// window length stops being bounded by memory. Everything else is
+/// unchanged: [`run`] delegates here, and the two produce identical
+/// results by construction rather than by agreement.
+pub fn run_stream<S, I>(config: &RunConfig, strategy: &mut S, ticks: I) -> RunResult
+where
+    S: Strategy,
+    I: IntoIterator<Item = Tick>,
+{
     // Both arms carry the *same* margin table and differ only in
     // whether the venue is allowed to act on it. Zeroing the table
     // instead would still liquidate at zero equity, which is not the
@@ -153,8 +180,10 @@ pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) ->
     let mut next_order_id = 1u64;
     let mut last_funding = Nanos(i64::MIN);
 
+    let mut tick_count = 0usize;
     for tick in ticks {
-        let event = Event::Tick(*tick);
+        tick_count += 1;
+        let event = Event::Tick(tick);
         let mut tick_fills: Vec<Fill> = Vec::new();
         for out in kernel.apply(&event) {
             match out {
@@ -225,7 +254,7 @@ pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) ->
         }
 
         let ctx = Context {
-            tick: *tick,
+            tick,
             position: summary.qty,
             entry: summary.entry,
             equity: summary.equity,
@@ -287,7 +316,7 @@ pub fn run<S: Strategy>(config: &RunConfig, strategy: &mut S, ticks: &[Tick]) ->
         strategy: strategy.name().to_string(),
         fills,
         liquidations,
-        ticks: ticks.len(),
+        ticks: tick_count,
         final_equity: summary.equity,
         realized: summary.realized,
         funding_paid: summary.funding,
@@ -490,5 +519,106 @@ mod tests {
             result.min_equity < result.final_equity,
             "the market recovered, so the worst point must be worse than the end"
         );
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use oq_margin::{Contract, TierTable};
+    use oq_types::{Cash, InstrumentId, PriceTicks, Stamp};
+
+    /// A strategy that trades, so the comparison exercises fills and
+    /// position state rather than two empty runs agreeing.
+    #[derive(Default)]
+    struct Pinger {
+        n: usize,
+    }
+
+    impl Strategy for Pinger {
+        fn name(&self) -> &str {
+            "pinger"
+        }
+        fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+            self.n += 1;
+            if self.n % 50 == 0 {
+                out.push(Intent::Market {
+                    id: oq_types::OrderId(self.n as u64),
+                    side: if self.n % 100 == 0 {
+                        oq_types::Side::Sell
+                    } else {
+                        oq_types::Side::Buy
+                    },
+                    qty: oq_types::QtyLots(1),
+                });
+            }
+            let _ = ctx;
+        }
+    }
+
+    fn ticks(n: usize) -> Vec<Tick> {
+        (0..n)
+            .map(|i| {
+                let i = i as i64;
+                // A wandering price, so fills land at varying levels and
+                // an ordering difference would show up in the result.
+                let drift = (i % 97) * 13 - 600;
+                Tick::trades_only(
+                    Stamp::synthetic(1_700_000_000_000_000_000 + i * 250_000_000),
+                    6_000_000 + drift,
+                    6_000_100 + drift,
+                    5_999_900 + drift,
+                )
+            })
+            .collect()
+    }
+
+    fn config() -> RunConfig {
+        RunConfig::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(20_000),
+        )
+    }
+
+    /// The two entry points must not merely agree on the total — they
+    /// must produce the same fills in the same order, or a caller's
+    /// choice between them would quietly change the answer.
+    #[test]
+    fn streaming_and_slice_runs_are_identical() {
+        let data = ticks(5_000);
+        let cfg = config();
+
+        let mut a = Pinger::default();
+        let from_slice = run(&cfg, &mut a, &data);
+
+        let mut b = Pinger::default();
+        let from_stream = run_stream(&cfg, &mut b, data.iter().copied());
+
+        assert_eq!(from_slice.ticks, from_stream.ticks);
+        assert_eq!(from_slice.fills.len(), from_stream.fills.len());
+        assert_eq!(from_slice.fills, from_stream.fills);
+        assert_eq!(from_slice.realized, from_stream.realized);
+        assert_eq!(from_slice.fees_paid, from_stream.fees_paid);
+        assert_eq!(from_slice.final_equity, from_stream.final_equity);
+        assert_eq!(from_slice.min_equity, from_stream.min_equity);
+        assert_eq!(from_slice.max_adverse_ticks, from_stream.max_adverse_ticks);
+        assert!(
+            !from_slice.fills.is_empty(),
+            "a run with no fills would compare two empty sequences and prove nothing"
+        );
+    }
+
+    /// A stream that yields nothing is a run over no data, not a panic.
+    #[test]
+    fn an_empty_stream_runs_and_reports_nothing() {
+        let cfg = config();
+        let mut s = Pinger::default();
+        let r = run_stream(&cfg, &mut s, std::iter::empty());
+        assert_eq!(r.ticks, 0);
+        assert!(r.fills.is_empty());
+        assert_eq!(r.final_equity, cfg.starting_balance);
+        let _ = PriceTicks(0);
     }
 }
