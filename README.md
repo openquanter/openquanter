@@ -26,6 +26,19 @@ without the backtester. The capture toolkit with no engine at all. Or the whole
 stack, where one core runs both backtesting and live trading with only the
 event producers swapped.
 
+**Which markets.** The engine is not tied to an asset class: it consumes
+timestamped market events and orders, which equities, futures, foreign
+exchange and crypto all produce. What differs between them lives behind
+adapters — how a venue is subscribed to, how its payloads are shaped, what a
+trading day is, and how an account is margined.
+
+Crypto perpetuals are implemented first because their venues are the easiest to
+integrate against: public market data with no entitlement, and account access
+that takes an API key rather than a contract. That is a reason about
+onboarding, not about scope. Anything below that says *venue* means whichever
+market you point it at; anything that says *funding* or *mark price* is
+perpetuals-specific and named as such.
+
 What the components are built to get right, in order:
 
 1. **A backtest that does not flatter you.** Tiered margin and liquidation are

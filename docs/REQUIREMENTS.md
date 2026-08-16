@@ -30,7 +30,7 @@ intersection none of them currently occupy:
 | Differentiator | Why it matters |
 |---|---|
 | **Margin and liquidation as an orthogonal fidelity layer** | Backtests that can never be liquidated systematically overstate leveraged strategies in the tail. Any fidelity tier can be run with `+margin` enabled. |
-| **Crypto perpetuals first** | Funding, mark price, tiered maintenance margin, and forced-liquidation streams are modeled natively, not approximated by an equities account model. |
+| **Crypto perpetuals first, not only** | The engine consumes timestamped market events and orders, which every venue produces; asset-class differences live behind adapters — subscription, payload shape, what a trading day is, how an account is margined. Perpetuals come first because their venues are the easiest to integrate against, and their funding, mark price, tiered maintenance margin and liquidation streams are modeled natively rather than approximated by an equities account model. |
 | **AI layered by evidence strength** | In-process inference is production-grade; RL environments arrive only once simulation fidelity justifies them; LLM-driven research is explicitly sandboxed and experimental. |
 | **Determinism as a product feature** | Replay, audit, crash recovery, and randomized simulation testing are all the same mechanism, not four subsystems. |
 | **Bilingual project** | Documentation and community support in both English and Chinese. |

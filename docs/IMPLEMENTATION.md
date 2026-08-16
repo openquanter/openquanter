@@ -264,6 +264,39 @@ does not lie about when the strategy knew things.
 
 ---
 
+### D15 — A venue is an adapter, and one of the things it decides is what a day is
+
+The capture path stores payloads verbatim and parses only enough to place a
+record in a window. Everything a venue does differently lives behind one trait:
+which streams to subscribe, how a subscription is confirmed, how its payloads
+are shaped, the quoting precision of each instrument, and which archive window
+a record belongs to.
+
+That last one is the reason this is a design decision rather than a refactor.
+The archive's central invariant is that a file holds one whole period — the
+merge tool, the order-book check and the tick converter all lean on it — and
+dividing time by the UTC clock satisfies that invariant only for a market that
+never closes. A US equities session is six and a half hours inside a UTC day,
+mostly empty. A futures session opens the evening before and runs past
+midnight, so the clock rule turns one trading day into two files and every
+tool downstream inherits the split. The framework is not tied to an asset
+class, so the assumption had to come out of the archive core and into the
+venue, where a session actually belongs.
+
+No exchange calendar ships with it. Writing one without a venue to check it
+against would be guessing, and a wrong calendar is worse than an absent one
+because it looks authoritative. What exists is the seam and a default that
+reproduces the present behaviour exactly.
+
+The same reasoning made subscription and payload parsing part of the contract,
+each after a failure that argued for it. A venue that accepts any stream name
+without validating it will confirm a retired stream and then say nothing,
+which is indistinguishable from a quiet market — so the contract carries how a
+subscription is acknowledged, and silence past a deadline is an error. A
+payload reader written for one venue finds nothing in another and returns an
+empty result rather than failing — so parsing belongs to the venue too, or a
+perfectly readable archive converts to nothing and reports itself as empty.
+
 ## 3. Technology choices
 
 | Area | Choice | Rationale |
