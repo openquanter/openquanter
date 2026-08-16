@@ -239,4 +239,20 @@ fn a_restart_seam_is_counted_as_a_gap() {
         90 * SECOND,
         "and its length is the silence, measured from the last record to the restart"
     );
+
+    // The seam must be in the stream, not only in the manifest beside
+    // it. A replay tool reads the file; when the gap lived only in the
+    // manifest, an order-book check called a known, recorded loss
+    // "silent" -- correctly, because nothing in the bytes said
+    // otherwise.
+    let bytes = std::fs::read(&second.path).expect("read sealed file");
+    let (records, _torn) = decode_all(&bytes).expect("decode");
+    let markers = records
+        .iter()
+        .filter(|r| r.kind == Kind::Control && oq_l2feed::manifest::is_gap(r))
+        .count();
+    assert_eq!(
+        markers, 1,
+        "the restart seam must appear in the stream as a gap marker"
+    );
 }

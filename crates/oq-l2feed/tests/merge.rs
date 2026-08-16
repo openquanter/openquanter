@@ -149,3 +149,62 @@ fn merge_covers_the_union_exactly_once() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The secondary's records can belong in the middle, not only at the end.
+///
+/// The first version of the merge appended whatever the secondary
+/// contributed, assuming the primary always covers the earlier part of
+/// the window. A primary with a hole of its own breaks that: the
+/// secondary fills the middle, and appending puts the file out of
+/// order. A replay then reports sequence breaks -- the order-book check
+/// rejected a file the merge tool had called a success, which is how
+/// this was found.
+#[test]
+fn a_hole_in_the_middle_of_the_primary_is_filled_in_order() {
+    let base = std::env::temp_dir().join(format!("oq-merge-hole-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let primary = base.join("primary");
+    let secondary = base.join("secondary");
+    let out = base.join("merged");
+
+    // Primary saw 1..=20 and 41..=60, missing 21..=40 entirely --
+    // exactly the shape a stop and restart leaves behind.
+    write_tree(&primary, 1, 20, 0);
+    write_tree(&primary, 41, 60, 0);
+    // Secondary ran throughout and has the missing middle.
+    write_tree(&secondary, 15, 50, 7_000_000);
+
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_oq-merge"))
+        .args([
+            "--primary",
+            primary.to_str().unwrap(),
+            "--secondary",
+            secondary.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .status()
+        .expect("run oq-merge");
+    assert!(status.success());
+
+    let merged = records_of(&out);
+    let payloads: Vec<&Record> = merged.iter().filter(|r| r.kind == Kind::Payload).collect();
+
+    let present: HashSet<Vec<u8>> = payloads.iter().map(|r| r.payload.clone()).collect();
+    for seq in 1..=60u64 {
+        assert!(present.contains(&message(seq)), "sequence {seq} missing");
+    }
+    assert_eq!(payloads.len(), 60, "the union is 1..=60, each once");
+
+    // The point of the test: order, not just contents. A file whose
+    // records go forwards then backwards replays as a sequence break.
+    let seqs: Vec<i64> = payloads.iter().map(|r| (r.exch_ts - T0) / SECOND).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        seqs, sorted,
+        "records filling a hole must land in the hole, not after the end"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}

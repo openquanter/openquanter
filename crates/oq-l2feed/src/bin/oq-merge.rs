@@ -38,13 +38,26 @@
 //!
 //! ## Ordering
 //!
-//! Primary's records in their original order, then the secondary
-//! records the primary does not have, in theirs. Because the primary
-//! covers the earlier part of the window and the secondary the later,
-//! what survives deduplication from the secondary is its tail, and
-//! appending it keeps the file in arrival order. Sorting by timestamp
-//! was rejected: the file records the order this host observed, and
-//! reordering it would destroy exactly the evidence it was kept for.
+//! A stable merge on `day_ts` — the exchange timestamp where there is
+//! one, the local timestamp for control records — with the primary
+//! ahead of the secondary on a tie.
+//!
+//! An earlier version simply appended the secondary's leftovers to the
+//! primary, on the assumption that the primary covers the earlier part
+//! of the window and the secondary the later, so whatever survives
+//! deduplication is a tail. That holds for the upgrade this was written
+//! for and fails the moment the primary has a hole of its own: the
+//! secondary's unique records then belong in the *middle*, and
+//! appending them puts the file out of order. Replaying such a file
+//! reports sequence breaks, which is how this was found -- the
+//! order-book check refused a merge that the merge tool called
+//! successful.
+//!
+//! Merging by timestamp does not lose the arrival order that matters.
+//! Within one generation the exchange sends in sequence, so ordering by
+//! its timestamp reproduces what that connection saw; across
+//! generations there is no single arrival order to preserve, because
+//! the two observed independently.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -213,35 +226,47 @@ fn merge_one(
             seen.insert((r.exch_ts, r.payload.as_slice()));
         }
     }
-    let last_local = primary.last().map_or(i64::MIN, |r| r.local_ts);
 
     let mut stats = Stats {
         from_primary: primary.len() as u64,
         ..Stats::default()
     };
-    let mut merged: Vec<&Record> = primary.iter().collect();
 
+    // Everything the secondary contributes, in its own order.
+    let mut extra: Vec<&Record> = Vec::new();
     for r in &secondary {
-        let keep = match r.kind {
-            Kind::Payload => {
-                if seen.contains(&(r.exch_ts, r.payload.as_slice())) {
-                    stats.duplicates += 1;
-                    false
-                } else {
-                    true
-                }
+        match r.kind {
+            Kind::Payload if seen.contains(&(r.exch_ts, r.payload.as_slice())) => {
+                stats.duplicates += 1;
             }
-            // A control record from the secondary belongs in the merged
-            // file only where the secondary's data does. Its
-            // session_start sits in the overlap, describing records that
-            // were dropped as duplicates; carrying it into the middle of
-            // the primary's timeline would document a handover that the
-            // merged file does not contain.
-            Kind::Control => r.local_ts > last_local,
+            // A control record is kept: it marks where the secondary
+            // started listening or lost the feed, and dropping it would
+            // remove the only evidence of a seam the merged file
+            // genuinely contains.
+            _ => {
+                stats.from_secondary += 1;
+                extra.push(r);
+            }
+        }
+    }
+
+    // Stable merge on day_ts, primary first on a tie. Both inputs are
+    // already ordered, so this is a linear two-way merge rather than a
+    // sort, and equal timestamps keep the primary's copy in front.
+    let mut merged: Vec<&Record> = Vec::with_capacity(primary.len() + extra.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < primary.len() || j < extra.len() {
+        let take_primary = match (primary.get(i), extra.get(j)) {
+            (Some(a), Some(b)) => a.day_ts() <= b.day_ts(),
+            (Some(_), None) => true,
+            _ => false,
         };
-        if keep {
-            stats.from_secondary += 1;
-            merged.push(r);
+        if take_primary {
+            merged.push(&primary[i]);
+            i += 1;
+        } else {
+            merged.push(extra[j]);
+            j += 1;
         }
     }
 

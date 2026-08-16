@@ -241,22 +241,26 @@ impl CaptureWriter {
             &self.stream.symbol,
             &self.stream.stream,
         );
-        let sealed = self.append(&Record::control(local_ts, payload))?;
+        let mut sealed = self.append(&Record::control(local_ts, payload))?;
 
         // Starting a session in a window that already held records means
-        // this process replaced one that stopped. Nothing was listening
-        // in between, which is a gap in exactly the sense the manifest
-        // reports -- and until this was counted, an upgrade or a crash
-        // restart left a hole that the manifest described as `gaps: 0`.
-        // A reader checking that field would conclude the window was
-        // complete, which is the failure mode the field exists to
-        // prevent.
-        if let Some(open) = self.open.as_mut()
-            && let Some(previous) = open.resumed_after.take()
-        {
+        // this process replaced one that stopped, and nothing was
+        // listening in between. That is a gap, and it is written into
+        // the stream as one rather than only counted in the manifest.
+        //
+        // The distinction matters. A replay tool reads the file, not the
+        // manifest beside it; when the seam existed only in the manifest
+        // an order-book check reported "messages were lost silently"
+        // even though the loss was known and recorded. The stream has to
+        // be able to describe itself, or every reader needs a second
+        // source to interpret the first.
+        let resumed = self.open.as_mut().and_then(|o| o.resumed_after.take());
+        if let Some(previous) = resumed {
             let outage = local_ts.saturating_sub(previous);
-            if outage > 0 {
-                open.builder.observe_gap(outage);
+            if outage > 0
+                && let Some(s) = self.append_gap(local_ts, "capture restarted", None, outage)?
+            {
+                sealed = Some(s);
             }
         }
         Ok(sealed)
@@ -608,7 +612,8 @@ mod tests {
         ))
         .expect("read");
         let (records, _) = decode_all(&bytes).expect("decode");
-        assert_eq!(records.len(), 3, "first record survived the restart");
+        // first, session_start, the gap the restart left, second.
+        assert_eq!(records.len(), 4, "first record survived the restart");
         assert_eq!(records[0].payload, b"first");
         assert!(
             core::str::from_utf8(&records[1].payload)
@@ -616,6 +621,12 @@ mod tests {
                 .contains("session_start"),
             "the seam is visible in the data"
         );
+        assert!(
+            crate::manifest::is_gap(&records[2]),
+            "and the silence across the seam is marked as a gap, so a \
+             reader of the stream alone can see that something is missing"
+        );
+        assert_eq!(records[3].payload, b"second");
         fs::remove_dir_all(root).ok();
     }
 
