@@ -22,7 +22,7 @@
 //! rising one can move it into a higher one. That is modelled rather
 //! than fixed at entry, because it is what the venue does.
 
-use oq_types::{Cash, PriceTicks, QtyLots, Ratio};
+use oq_types::{Cash, Instrument, PriceTicks, QtyLots, Ratio};
 
 /// The scaling that turns ticks and lots into money for one instrument.
 ///
@@ -40,6 +40,22 @@ impl Contract {
     #[must_use]
     pub const fn new(tick_cash: i64) -> Self {
         Self { tick_cash }
+    }
+
+    /// The contract described by an [`Instrument`].
+    ///
+    /// Preferred over [`Contract::new`] wherever a definition exists,
+    /// because the definition and the constant can disagree and only
+    /// one of them is checked against the venue. A hand-written
+    /// `tick_cash` stays plausible after a relisting changes a
+    /// precision — prices parse, quantities parse, and the notional is
+    /// quietly wrong.
+    ///
+    /// `None` when the instrument's tick is worth less than the
+    /// smallest cash unit; see [`Instrument::tick_cash`].
+    #[must_use]
+    pub fn of(instrument: &Instrument) -> Option<Self> {
+        Some(Self::new(instrument.tick_cash()?))
     }
 
     /// Notional value of `qty` at `price`.
@@ -288,5 +304,30 @@ mod tests {
         let small = table.maintenance(BTC, PRICE, QtyLots(1));
         let large = table.maintenance(BTC, PRICE, QtyLots(100));
         assert!(large > small);
+    }
+}
+
+#[cfg(test)]
+mod derived {
+    use super::*;
+
+    #[test]
+    fn a_contract_built_from_a_definition_equals_the_hand_written_one() {
+        // BTC: 0.1 USDT ticks, 0.001 BTC lots, quantity is the coin.
+        // The constant below was arrived at by hand long before the
+        // definition existed, and the two must not drift apart.
+        let derived = Contract::of(&Instrument::linear(1, 3)).expect("representable");
+        assert_eq!(derived, Contract::new(10_000));
+    }
+
+    #[test]
+    fn a_venue_that_quotes_contracts_gets_a_different_contract() {
+        // OKX BTC-USDT-SWAP is 0.01 BTC per contract. Read as though a
+        // size were an amount of the coin, every notional on it would
+        // be a hundred times too large.
+        let okx = Contract::of(&Instrument::sized(1, 2, 1_000_000)).expect("representable");
+        let as_if_linear = Contract::of(&Instrument::linear(1, 2)).expect("representable");
+        assert_ne!(okx, as_if_linear);
+        assert_eq!(as_if_linear.tick_cash, okx.tick_cash * 100);
     }
 }

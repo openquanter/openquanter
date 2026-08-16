@@ -170,13 +170,14 @@ pub struct Transport {
 /// default of two decimals reported eleven thousand unparseable
 /// messages, for prices like `57.45300` that are perfectly valid at five
 /// — a data-quality alarm raised entirely by a missing definition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Instrument {
-    /// Decimal places in a price.
-    pub price_scale: u8,
-    /// Decimal places in a quantity.
-    pub qty_scale: u8,
-}
+/// Re-exported rather than defined here.
+///
+/// This crate used to carry its own two-field version, and `oq-margin`
+/// carried the economics under a different name. Two definitions of one
+/// thing meet nowhere and drift everywhere; worse, neither of them said
+/// what a quantity counts, which is the difference between a size on a
+/// venue that quotes contracts and one that quotes the asset.
+pub use oq_types::Instrument;
 
 /// What the capture path needs from a venue.
 ///

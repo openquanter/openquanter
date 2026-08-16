@@ -122,10 +122,10 @@ impl Venue for BinancePerp {
     fn instrument(&self, symbol: &str) -> Option<Instrument> {
         let (price_scale, qty_scale) =
             super::binance_instruments::precision(&symbol.to_uppercase())?;
-        Some(Instrument {
-            price_scale,
-            qty_scale,
-        })
+        // USD-M perpetuals quote an amount of the underlying: a
+        // quantity of 1 on BTCUSDT is one bitcoin, so a contract is the
+        // asset itself.
+        Some(Instrument::linear(price_scale, qty_scale))
     }
 
     /// Price and size sit at the top level as `"p"` and `"q"`.

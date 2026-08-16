@@ -141,11 +141,13 @@ impl Venue for OkxSwap {
     /// of decimal places; the conversion happens in the generator, not
     /// here, so this stays a lookup. See [`super::okx_instruments`].
     fn instrument(&self, symbol: &str) -> Option<Instrument> {
-        let (price_scale, qty_scale) = super::okx_instruments::precision(&instrument_id(symbol))?;
-        Some(Instrument {
-            price_scale,
-            qty_scale,
-        })
+        // A size on this venue is a count of contracts, not an amount of
+        // the underlying: one BTC-USDT-SWAP is 0.01 BTC. Dropping that
+        // and treating a size as coins is a hundredfold error that never
+        // announces itself — the number parses, sums, and is wrong.
+        let (price_scale, qty_scale, contract_size) =
+            super::okx_instruments::definition(&instrument_id(symbol))?;
+        Some(Instrument::sized(price_scale, qty_scale, contract_size))
     }
 
     /// Price and size are `"px"` and `"sz"`, nested under `"data"`.
@@ -463,6 +465,11 @@ mod tests {
         // convert data they can read perfectly well.
         let i = OkxSwap.instrument("BTCUSDT").expect("listed");
         assert_eq!((i.price_scale, i.qty_scale), (1, 2));
+        // 0.01 BTC per contract. Were this the coin itself the value
+        // would be CONTRACT_SCALE, and every notional computed from a
+        // size here would be a hundred times too large.
+        assert_eq!(i.contract_size, 1_000_000);
+        assert_ne!(i.contract_size, oq_types::CONTRACT_SCALE);
         assert_eq!(OkxSwap.instrument("btcusdt"), OkxSwap.instrument("BTCUSDT"));
     }
 
