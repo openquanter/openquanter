@@ -167,3 +167,219 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// Zombie detection.
+//
+// A socket that is open is not a socket that is delivering. This is the
+// failure `StreamOutcome::Idle` cannot see: the connection stands, the
+// reads time out, and the account has been moving the whole time.
+//
+// The only way to tell the two apart is to ask a second source. So the
+// venue's own view of the positions is fetched on a schedule and
+// compared with the view the stream has been building. Persistent
+// disagreement means the stream has stopped saying things that are
+// true, whatever the socket believes about itself.
+//
+// This is the same shape as the capture path's liveness check and the
+// same shape as reconciliation, arriving from a third direction: a
+// system cannot certify its own inputs, and every claim about them has
+// to be crossed against something that failed differently.
+// ---------------------------------------------------------------------
+
+use crate::binance::PositionSnapshot;
+
+/// What a comparison of the two views concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    /// The stream's view matches the venue's.
+    Agreed,
+    /// They differ, but not yet often enough to act on.
+    ///
+    /// One disagreement is not evidence: a fill in flight is visible to
+    /// one side before the other, and a check that reconnected on every
+    /// transient difference would reconnect constantly under load,
+    /// which is exactly when it must not.
+    Disagreed { consecutive: u32 },
+    /// They have differed for long enough that the stream is not
+    /// carrying what it should. Reconnect, then reconcile.
+    Zombie { consecutive: u32 },
+}
+
+/// Compares the streamed view of an account against the venue's.
+#[derive(Debug)]
+pub struct StreamHealth {
+    threshold: u32,
+    tolerance: f64,
+    consecutive: u32,
+}
+
+impl StreamHealth {
+    /// Positions differing by less than `tolerance` count as equal, and
+    /// `threshold` consecutive disagreements condemn the stream.
+    ///
+    /// A tolerance is required rather than optional: quantities arrive
+    /// as decimal text and are compared as floats, so exact equality
+    /// would fail on rounding and condemn a healthy stream — which
+    /// would make the check worse than not having one.
+    #[must_use]
+    pub const fn new(threshold: u32, tolerance: f64) -> Self {
+        Self {
+            threshold,
+            tolerance,
+            consecutive: 0,
+        }
+    }
+
+    /// Sensible defaults for a futures account.
+    #[must_use]
+    pub const fn futures() -> Self {
+        Self::new(3, 1e-4)
+    }
+
+    /// Compare one view against the other.
+    ///
+    /// `streamed` is what the stream has built up; `venue` is what the
+    /// venue was just asked. Order does not matter and absent positions
+    /// count as flat, so a leg that closed on one side and not the
+    /// other is a disagreement rather than a panic.
+    pub fn observe(&mut self, streamed: &[PositionSnapshot], venue: &[PositionSnapshot]) -> Health {
+        if views_agree(streamed, venue, self.tolerance) {
+            self.consecutive = 0;
+            return Health::Agreed;
+        }
+        self.consecutive = self.consecutive.saturating_add(1);
+        if self.consecutive >= self.threshold {
+            Health::Zombie {
+                consecutive: self.consecutive,
+            }
+        } else {
+            Health::Disagreed {
+                consecutive: self.consecutive,
+            }
+        }
+    }
+
+    /// Forget the history, after a reconnect has happened.
+    pub fn reset(&mut self) {
+        self.consecutive = 0;
+    }
+}
+
+/// Whether two views of an account describe the same positions.
+fn views_agree(a: &[PositionSnapshot], b: &[PositionSnapshot], tolerance: f64) -> bool {
+    let amount_in = |set: &[PositionSnapshot], symbol: &str, side: &str| -> f64 {
+        set.iter()
+            .find(|p| p.symbol == symbol && p.position_side == side)
+            .map_or(0.0, |p| p.amount)
+    };
+    // Every leg named by either side, so one that vanished from one
+    // view is compared rather than skipped — the disappearance is the
+    // disagreement worth catching.
+    a.iter().chain(b.iter()).all(|p| {
+        (amount_in(a, &p.symbol, &p.position_side) - amount_in(b, &p.symbol, &p.position_side))
+            .abs()
+            <= tolerance
+    })
+}
+
+#[cfg(test)]
+mod health {
+    use super::*;
+
+    fn pos(symbol: &str, side: &str, amount: f64) -> PositionSnapshot {
+        PositionSnapshot {
+            symbol: symbol.to_string(),
+            position_side: side.to_string(),
+            amount,
+            entry_price: 0.0,
+            unrealized: 0.0,
+        }
+    }
+
+    #[test]
+    fn agreement_resets_the_count() {
+        let mut h = StreamHealth::futures();
+        let same = vec![pos("BTCUSDT", "BOTH", 1.5)];
+        assert_eq!(h.observe(&same, &same), Health::Agreed);
+        // Disagree once, then agree: the count must not carry over, or
+        // three unrelated blips an hour apart would condemn a stream
+        // that is working.
+        let other = vec![pos("BTCUSDT", "BOTH", 2.5)];
+        assert_eq!(
+            h.observe(&same, &other),
+            Health::Disagreed { consecutive: 1 }
+        );
+        assert_eq!(h.observe(&same, &same), Health::Agreed);
+        assert_eq!(
+            h.observe(&same, &other),
+            Health::Disagreed { consecutive: 1 }
+        );
+    }
+
+    #[test]
+    fn one_disagreement_is_not_evidence_but_three_are() {
+        // A fill in flight is visible to one side before the other, so
+        // a check that acted on the first difference would reconnect
+        // constantly under load — exactly when it must not.
+        let mut h = StreamHealth::futures();
+        let streamed = vec![pos("BTCUSDT", "BOTH", 1.0)];
+        let venue = vec![pos("BTCUSDT", "BOTH", 2.0)];
+        assert_eq!(
+            h.observe(&streamed, &venue),
+            Health::Disagreed { consecutive: 1 }
+        );
+        assert_eq!(
+            h.observe(&streamed, &venue),
+            Health::Disagreed { consecutive: 2 }
+        );
+        assert_eq!(
+            h.observe(&streamed, &venue),
+            Health::Zombie { consecutive: 3 }
+        );
+    }
+
+    #[test]
+    fn rounding_does_not_condemn_a_healthy_stream() {
+        // Quantities arrive as decimal text and are compared as floats.
+        // Exact equality here would make the check worse than none.
+        let mut h = StreamHealth::futures();
+        let a = vec![pos("BTCUSDT", "BOTH", 1.000_01)];
+        let b = vec![pos("BTCUSDT", "BOTH", 1.000_02)];
+        assert_eq!(h.observe(&a, &b), Health::Agreed);
+    }
+
+    #[test]
+    fn a_position_missing_from_one_view_is_a_disagreement() {
+        // The failure this is really for: the stream missed a fill, so
+        // it believes a position that closed is still open — or has
+        // never heard of one that opened.
+        let mut h = StreamHealth::futures();
+        let streamed: Vec<PositionSnapshot> = Vec::new();
+        let venue = vec![pos("BTCUSDT", "BOTH", 1.0)];
+        assert!(matches!(
+            h.observe(&streamed, &venue),
+            Health::Disagreed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_two_legs_of_a_hedged_account_are_compared_separately() {
+        // Netting them first would hide the case that matters: both
+        // legs wrong by the same amount in opposite directions nets to
+        // zero and is still two wrong positions.
+        let mut h = StreamHealth::futures();
+        let streamed = vec![pos("BTCUSDT", "LONG", 2.0), pos("BTCUSDT", "SHORT", -1.0)];
+        let venue = vec![pos("BTCUSDT", "LONG", 1.0), pos("BTCUSDT", "SHORT", -2.0)];
+        assert!(matches!(
+            h.observe(&streamed, &venue),
+            Health::Disagreed { .. }
+        ));
+    }
+
+    #[test]
+    fn an_empty_account_agrees_with_itself() {
+        let mut h = StreamHealth::futures();
+        assert_eq!(h.observe(&[], &[]), Health::Agreed);
+    }
+}
