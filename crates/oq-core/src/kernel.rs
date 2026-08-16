@@ -643,6 +643,8 @@ impl Kernel {
         Summary {
             qty: self.state.qty,
             entry: self.state.entry,
+            short_qty: self.state.short_qty,
+            short_entry: self.state.short_entry,
             balance: self.state.balance,
             realized: self.state.realized,
             funding: self.state.funding,
@@ -696,6 +698,9 @@ pub struct Fingerprint {
 pub struct Summary {
     pub qty: QtyLots,
     pub entry: PriceTicks,
+    /// The short leg under hedge accounting; zero otherwise.
+    pub short_qty: QtyLots,
+    pub short_entry: PriceTicks,
     pub balance: Cash,
     pub realized: Cash,
     pub funding: Cash,

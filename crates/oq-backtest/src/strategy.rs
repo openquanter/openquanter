@@ -52,9 +52,18 @@ pub struct Context {
     /// The observation that triggered this call.
     pub tick: oq_engine::Tick,
     /// Signed position: positive long, negative short.
+    ///
+    /// Under hedge accounting this is the long leg; the short is in
+    /// `short_position`. Summing them gives the net, which is what a
+    /// one-way account would have held.
     pub position: QtyLots,
     /// Average entry price, or zero when flat.
     pub entry: PriceTicks,
+    /// The short leg under hedge accounting; zero under one-way netting,
+    /// where opposing fills have already offset into `position`.
+    pub short_position: QtyLots,
+    /// Average entry of the short leg.
+    pub short_entry: PriceTicks,
     /// Account equity at the current mark.
     pub equity: oq_types::Cash,
     /// Orders currently resting.
@@ -181,6 +190,8 @@ mod tests {
             tick: oq_engine::Tick::trades_only(Stamp::synthetic(0), 100, 100, 100),
             position: QtyLots::ZERO,
             entry: PriceTicks::ZERO,
+            short_position: QtyLots::ZERO,
+            short_entry: PriceTicks::ZERO,
             equity: oq_types::Cash::from_units(1_000),
             working: 0,
         };

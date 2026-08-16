@@ -49,6 +49,13 @@ pub struct RunConfig {
     /// chose produces a result that is wrong in a way no reader can
     /// see; a run with no fees is at least obviously that.
     pub fees: oq_core::Fees,
+    /// Whether opposing exposure nets or stands as two legs.
+    ///
+    /// One-way by default. It has to be set to match the account being
+    /// modelled: the same fills mean different things under each, and
+    /// the difference is a margin requirement the run either charges or
+    /// does not.
+    pub position_mode: oq_core::PositionMode,
 }
 
 impl RunConfig {
@@ -67,6 +74,7 @@ impl RunConfig {
             margin: MarginMode::Enforced,
             funding: FundingSchedule::default(),
             fees: oq_core::Fees::none(),
+            position_mode: oq_core::PositionMode::OneWay,
         }
     }
 
@@ -166,7 +174,8 @@ where
         config.table.clone(),
         config.starting_balance,
     )
-    .with_fees(config.fees);
+    .with_fees(config.fees)
+    .with_mode(config.position_mode);
     let mut kernel = Kernel::new(match config.margin {
         MarginMode::Enforced => state,
         MarginMode::Ignored => state.without_liquidation(),
@@ -257,6 +266,8 @@ where
             tick,
             position: summary.qty,
             entry: summary.entry,
+            short_position: summary.short_qty,
+            short_entry: summary.short_entry,
             equity: summary.equity,
             working: kernel.working().len(),
         };
@@ -629,5 +640,118 @@ mod stream_tests {
         assert!(r.fills.is_empty());
         assert_eq!(r.final_equity, cfg.starting_balance);
         let _ = PriceTicks(0);
+    }
+}
+
+#[cfg(test)]
+mod hedge_mode_tests {
+    use super::*;
+    use oq_margin::{Contract, TierTable};
+    use oq_types::{Cash, InstrumentId, Offset, OrderId, QtyLots, Side, Stamp};
+
+    /// Opens a long and a short of the same size, then holds. Net
+    /// exposure is zero throughout; under hedge accounting the account
+    /// is still carrying margin for both.
+    #[derive(Default)]
+    struct BothSides {
+        opened: bool,
+    }
+
+    impl Strategy for BothSides {
+        fn name(&self) -> &str {
+            "both-sides"
+        }
+        fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+            if self.opened {
+                return;
+            }
+            self.opened = true;
+            out.push(Intent::Market {
+                id: OrderId::new(1),
+                side: Side::Buy,
+                qty: QtyLots(200),
+                offset: Offset::Open,
+            });
+            out.push(Intent::Market {
+                id: OrderId::new(2),
+                side: Side::Sell,
+                qty: QtyLots(200),
+                offset: Offset::Open,
+            });
+        }
+    }
+
+    fn ticks() -> Vec<Tick> {
+        (0..200)
+            .map(|i| {
+                let i = i64::from(i);
+                Tick::trades_only(
+                    Stamp::synthetic(1_700_000_000_000_000_000 + i * 250_000_000),
+                    6_000_000,
+                    6_000_000,
+                    6_000_000,
+                )
+            })
+            .collect()
+    }
+
+    fn config(mode: oq_core::PositionMode, balance: i64) -> RunConfig {
+        let mut c = RunConfig::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(balance),
+        );
+        c.position_mode = mode;
+        c
+    }
+
+    /// The whole point, end to end: identical fills, identical prices,
+    /// and a different position because the account is accounted for
+    /// differently.
+    #[test]
+    fn the_same_fills_leave_a_net_position_or_two_legs() {
+        let data = ticks();
+
+        let mut s = BothSides::default();
+        let netted = run(&config(oq_core::PositionMode::OneWay, 20_000), &mut s, &data);
+
+        let mut s = BothSides::default();
+        let hedged = run(&config(oq_core::PositionMode::Hedge, 20_000), &mut s, &data);
+
+        assert_eq!(netted.fills.len(), 2);
+        assert_eq!(hedged.fills.len(), netted.fills.len(), "same fills");
+        assert_eq!(
+            netted.fills, hedged.fills,
+            "the mode changes the accounting, not the trading"
+        );
+    }
+
+    /// And the difference that matters: a hedged account posts margin on
+    /// both legs, so a balance that survives under netting need not
+    /// survive under hedging. A netted run reporting survival here is
+    /// reporting an account the venue was charging twice for.
+    #[test]
+    fn a_balance_that_survives_netted_can_be_liquidated_hedged() {
+        let data = ticks();
+
+        // Small enough that two legs' maintenance bites and one net
+        // position of zero does not.
+        let balance = 30;
+
+        let mut s = BothSides::default();
+        let netted = run(&config(oq_core::PositionMode::OneWay, balance), &mut s, &data);
+
+        let mut s = BothSides::default();
+        let hedged = run(&config(oq_core::PositionMode::Hedge, balance), &mut s, &data);
+
+        assert!(
+            netted.liquidations.is_empty(),
+            "netted sees zero exposure and nothing to liquidate"
+        );
+        assert!(
+            !hedged.liquidations.is_empty(),
+            "hedged posts margin for both legs and cannot cover it"
+        );
     }
 }
