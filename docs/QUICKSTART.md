@@ -7,13 +7,22 @@
 Rust 2024 edition, minimum version 1.85. No services to run and no data
 to download — the examples generate their own market from a seed.
 
-Cargo will fetch a dependency tree for two crates and no others:
-`oq-l2feed` carries a WebSocket and TLS stack because it has to speak to
-a venue, and `oq-examples` carries `criterion` as a dev-dependency for
+Cargo fetches a dependency tree only for the crates that talk to a
+venue — `oq-l2feed` and `oq-ingest` for capture, `oq-gateway` for reading
+an account — plus `criterion` as a dev-dependency of `oq-examples` for
 its benchmarks. The engine itself — types, journal, core, matching,
 margin, backtest, data, parity, statistics — is plain std Rust, which
 `scripts/check-composability.sh` enforces in CI. If you only want the
 engine, `cargo build -p oq-core` pulls nothing.
+
+The command-line tools ship inside those crates rather than as separate
+packages, so there is nothing named `oq-capture` on crates.io to install:
+
+```bash
+cargo install oq-l2feed   # oq-capture, oq-book-check, oq-trade-check, oq-merge, oq-resequence
+cargo install oq-ingest   # oq-ingest
+cargo install oq-gateway  # oq-recon
+```
 
 ```bash
 git clone https://github.com/openquanter/openquanter

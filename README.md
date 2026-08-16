@@ -12,14 +12,17 @@ Most trading frameworks are platforms: you write inside their world, on their
 terms, with their dependency tree. OpenQuanter is a set of components you
 assemble.
 
-**Eleven of its twelve crates have no third-party dependencies at all.** The
-whole engine — domain types, journal, event core, matching, margin, backtest
-host, data plane, parity, statistics — is plain std Rust. The one crate with a
-dependency tree is the one that has to speak to an exchange, and it is
-isolated there on purpose. This is checked in CI, not asserted:
-[`scripts/check-composability.sh`](scripts/check-composability.sh). (The
-examples crate additionally pulls `criterion` to run its benchmarks; that is a
-dev-dependency of documentation, and nothing you would depend on.)
+**The whole engine has no third-party dependencies at all** — domain types,
+journal, event core, matching, margin, backtest host, data plane, parity and
+statistics are plain std Rust. Every crate that does carry a dependency tree
+is one that has to speak to a venue: capture, the archive-to-tick bridge, and
+the account reader. The boundary is the point, and it is checked in CI rather
+than asserted:
+[`scripts/check-composability.sh`](scripts/check-composability.sh) fails the
+build if an engine crate acquires a dependency, or if a venue crate exceeds
+its declared budget. (The examples crate additionally pulls `criterion` to run
+its benchmarks; that is a dev-dependency of documentation, and nothing you
+would depend on.)
 
 So you can use the margin model without the engine. The overfitting statistics
 without the backtester. The capture toolkit with no engine at all. Or the whole
@@ -150,9 +153,20 @@ Pre-alpha, and specific about it. **Built and tested today:**
   hourly sealing, manifests with content hashes. Proven against a live
   venue. A venue is an adapter: which streams to subscribe, how the
   subscription is confirmed, where the exchange timestamp sits, and the
-  quoting precision of each instrument. `oq-book-check` replays an
-  archive back into an order book, because bytes on disk prove the
-  messages arrived and only a reconstruction proves they can be used.
+  quoting precision of each instrument, and what a trading day is —
+  because a session that opens the evening before is one day and two
+  UTC days. Two venues are implemented, chosen to differ: one puts the
+  subscription in the URL and can only be confirmed by its first
+  message, the other sends a JSON frame and acknowledges explicitly.
+- **Proving a capture is usable** — bytes on disk show the messages
+  arrived; only replay shows they can be used. `oq-book-check` rebuilds
+  the order book and reports breaks the capture did not declare.
+  `oq-trade-check` follows the venue's own trade ids, which is the one
+  thing a hash cannot tell you: an unbroken run means nothing was
+  missed, and a capture that silently dropped a third of the trades
+  would pass every integrity check in the pipeline. `oq-merge` and
+  `oq-resequence` reconcile archives that two writers or two runs
+  produced.
 - **Capture to backtest** — `oq-ingest` folds captured depth and trades
   into the tick format the engine replays. Conversion is deliberately
   lossy: a window of L2 becomes a best bid and a best ask, and the raw

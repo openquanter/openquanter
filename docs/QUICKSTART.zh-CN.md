@@ -7,11 +7,20 @@
 Rust 2024 edition，最低版本 1.85。不需要起服务，不需要下载数据——示例的行情由
 种子自己生成。
 
-Cargo 只会为两个 crate 拉依赖树，其余一个都没有：`oq-l2feed` 带 WebSocket 与 TLS
-栈，因为它必须和交易所通信；`oq-examples` 把 `criterion` 作为 dev-dependency，
-用于跑基准。引擎本身——类型、journal、内核、撮合、保证金、回测、数据、parity、
-统计——是纯 std Rust，这一点由 `scripts/check-composability.sh` 在 CI 里强制。
-只要引擎的话，`cargo build -p oq-core` 什么都不拉。
+Cargo 只为需要和交易所通信的 crate 拉依赖树——采集侧的 `oq-l2feed` 和
+`oq-ingest`、读账户的 `oq-gateway`——外加 `oq-examples` 用于跑基准的
+dev-dependency `criterion`。引擎本身——类型、journal、内核、撮合、保证金、回测、
+数据、parity、统计——是纯 std Rust，这一点由 `scripts/check-composability.sh`
+在 CI 里强制。只要引擎的话，`cargo build -p oq-core` 什么都不拉。
+
+命令行工具随这些 crate 一起发布，不是独立的包，所以 crates.io 上没有一个叫
+`oq-capture` 的东西可装：
+
+```bash
+cargo install oq-l2feed   # oq-capture、oq-book-check、oq-trade-check、oq-merge、oq-resequence
+cargo install oq-ingest   # oq-ingest
+cargo install oq-gateway  # oq-recon
+```
 
 ```bash
 git clone https://github.com/openquanter/openquanter
