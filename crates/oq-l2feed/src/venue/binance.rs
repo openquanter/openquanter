@@ -101,18 +101,18 @@ impl Venue for BinancePerp {
         event_time_ns
     }
 
-    /// Precisions are per-contract on this venue and there is no way to
-    /// guess them: BTCUSDT quotes two decimals, HYPEUSDT five. A wrong
-    /// value does not fail loudly — it reports the archive as
-    /// unreadable, which is the most misleading answer available.
+    /// Precisions are per-contract and there is no way to guess them:
+    /// BTCUSDT quotes two decimals, HYPEUSDT five. A wrong value does
+    /// not fail loudly — it reports the archive as unreadable, which is
+    /// the most misleading answer available.
+    ///
+    /// The table is generated from the venue rather than hand-written,
+    /// because the venue lists hundreds of contracts and a hand-kept
+    /// list is a list that is wrong for whichever contract nobody
+    /// remembered. See [`super::binance_instruments`].
     fn instrument(&self, symbol: &str) -> Option<Instrument> {
-        let (price_scale, qty_scale) = match symbol.to_uppercase().as_str() {
-            "BTCUSDT" => (2, 3),
-            "ETHUSDT" => (2, 3),
-            "BNBUSDT" => (2, 2),
-            "HYPEUSDT" => (5, 1),
-            _ => return None,
-        };
+        let (price_scale, qty_scale) =
+            super::binance_instruments::precision(&symbol.to_uppercase())?;
         Some(Instrument {
             price_scale,
             qty_scale,

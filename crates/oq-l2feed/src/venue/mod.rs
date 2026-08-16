@@ -29,6 +29,7 @@
 //! is about eighty lines, most of them the list of stream names.
 
 pub mod binance;
+pub mod binance_instruments;
 
 use core::time::Duration;
 
