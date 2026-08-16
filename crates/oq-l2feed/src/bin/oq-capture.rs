@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use oq_l2feed::day::Rotation;
-use oq_l2feed::session::{SessionConfig, StopReason, run};
+use oq_l2feed::session::{install_signal_handlers, SessionConfig, StopReason, run};
 use oq_l2feed::stream::{Software, StreamId};
 use oq_l2feed::venue::{binance_perp_polls, binance_perp_streams, binance_perp_url};
 use oq_l2feed::writer::CaptureWriter;
@@ -126,6 +126,11 @@ fn real_main() -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?
         .with_rotation(rotation);
 
+    // Installed before the first byte is written, so any termination
+    // from here on runs the flush-and-seal path instead of dropping the
+    // buffer on the floor.
+    install_signal_handlers();
+
     eprintln!(
         "capturing {} {} from {url}",
         config.stream.symbol, config.stream.stream
@@ -172,7 +177,7 @@ fn real_main() -> Result<ExitCode, String> {
     // A capture that stopped because the disk was filling is not a
     // success, even though it shut down cleanly.
     Ok(match stats.stop {
-        StopReason::DurationElapsed => ExitCode::SUCCESS,
+        StopReason::DurationElapsed | StopReason::Signalled => ExitCode::SUCCESS,
         StopReason::DiskFloor | StopReason::ConnectionLost => ExitCode::FAILURE,
     })
 }

@@ -11,6 +11,11 @@ repository.workspace = true
 oq-hash.workspace = true
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = "3.4"
+# For SIGTERM only. std has no signal API, and a capture that cannot
+# notice a termination request loses its in-flight buffer and writes no
+# manifest. Already present transitively, so this adds no new crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [lints]
 workspace = true

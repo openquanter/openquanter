@@ -20,6 +20,7 @@
 //! be either too slow to recover or fast enough to get rate-limited at
 //! the worst moment.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -96,6 +97,62 @@ pub enum StopReason {
     DiskFloor,
     /// Too many consecutive connection failures.
     ConnectionLost,
+    /// SIGTERM or SIGINT arrived and the capture wound down on purpose.
+    Signalled,
+}
+
+/// Set by the signal handler, read by the capture loops.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// True once a termination signal has been seen.
+pub fn shutdown_requested() -> bool {
+    SHUTDOWN.load(Ordering::Relaxed)
+}
+
+extern "C" fn on_signal(_sig: i32) {
+    // The only thing a signal handler may safely do here. Everything
+    // that actually matters -- flushing, sealing, fsync -- happens on
+    // the capture thread once it observes this.
+    SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
+/// Arrange for SIGTERM and SIGINT to stop the capture cleanly.
+///
+/// Without this, the default disposition kills the process where it
+/// stands. Three things are lost every time, all of them silently:
+///
+/// * the `BufWriter`'s contents, up to the buffer size or the flush
+///   interval -- real records, gone;
+/// * the manifest, so the archive holds a file of unknown completeness
+///   and no way to tell a quiet market from a truncated capture;
+/// * the final `sync_all`, leaving the tail in the page cache where a
+///   host failure takes it.
+///
+/// Restarts are routine -- deploys, config changes, a watchdog
+/// replacing a dead stream -- so "only on shutdown" is not rare.
+///
+/// # Panics
+///
+/// Panics if the handler cannot be installed, which would mean the
+/// process cannot shut down cleanly and should not pretend otherwise.
+// The workspace warns on `unsafe_code` so that every use has to argue
+// for itself. This one: std exposes no signal API, and the alternative
+// to installing a handler is losing the buffer, the manifest and the
+// fsync on every restart. The unsafety is confined to one libc call
+// whose handler does a single relaxed atomic store.
+#[allow(unsafe_code)]
+pub fn install_signal_handlers() {
+    #[cfg(unix)]
+    // SAFETY: `on_signal` is async-signal-safe -- it performs a single
+    // relaxed atomic store and calls nothing.
+    unsafe {
+        for sig in [libc::SIGTERM, libc::SIGINT] {
+            assert!(
+                libc::signal(sig, on_signal as *const () as libc::sighandler_t) != libc::SIG_ERR,
+                "cannot install handler for signal {sig}"
+            );
+        }
+    }
 }
 
 /// What a session did.
@@ -233,6 +290,10 @@ pub fn run_with_clock<C: Connector, K: Clock>(
     writer.append_session_start(clock.now_ns())?;
 
     'outer: loop {
+        if shutdown_requested() {
+            stats.stop = StopReason::Signalled;
+            break;
+        }
         if let Some(limit) = config.duration
             && started.elapsed() >= limit
         {
@@ -262,6 +323,16 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 && started.elapsed() >= limit
             {
                 stats.stop = StopReason::DurationElapsed;
+                break 'outer;
+            }
+            // Checked here as well as in the outer loop: a healthy
+            // stream never leaves this loop, so an outer-loop-only
+            // check would wait for a disconnect that may never come.
+            // A silent stream still blocks in next_message() until its
+            // read timeout, but a stream with nothing to say also has
+            // nothing buffered to lose.
+            if shutdown_requested() {
+                stats.stop = StopReason::Signalled;
                 break 'outer;
             }
 
