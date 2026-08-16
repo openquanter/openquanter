@@ -201,14 +201,18 @@ above. The pillars section describes where this is going; this section
 describes where it is.
 
 **On live trading specifically,** because the pieces above make it easy to
-overstate: the order path, the gate and the account reader exist and are
-tested, and **nothing composes them into a running process** — that is
-`oq-live`, which does not exist. Nor has any of it been exercised against
-a real account yet: `oq-order-check` places, confirms and cancels one
-order against the testnet end to end, and it has not been run, because
-that needs credentials this repository does not have. Until it has, the
-claim is that the parts are built and unit-tested, not that the framework
-has traded.
+overstate. The order path has been exercised end to end against a real
+venue's testnet: `oq-order-check` synchronises the clock, reads the
+contract's precision and grid from that deployment, detects the account's
+position mode, places a limit order, sees the same order arrive on the
+user data stream, and cancels it. That run is the evidence for everything
+claimed above, and it found a defect no unit test could — a price with the
+right number of decimal places that was not a multiple of the tick size.
+
+What remains unbuilt is the assembly. **Nothing composes the gate, the
+order path and the stream into a running process** — that is `oq-live`,
+and it does not exist. So the framework can trade; it does not yet have a
+process that trades.
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, not the L2 fidelity

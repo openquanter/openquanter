@@ -884,6 +884,37 @@ impl Execution for Binance {
                 ),
             });
         }
+        if let Some(price) = order.limit_price {
+            if !instrument.price_on_grid(price) {
+                // The venue answers this with "Price not increased by
+                // tick size", a sentence that only makes sense once you
+                // know precision and grid are different numbers. Caught
+                // here so the message names the actual problem, and so
+                // a price is never quietly moved on the caller's behalf.
+                return Placed::Rejected(Reject {
+                    code: None,
+                    message: format!(
+                        "price {} is not a multiple of the tick size ({} in units of \
+                         1e-{}); snap it deliberately rather than having it moved",
+                        decimal(price.0, instrument.price_scale),
+                        instrument.price_tick,
+                        instrument.price_scale
+                    ),
+                });
+            }
+        }
+        if !instrument.qty_on_grid(order.qty) {
+            return Placed::Rejected(Reject {
+                code: None,
+                message: format!(
+                    "quantity {} is not a multiple of the step size ({} in units of \
+                     1e-{})",
+                    decimal(order.qty.0, instrument.qty_scale),
+                    instrument.qty_step,
+                    instrument.qty_scale
+                ),
+            });
+        }
         if order.reduce_only && order.position_side.is_hedged() {
             // The venue refuses this combination, and its message names
             // the position side rather than the conflict. Caught here

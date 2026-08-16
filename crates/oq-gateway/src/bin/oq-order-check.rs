@@ -96,8 +96,8 @@ fn main() -> ExitCode {
     let instrument = match precision_of(&venue, &symbol) {
         Ok(i) => {
             println!(
-                "precision        price {} dp, qty {} dp",
-                i.price_scale, i.qty_scale
+                "precision        price {} dp (tick {}), qty {} dp (step {})",
+                i.price_scale, i.price_tick, i.qty_scale, i.qty_step
             );
             i
         }
@@ -161,8 +161,11 @@ fn main() -> ExitCode {
         }
     };
 
-    let price = PriceTicks(mark.0 * 8 / 10);
-    let qty = min_qty_for_notional(&instrument, price);
+    // Twenty percent below the mark, snapped down onto the contract's
+    // grid: a price with the right number of decimals is not
+    // necessarily a price the venue accepts.
+    let price = instrument.snap_price_down(PriceTicks(mark.0 * 8 / 10));
+    let qty = instrument.snap_qty_up(min_qty_for_notional(&instrument, price));
     let client_id = format!("oq-check-{}", std::process::id());
     let order = NewOrder {
         symbol: symbol.clone(),
@@ -278,7 +281,16 @@ fn precision_of(venue: &Binance, symbol: &str) -> Result<Instrument, String> {
     let body = venue.exchange_info(symbol).map_err(|e| e.to_string())?;
     let price = field_u8(&body, "pricePrecision").ok_or("no pricePrecision")?;
     let qty = field_u8(&body, "quantityPrecision").ok_or("no quantityPrecision")?;
-    Ok(Instrument::linear(price, qty))
+    // How many decimals a price may have and which prices are allowed
+    // are separate facts, published separately. Reading only the first
+    // produces prices the venue refuses.
+    let tick = extract(&body, "tickSize")
+        .and_then(|t| parse_fixed(&t, price))
+        .map_or(1, |p| p.0);
+    let step = extract(&body, "stepSize")
+        .and_then(|t| parse_fixed(&t, qty))
+        .map_or(1, |p| p.0);
+    Ok(Instrument::linear(price, qty).with_grid(tick, step))
 }
 
 fn mark_price(venue: &Binance, symbol: &str, scale: u8) -> Result<PriceTicks, String> {
