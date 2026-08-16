@@ -41,12 +41,18 @@
 
 pub mod binance;
 pub mod creds;
+pub mod exec;
 pub mod reconcile;
 pub mod snapshot;
 pub mod watch;
 
+pub use binance::parse_user_event;
 pub use binance::{AccountSnapshot, Binance, OpenOrder, PositionSnapshot, Trade, VenueError};
 pub use creds::Credentials;
+pub use exec::{
+    Endpoint, Execution, NewOrder, OrderAck, OrderUpdate, Placed, Reject, Unresolved, UserEvent,
+    UserStream,
+};
 pub use reconcile::{Divergence, Expectation, ExpectedLeg, Reconciliation, Tolerance, reconcile};
 pub use snapshot::{Part, Snapshot, SnapshotBuilder};
 pub use watch::{Change, Tally, Watcher};
