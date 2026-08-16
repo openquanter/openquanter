@@ -211,10 +211,17 @@ the rest honestly.
 Each goal has a defined verification method. A goal is not "done" until its
 verification runs in CI or as a documented, reproducible command.
 
+G2 deserves a note, because its name has changed. Comparing runs is a **tool**,
+not an end: it validates a port, a refactor, a change of fidelity tier, or a
+second implementation of the same model. Anyone migrating from another engine
+will also use it to pin exact agreement against their old system, but that is
+one use among several rather than something the framework promises.
+
 | # | Goal | Target | Verification |
 |---|---|---|---|
+| **G0** | Composability | Every crate builds and is usable standalone; engine crates carry zero third-party dependencies | `scripts/check-composability.sh` in CI |
 | **G1** | Core determinism | Replaying any journal reproduces outputs exactly; `(seed, commit)` reproduces any simulated scenario | Replay test suite in CI |
-| **G2** | Semantic parity harness | Trade-by-trade equality (time, price, quantity, side) with relative P&L error ≤ 1e-6 against a reference run | `oq-parity` diff + attribution report |
+| **G2** | Run-equivalence tooling | Any two runs can be compared trade by trade with every difference attributed; equality means identical time, price, quantity and side, with relative P&L error ≤ 1e-6 | `oq-parity` diff + attribution report |
 | **G3** | Backtest throughput | ≥ 8× over the interpreted/Cython baseline for a multi-year single-strategy run in throughput mode; compatibility mode need only not regress | Same-machine, same-config benchmark |
 | **G4** | Sweep throughput + statistics | 100 configurations in ≤ 30 minutes on a reference machine, with DSR and PBO emitted automatically | Sweep benchmark + statistics report |
 | **G5** | Margin fidelity | Tiered maintenance margin, mark-price liquidation paths, and funding-spike scenarios reproduce venue behavior; tail-divergence report produced | Recomputation of historical stress windows + spot-check against venue calculators |

@@ -169,8 +169,9 @@ depends on the invariants established here.
 **Entry trigger.** All of:
 
 1. The public core has been released for ≥ 6 months with no open P0/P1 defects.
-2. A parity gate plus shadow-run comparison passes for the operator's own
-   strategies.
+2. A strategy has been run in shadow against a live venue for long enough to
+   compare, and every divergence between the shadow run and the venue is
+   attributed rather than tolerated.
 3. The position-carrying cutover procedure has been rehearsed successfully on
    testnet at least twice.
 4. At least one real third-party user is running the framework — external

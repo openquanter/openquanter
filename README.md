@@ -1,6 +1,6 @@
 # OpenQuanter
 
-**A deterministic, AI-native quantitative trading framework in Rust — from CTA to HFT.**
+**Quantitative trading components in Rust. Take the whole engine, or one crate.**
 
 [English](README.md) · [中文](README.zh-CN.md)
 
@@ -8,11 +8,33 @@
 
 ## What is OpenQuanter?
 
-OpenQuanter is an open-source trading framework built around a deterministic
-event core: the same engine runs backtesting and live trading, with only the
-event producers swapped. It is designed for crypto perpetual markets first,
-with a fidelity ladder that scales from fast tick-replay research to
-orderbook-level simulation.
+Most trading frameworks are platforms: you write inside their world, on their
+terms, with their dependency tree. OpenQuanter is a set of components you
+assemble.
+
+**Eleven of its twelve crates have no third-party dependencies at all.** The
+whole engine — domain types, journal, event core, matching, margin, backtest
+host, data plane, parity, statistics — is plain std Rust. The one crate with a
+dependency tree is the one that has to speak to an exchange, and it is
+isolated there on purpose. This is checked in CI, not asserted:
+[`scripts/check-composability.sh`](scripts/check-composability.sh).
+
+So you can use the margin model without the engine. The overfitting statistics
+without the backtester. The capture toolkit with no engine at all. Or the whole
+stack, where one core runs both backtesting and live trading with only the
+event producers swapped.
+
+What the components are built to get right, in order:
+
+1. **A backtest that does not flatter you.** Tiered margin and liquidation are
+   modelled, not skipped — see the [worked example](docs/QUICKSTART.md#3-run-the-example-that-explains-the-project)
+   where a margin-free run reports 20 908 USDT on an account that really ended
+   with 61.53.
+2. **Speed that does not cost fidelity.** Integer fixed point, no async on the
+   hot path, allocation-free after warm-up. Most fast backtesters are fast
+   because they simplify; the point here is not having to choose.
+3. **Runs you can reproduce and audit.** A journaled event stream means crash
+   recovery, forensics, and reproducible research are the same mechanism.
 
 The 2.x line is a ground-up rewrite on a Rust core — a new architecture rather
 than an incremental port.
@@ -23,10 +45,14 @@ These describe the architecture the project is being built towards. What
 exists today is in [Status](#status) below — read that first if you are
 deciding whether to use this now.
 
+- **Composable, not monolithic** — every crate builds and is usable on its
+  own, and the engine carries no third-party dependencies. Embedding one piece
+  does not mean adopting a platform, and it does not widen your supply-chain
+  surface.
 - **Deterministic event core** — a pure state machine fed by a sequenced,
-  journaled event stream (LMAX/Aeron lineage). Every run is replayable from
-  `(journal, seed)`; crash recovery, audit trail, and simulation testing come
-  from the same mechanism.
+  journaled event stream (LMAX/Aeron lineage). This is the *mechanism*, not
+  the point: it is what makes crash recovery, audit, reproducible research and
+  fuzz testing the same piece of machinery rather than four subsystems.
 - **Margin-aware backtesting** — tiered maintenance margin, liquidation-price
   paths, and funding-spike scenarios are first-class. Most open backtesters
   never liquidate you; real exchanges do.

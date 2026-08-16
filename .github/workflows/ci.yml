@@ -34,3 +34,14 @@ jobs:
 
       - name: Scan working tree and history
         run: scripts/check-no-secrets.sh --history
+
+  composability:
+    name: Engine crates carry no dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Dependency budgets and standalone builds
+        run: scripts/check-composability.sh
