@@ -46,11 +46,22 @@ PATTERNS=(
   '[a-z0-9_-]+@(([0-9]{1,3})\.){3}[0-9]{1,3}'
   'ssh[[:space:]]+-[ip][[:space:]]'
   '\.ssh/id_(rsa|ed25519|ecdsa)'
-  # Where something runs is not a secret in the way a key is, but it is
-  # the half of a deployment that a reader cannot change and an attacker
-  # does not have to guess. A cloud region hard-coded as a default says
-  # which datacentre the capture sits in; a home directory baked into a
-  # path says how it is laid out. Both belong in the environment.
+)
+
+# Hygiene, not disclosure — and the difference decides where they apply.
+#
+# Where something runs is not a secret the way a key is. A cloud region
+# or a home directory in source is a fact a reader cannot change and an
+# attacker does not have to guess, so it should not be added; but one
+# already in history needs no rotation, cannot be removed without
+# rewriting published history, and would fail this check forever on
+# every commit that ever contained it.
+#
+# So these run against the working tree only. The patterns above, which
+# match things that must be rotated the moment they appear anywhere,
+# still run against history — because for those, "it is only in an old
+# commit" is not a mitigation.
+TREE_ONLY_PATTERNS=(
   '"(ap|us|eu|na|sa)-[a-z]+(-[0-9])?"'
   '/home/(ubuntu|ec2-user|admin)/'
 )
@@ -77,6 +88,10 @@ self_test() {
     '-----BEGIN OPENSSH PRIVATE KEY-----'
     'key at ~/.ssh/id_ed25519'
   )
+  local tree_samples=(
+    'region="ap-somewhere"'
+    'BIN=/home/ubuntu/thing'
+  )
 
   local failures=0
   for sample in "${samples[@]}"; do
@@ -93,11 +108,25 @@ self_test() {
     fi
   done
 
+  for sample in "${tree_samples[@]}"; do
+    local matched=0
+    for pattern in "${TREE_ONLY_PATTERNS[@]}"; do
+      if printf '%s\n' "$sample" | grep -qE -i -e "$pattern"; then
+        matched=1
+        break
+      fi
+    done
+    if [ "$matched" -eq 0 ]; then
+      echo "SELF-TEST FAIL: no tree-only pattern matches: $sample"
+      failures=$((failures + 1))
+    fi
+  done
+
   if [ "$failures" -gt 0 ]; then
-    echo "$failures of ${#samples[@]} samples were not detected"
+    echo "$failures sample(s) were not detected"
     return 1
   fi
-  echo "self-test: all ${#samples[@]} samples detected by ${#PATTERNS[@]} patterns"
+  echo "self-test: ${#samples[@]} + ${#tree_samples[@]} samples detected by ${#PATTERNS[@]} + ${#TREE_ONLY_PATTERNS[@]} patterns"
   return 0
 }
 
@@ -109,7 +138,11 @@ allowed() {
 scan_target() {
   local label="$1" hits=0
   shift
-  for pattern in "${PATTERNS[@]}"; do
+  local -a set=("${PATTERNS[@]}")
+  if [ "$label" = "working tree" ]; then
+    set+=("${TREE_ONLY_PATTERNS[@]}")
+  fi
+  for pattern in "${set[@]}"; do
     while IFS= read -r hit; do
       [ -z "$hit" ] && continue
       allowed "$hit" && continue
