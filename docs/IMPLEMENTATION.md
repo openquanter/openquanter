@@ -143,10 +143,13 @@ scenarios is what turns operational scar tissue into a durable test asset.
 ### D9 — AI layered by evidence strength
 
 - **Inference (mature).** Train in Python, export to ONNX or compile
-  gradient-boosted trees, run in-process in Rust with single-threaded
-  intra/inter-op, warm-up, and fixed shapes. A parity gate compares Python and
-  Rust predictions, because float32 threshold handling in tree models drifts
+  gradient-boosted trees, run in Rust with single-threaded intra/inter-op,
+  warm-up, and fixed shapes. A parity gate compares Python and Rust
+  predictions, because float32 threshold handling in tree models drifts
   between implementations in ways that silently change trading decisions.
+
+  **Inference runs outside the kernel, and a prediction enters as a
+  journaled event.** See D14 — the reason is not primarily determinism.
 - **Training (gated).** Gym-style environments with inverted control and native
   vectorized batching. Gated on L1 fidelity: training in a low-fidelity
   environment produces policies that exploit the simulator.
@@ -211,6 +214,53 @@ configuration)**, and the comparison tool classifies its own output:
 Hashing the inputs costs microseconds and removes an entire class of
 misdiagnosis. The rule extends to golden tests: a golden baseline whose sample
 data changed is stale, not violated.
+
+### D14 — Model predictions are events, not calls
+
+Inference runs **outside** the kernel. A prediction is produced, submitted to
+the sequencer, journaled, and only then delivered — like any other input.
+Nothing in the kernel ever calls a model.
+
+The determinism argument for this is real but secondary. The primary reason is
+that a synchronous in-kernel call **would flatter every backtest**.
+
+In live trading a prediction always lags the market data that produced it:
+features have to be computed, the model has to run, the result has to travel.
+A backtest that calls the model inline hands the strategy a prediction with
+zero latency, from data the market has only just produced. That is the same
+class of lie as an account that never gets liquidated — a simulation quietly
+granting something the world does not offer. Making the prediction an event
+means it arrives after the data it was derived from, in backtest exactly as in
+production, and a strategy cannot accidentally be built on a timing advantage
+that will not exist when it trades.
+
+What follows from the decision:
+
+- **Replay never re-runs a model.** It replays the recorded prediction, so a
+  past run reproduces exactly even though the model that produced it may be
+  non-deterministic across machines, may have been retrained, or — in the case
+  of a remote language model — may be irreproducible in principle. The core
+  keeps its guarantee by not depending on the world keeping its.
+- **The kernel stays integer.** Floating-point results differ across CPUs in
+  the last bits; keeping inference outside is what lets the kernel remain
+  `i64` fixed point and therefore bit-identical across machines.
+- **The journal records what the model actually said.** "What did the model
+  predict at 14:32:07, and on what inputs" becomes answerable after the fact,
+  which is exactly the question an incident review asks first.
+- **A prediction event carries the model's identity and a hash of its input
+  features**, following D13. That distinguishes "the model changed" from "the
+  features changed" — without it, a differing prediction is unattributable.
+- **The Python/Rust parity gate (G9) falls out for free.** Replay a journal
+  through a second inference implementation and diff the prediction events
+  with `oq-parity`; no separate harness is needed.
+- **One code path.** In a backtest the inference component runs and emits
+  prediction events into the journal; in production it does the same. The
+  difference is the event producer, as everywhere else in this design.
+
+The cost is one event round-trip on the hot path and a larger journal. Against
+a 100 µs p99 budget the round-trip is affordable, and the journal growth is
+capacity planning rather than a design problem. Paying it buys a backtest that
+does not lie about when the strategy knew things.
 
 ---
 
