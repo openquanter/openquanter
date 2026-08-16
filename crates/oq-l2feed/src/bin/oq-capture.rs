@@ -101,13 +101,15 @@ fn real_main() -> Result<ExitCode, String> {
         .into_iter()
         .find(|p| p.name == stream_name);
 
-    let (name, url, poll_interval) = match (socket, poll) {
+    let (name, transport, url, poll_interval) = match (socket, poll) {
         (Some(spec), _) => {
-            let url = venue.transport(&spec).url;
-            (spec.name, url, None)
+            let transport = venue.transport(&spec);
+            let url = transport.url.clone();
+            (spec.name, Some(transport), url, None)
         }
         (None, Some(spec)) => (
             spec.name,
+            None,
             spec.url,
             Some(Duration::from_secs(spec.interval_secs)),
         ),
@@ -163,7 +165,8 @@ fn real_main() -> Result<ExitCode, String> {
             // A silent socket must look different from a quiet market,
             // or a half-open connection would be recorded as an
             // uneventful hour.
-            let mut connector = WsConnector::new(&url, Duration::from_secs(60));
+            let transport = transport.expect("a socket stream has a transport");
+            let mut connector = WsConnector::new(transport, Duration::from_secs(60));
             run(&config, &mut connector, &mut writer)
         }
     }

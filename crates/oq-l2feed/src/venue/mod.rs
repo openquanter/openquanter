@@ -80,9 +80,19 @@ pub struct PollSpec {
 /// confirming on their first data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AckPolicy {
+    /// Nothing confirms this subscription, and silence proves nothing.
+    ///
+    /// For streams that are legitimately empty for long stretches — a
+    /// liquidation feed can go hours without an event — treating silence
+    /// as failure would tear the connection down and rebuild it forever,
+    /// which is a worse failure than the one being detected. The dead
+    /// stream those streams could hide is accepted knowingly.
+    None,
     /// The first message received is the acknowledgement. If none
     /// arrives within the deadline the subscription is considered
     /// failed, however healthy the socket looks.
+    ///
+    /// Only for streams expected to be continuously busy.
     FirstDataIsAck {
         /// How long to wait before calling the subscription dead.
         deadline: Duration,

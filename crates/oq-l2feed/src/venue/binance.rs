@@ -65,13 +65,24 @@ impl Venue for BinancePerp {
     /// The subscription is the URL path, so nothing is sent after
     /// connecting and the first message is the only confirmation
     /// available.
+    ///
+    /// The acknowledgement is per stream, because silence means
+    /// different things on different ones. Depth, best bid/offer and
+    /// trades are continuously busy on a liquid contract, so a minute of
+    /// nothing is a dead subscription. Liquidations are not: a quiet
+    /// hour is an ordinary hour, and holding them to the same rule would
+    /// reconnect them forever.
     fn transport(&self, spec: &StreamSpec) -> Transport {
+        let ack = match spec.name.as_str() {
+            "depth" | "bookTicker" | "trade" => AckPolicy::FirstDataIsAck {
+                deadline: ACK_DEADLINE,
+            },
+            _ => AckPolicy::None,
+        };
         Transport {
             url: format!("wss://fstream.binance.com/ws/{}", spec.topic),
             subscribe: Vec::new(),
-            ack: AckPolicy::FirstDataIsAck {
-                deadline: ACK_DEADLINE,
-            },
+            ack,
         }
     }
 
@@ -178,6 +189,40 @@ mod tests {
             "this venue subscribes by URL; sending a frame would be wrong"
         );
         assert!(matches!(t.ack, AckPolicy::FirstDataIsAck { .. }));
+    }
+
+    #[test]
+    fn a_confirmed_but_dead_stream_is_caught_by_the_deadline() {
+        // The failure this whole mechanism exists for: the venue accepts
+        // any stream name without validating it, so a retired stream
+        // subscribes successfully and then says nothing forever. The
+        // policy has to be one that treats that as an error.
+        let spec = StreamSpec::new("depth", "btcusdt@aggTrade");
+        match BinancePerp.transport(&spec).ack {
+            AckPolicy::FirstDataIsAck { deadline } => {
+                assert!(deadline.as_secs() > 0 && deadline.as_secs() <= 300);
+            }
+            other => panic!("a busy stream must be held to first data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_liquidation_feed_is_allowed_to_be_silent() {
+        // Holding forceOrder to "first data confirms" would tear the
+        // connection down every deadline through any quiet hour, which
+        // is a worse failure than the dead subscription it detects.
+        let specs = BinancePerp.streams("BTCUSDT");
+        let force = specs
+            .iter()
+            .find(|s| s.name == "forceOrder")
+            .expect("forceOrder");
+        assert_eq!(BinancePerp.transport(force).ack, AckPolicy::None);
+
+        let depth = specs.iter().find(|s| s.name == "depth").expect("depth");
+        assert!(matches!(
+            BinancePerp.transport(depth).ack,
+            AckPolicy::FirstDataIsAck { .. }
+        ));
     }
 
     #[test]
