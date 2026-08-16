@@ -9,6 +9,7 @@ description = "Venue adapter: account access and reconciliation. Read-only for n
 
 [dependencies]
 oq-hash.workspace = true
+oq-types.workspace = true
 ureq = "3.4"
 
 [lints]
