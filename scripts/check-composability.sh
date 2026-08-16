@@ -63,7 +63,12 @@ BUDGETS=(
   # written out by hand rather than pulled in: this is the crate that
   # holds the API secret, and every dependency here is one more thing
   # trusted with it.
-  "oq-gateway:40"
+  # Reads an account over HTTPS and hears about fills over a websocket,
+  # so it carries a TLS stack and a websocket client. Raised from 40
+  # when the user data stream landed: the venue pushes fills and there
+  # is no way to hear them over HTTPS. Isolated here for the same
+  # reason as the capture crate — the engine must not inherit it.
+  "oq-gateway:60"
 )
 
 third_party_count() {

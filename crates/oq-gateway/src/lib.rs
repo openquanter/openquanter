@@ -44,6 +44,7 @@ pub mod creds;
 pub mod exec;
 pub mod reconcile;
 pub mod snapshot;
+pub mod stream;
 pub mod watch;
 
 pub use binance::parse_user_event;
@@ -55,4 +56,5 @@ pub use exec::{
 };
 pub use reconcile::{Divergence, Expectation, ExpectedLeg, Reconciliation, Tolerance, reconcile};
 pub use snapshot::{Part, Snapshot, SnapshotBuilder};
+pub use stream::{KEY_LIFETIME, KEY_RENEWAL, StreamOutcome, UserStreamReader};
 pub use watch::{Change, Tally, Watcher};
