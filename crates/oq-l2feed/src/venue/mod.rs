@@ -25,11 +25,16 @@
 //! # Adding a venue
 //!
 //! Implement [`Venue`], register it in [`by_id`], and nothing else in
-//! the crate needs to change. See [`binance`] for a worked example; it
-//! is about eighty lines, most of them the list of stream names.
+//! the crate needs to change. [`binance`] and [`okx`] are worked
+//! examples, and they were chosen to differ: one puts the subscription
+//! in the URL and can only be confirmed by its first message, the other
+//! sends a JSON frame and acknowledges explicitly, and their timestamps
+//! are a bare integer and a quoted string respectively. An abstraction
+//! that fits only one of them is not an abstraction.
 
 pub mod binance;
 pub mod binance_instruments;
+pub mod okx;
 
 use core::time::Duration;
 
@@ -191,6 +196,7 @@ pub trait Venue {
 pub fn by_id(id: &str) -> Option<Box<dyn Venue>> {
     match id {
         "binance-perp" => Some(Box::new(binance::BinancePerp)),
+        "okx-swap" => Some(Box::new(okx::OkxSwap)),
         _ => None,
     }
 }
@@ -198,5 +204,5 @@ pub fn by_id(id: &str) -> Option<Box<dyn Venue>> {
 /// Every registered venue identifier, for error messages and `--help`.
 #[must_use]
 pub fn known_ids() -> &'static [&'static str] {
-    &["binance-perp"]
+    &["binance-perp", "okx-swap"]
 }
