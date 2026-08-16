@@ -235,6 +235,8 @@ data changed is stale, not violated.
 | Crate | Responsibility | Milestone |
 |---|---|---|
 | `oq-types` | Domain types, `i64` fixed point, typestate order/position machines | M1 |
+| `oq-hash` | SHA-256 and CRC-32, shared by the journal, capture and parity | M1 |
+| `oq-examples` | Teaching examples and the seeded synthetic market they run on | M2 |
 | `oq-journal` | mmap journal, snapshots, replay, torn-tail tolerance | M1 |
 | `oq-core` | Sequencer, deterministic kernel, injected clock, sharding | M1 |
 | `oq-engine` | Matching: L0 (frozen anchor), L1, L2 | M1 / M4 |

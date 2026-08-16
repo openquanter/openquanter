@@ -194,6 +194,8 @@ mismatch 根本不是回归。
 | Crate | 职责 | 里程碑 |
 |---|---|---|
 | `oq-types` | 领域类型、`i64` 定点、typestate 订单/持仓状态机 | M1 |
+| `oq-hash` | SHA-256 与 CRC-32，供 journal、采集、parity 共用 | M1 |
+| `oq-examples` | 教学示例，及其运行所用的 seed 确定的合成行情 | M2 |
 | `oq-journal` | mmap journal、快照、重放、撕裂尾容错 | M1 |
 | `oq-core` | sequencer、确定性内核、注入时钟、分片 | M1 |
 | `oq-engine` | 撮合：L0（冻结锚点）、L1、L2 | M1 / M4 |

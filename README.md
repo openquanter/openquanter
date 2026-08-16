@@ -19,6 +19,10 @@ than an incremental port.
 
 ### Design pillars
 
+These describe the architecture the project is being built towards. What
+exists today is in [Status](#status) below — read that first if you are
+deciding whether to use this now.
+
 - **Deterministic event core** — a pure state machine fed by a sequenced,
   journaled event stream (LMAX/Aeron lineage). Every run is replayable from
   `(journal, seed)`; crash recovery, audit trail, and simulation testing come
@@ -48,9 +52,35 @@ Full index: [docs/](docs/README.md).
 
 ## Status
 
-Pre-alpha. The workspace currently contains the initial crate skeleton.
-Milestone progress is tracked in this repository's issues and milestones; see
-the [Roadmap](docs/ROADMAP.md) for what each milestone unlocks.
+Pre-alpha, and specific about it. **Built and tested today:**
+
+- **Deterministic core** — sequenced journal, replay that reproduces outputs
+  and state exactly (asserted by test, including a liquidation path),
+  torn-tail recovery, journal-before-apply enforced by fault injection.
+- **L0 matching** — tick replay with gap fill, price improvement and
+  price-time priority. Frozen as the regression anchor.
+- **Margin** — tiered maintenance margin, liquidation pricing derived rather
+  than copied, funding with spike injection, bitemporal rule schedules.
+- **Backtest host** — including the margin deviation report, which runs a
+  strategy twice and quantifies what a margin-free run overstates.
+- **Data plane** — dual timestamps, leakage-free as-of joins, bitemporal
+  reference data.
+- **Capture** — verbatim venue records with local timestamps, UTC-day
+  sealing, manifests with content hashes. Proven against a live venue.
+- **Statistics** — deflated Sharpe ratio, probability of backtest
+  overfitting, trial registry.
+- **Parity** — trade-by-trade diffing with difference attribution, over
+  baselines identified by code, data and configuration together.
+
+**Designed but not built:** fidelity tiers L1 and L2 (only L0 exists), the
+Python strategy tier, a sweep runner, live trading, and everything under
+*AI-native* above. The pillars section describes where this is going; this
+section describes where it is.
+
+Start with the [Quickstart](docs/QUICKSTART.md) — three examples, no data to
+download, a running backtest in a few minutes. See the
+[Roadmap](docs/ROADMAP.md) for what each milestone unlocks and what triggers
+it.
 
 ## Building
 
