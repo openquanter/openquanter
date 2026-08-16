@@ -45,3 +45,20 @@ jobs:
 
       - name: Dependency budgets and standalone builds
         run: scripts/check-composability.sh
+
+  throughput:
+    name: Engine throughput floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # A floor, not a regression gate. Shared runners vary by several
+      # times from hour to hour, so a tight comparison would fail on
+      # noise and be switched off within a week. This catches the
+      # engine becoming an order of magnitude slower, which is the
+      # failure that actually happens. Use `cargo bench` locally to
+      # compare two versions on one machine.
+      - name: Backtest throughput must stay above the floor
+        run: cargo run --release -p oq-examples --example throughput

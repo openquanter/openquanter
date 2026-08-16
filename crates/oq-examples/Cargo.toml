@@ -15,5 +15,12 @@ oq-engine = { path = "../oq-engine", version = "0.0.1" }
 oq-margin = { path = "../oq-margin", version = "0.0.1" }
 oq-types = { path = "../oq-types", version = "0.0.1" }
 
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "backtest"
+harness = false
+
 [lints]
 workspace = true

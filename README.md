@@ -32,12 +32,50 @@ What the components are built to get right, in order:
    with 61.53.
 2. **Speed that does not cost fidelity.** Integer fixed point, no async on the
    hot path, allocation-free after warm-up. Most fast backtesters are fast
-   because they simplify; the point here is not having to choose.
+   because they simplify; the point here is not having to choose — and the
+   price of not simplifying is a number rather than a claim:
+
+   ```
+   cargo run --release -p oq-examples --example throughput
+
+   throughput   35.38 M ticks/s      # matching + margin + accounting + strategy
+   ```
+
+   With liquidation modelling switched off the same loop runs at roughly
+   72 M ticks/s, so **margin fidelity costs about half the throughput**. That
+   is the trade this project argues is worth making; the figure is here so you
+   can judge it rather than take it on faith. Measured on an M4 Mac over a
+   seeded market, in memory — reading and parsing tick files is not included.
+   Reproduce it with the command above; `cargo bench -p oq-examples` gives the
+   full breakdown.
 3. **Runs you can reproduce and audit.** A journaled event stream means crash
    recovery, forensics, and reproducible research are the same mechanism.
 
-The 2.x line is a ground-up rewrite on a Rust core — a new architecture rather
-than an incremental port.
+### Where this comes from
+
+OpenQuanter 1.x is a closed-source trading platform that has run live for
+several years. It stays closed: it carries strategies, parameters and
+operational history that are not ours to publish.
+
+This project exists because 1.x hit a ceiling, and the binding constraint was
+backtest throughput over large datasets. That sounds like an efficiency
+complaint and is not one. When a parameter search takes days instead of an
+afternoon, the cost is not the waiting — it is the studies you quietly stop
+attempting, and the hypotheses that never get tested because testing them is
+not worth the calendar. Slow research does not just take longer; it becomes
+different, smaller research.
+
+By the time the profiling was done and the obvious optimisations were in, what
+remained was structural. No further tuning of that codebase was going to move
+it, because the limit was the architecture rather than the code. So 2.x is a
+ground-up rewrite on a Rust core rather than an incremental port.
+
+Two things follow that are worth stating plainly. Everything here was shaped by
+running a real system and hitting real walls — the margin work exists because a
+backtest that could not liquidate had been quietly flattering results for
+years, not because it seemed like a good feature. And the first requirement was
+one specific need of one specific user, which is why this README leads with
+what the components are rather than with the migration that started them.
 
 ### Design pillars
 
