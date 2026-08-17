@@ -91,12 +91,45 @@ pub fn to_ticks(
     scales: Scales,
     window_ns: i64,
 ) -> Result<(Vec<Tick>, Report), String> {
-    if window_ns <= 0 {
-        return Err("window must be positive".to_string());
-    }
-
-    let mut events: Vec<Event> = Vec::new();
+    let mut agg = Aggregator::new(window_ns)?;
     let mut report = Report::default();
+    let mut ticks = fold_into(venue, sources, scales, &mut agg, &mut report);
+    ticks.extend(agg.flush());
+    let counts = agg.counts();
+    report.depth_applied = counts.depth_applied;
+    report.trades = counts.trades;
+    report.quiet_windows = counts.quiet_windows;
+    report.ticks = ticks.len() as u64;
+    Ok((ticks, report))
+}
+
+/// Fold one batch of sources into an aggregator that outlives the call.
+///
+/// The batch exists because memory does. A day of one instrument's depth
+/// is millions of records and the parsed form is larger than the bytes on
+/// disk; loading a whole day at once cost more than the machine holding
+/// the data had — measured on the capture host as a process killed by the
+/// kernel after it had reported 2,114,759 depth records, on 1 GiB of RAM.
+///
+/// The archive is already written one file per hour, so an hour is the
+/// batch the data offers. Carrying the aggregator across batches is what
+/// makes that safe: the order book, the cumulative volume and the open
+/// window are state that spans hours, and per-hour calls that each
+/// started fresh would report an unknown quote at the top of every hour
+/// and restart the volume counter twenty-four times a day.
+///
+/// Ordering inside the batch is by exchange time, as before. Across
+/// batches it comes from the archive's own layout, which files a record
+/// under the event time it carries — so an hour's records belong to that
+/// hour and the boundary needs no reordering.
+pub fn fold_into(
+    venue: &dyn Venue,
+    sources: &[Source<'_>],
+    scales: Scales,
+    agg: &mut Aggregator,
+    report: &mut Report,
+) -> Vec<Tick> {
+    let mut events: Vec<Event> = Vec::new();
 
     for source in sources {
         for record in source.records {
@@ -139,13 +172,7 @@ pub fn to_ticks(
     // extremes both assume.
     events.sort_by_key(|e| (e.at, e.local));
 
-    // One aggregator, and the live feed uses the same one. Two
-    // implementations of this would agree until they did not, and the
-    // disagreement would be invisible: both sides produce things that
-    // look like plausible ticks.
-    let mut agg = Aggregator::new(window_ns)?;
     let mut ticks = Vec::new();
-
     for event in &events {
         let closed = match &event.kind {
             EventKind::Gap => agg.on_gap(event.at, event.local),
@@ -154,14 +181,7 @@ pub fn to_ticks(
         };
         ticks.extend(closed);
     }
-    ticks.extend(agg.flush());
-
-    let counts = agg.counts();
-    report.depth_applied = counts.depth_applied;
-    report.trades = counts.trades;
-    report.quiet_windows = counts.quiet_windows;
-    report.ticks = ticks.len() as u64;
-    Ok((ticks, report))
+    ticks
 }
 
 struct Event {
