@@ -471,6 +471,7 @@ dependencies = [
  "oq-engine",
  "oq-gateway",
  "oq-ingest",
+ "oq-journal",
  "oq-l2feed",
  "oq-risk",
  "oq-strategy",
