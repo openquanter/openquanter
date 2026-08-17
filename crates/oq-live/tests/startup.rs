@@ -353,3 +353,71 @@ fn a_flat_account_still_reports_zero_lots() {
     let s = session(Recording::accepting(), &[], &[], &[]).expect("starts");
     assert_eq!(s.book().net_lots("BTCUSDT", 3), QtyLots(0));
 }
+
+/// On a hedged account, which leg an order names decides whether it is an
+/// entry or an exit. The venue refuses `reduceOnly` there, so the leg is
+/// the only thing carrying that meaning.
+mod hedged_legs {
+    use oq_gateway::PositionSide;
+    use oq_live::session::leg_for;
+    use oq_types::Side;
+
+    #[test]
+    fn a_close_names_the_leg_being_closed_not_the_direction_of_the_order() {
+        // The defect this replaces: the leg was pinned per session, so a
+        // sell-to-close on a long-configured session was sent as an open
+        // on the long leg — an exit that increased the position.
+        assert_eq!(
+            leg_for(PositionSide::Long, Side::Sell, true),
+            PositionSide::Long,
+            "selling to close closes the long"
+        );
+        assert_eq!(
+            leg_for(PositionSide::Long, Side::Buy, true),
+            PositionSide::Short,
+            "buying to close closes the short"
+        );
+    }
+
+    #[test]
+    fn an_open_names_the_leg_it_opens() {
+        assert_eq!(
+            leg_for(PositionSide::Long, Side::Buy, false),
+            PositionSide::Long
+        );
+        assert_eq!(
+            leg_for(PositionSide::Long, Side::Sell, false),
+            PositionSide::Short
+        );
+    }
+
+    #[test]
+    fn the_configured_leg_does_not_decide_anything_beyond_hedged_or_not() {
+        // Configuring Short must give the same answers as configuring
+        // Long: the leg comes from the order, not from the session. A
+        // session-level leg that still leaked through would make the
+        // mapping depend on configuration, which is the bug again in a
+        // quieter form.
+        for side in [Side::Buy, Side::Sell] {
+            for closing in [true, false] {
+                assert_eq!(
+                    leg_for(PositionSide::Long, side, closing),
+                    leg_for(PositionSide::Short, side, closing),
+                    "{side:?} closing={closing}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_one_way_account_names_no_leg_whatever_the_order_is() {
+        for side in [Side::Buy, Side::Sell] {
+            for closing in [true, false] {
+                assert_eq!(
+                    leg_for(PositionSide::OneWay, side, closing),
+                    PositionSide::OneWay
+                );
+            }
+        }
+    }
+}
