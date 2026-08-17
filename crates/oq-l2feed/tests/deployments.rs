@@ -67,3 +67,26 @@ fn an_unknown_venue_is_none_on_every_deployment() {
         assert!(venue::by_id_at("not-a-venue", d).is_none());
     }
 }
+
+#[test]
+fn a_read_timeout_keeps_its_kind_so_a_poller_can_tell() {
+    // Not reachable without a socket, so this pins the classifier the
+    // decision rests on rather than the path itself. A caller polling
+    // with a short timeout has to distinguish "nothing this instant"
+    // from "the connection is gone"; erasing the kind makes a quiet
+    // contract look like a broken one and costs a reconnection per
+    // quiet interval.
+    use std::io;
+    for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+        let e = tungstenite::Error::Io(io::Error::new(kind, "timed out"));
+        assert!(
+            oq_l2feed::ws::is_read_timeout_for_test(&e),
+            "{kind:?} is a read timeout"
+        );
+    }
+    let broken = tungstenite::Error::Io(io::Error::new(io::ErrorKind::BrokenPipe, "gone"));
+    assert!(
+        !oq_l2feed::ws::is_read_timeout_for_test(&broken),
+        "a broken pipe is not a timeout"
+    );
+}
