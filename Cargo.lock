@@ -479,6 +479,7 @@ dependencies = [
  "oq-journal",
  "oq-l2feed",
  "oq-risk",
+ "oq-sim",
  "oq-strategy",
  "oq-types",
 ]
@@ -504,6 +505,10 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "oq-types",
 ]
+
+[[package]]
+name = "oq-sim"
+version = "2.0.0-alpha.1"
 
 [[package]]
 name = "oq-stats"

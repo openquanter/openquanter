@@ -42,6 +42,11 @@ BUDGETS=(
   # checked against: a risk gate that cannot be built from the workspace
   # alone is a risk gate whose availability depends on a registry.
   "oq-risk:0"
+  # Fault injection. Zero, and the generator is written out rather than
+  # depended on: a crate that changed its algorithm in a patch release
+  # would renumber every scenario, and the seed in a bug report would
+  # stop meaning what it meant.
+  "oq-sim:0"
   "oq-stats:0"
   # The strategy contract. Zero, and it has to stay zero for a reason
   # the other zeros do not share: this is the crate a user writes
