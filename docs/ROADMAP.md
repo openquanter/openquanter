@@ -46,7 +46,7 @@ commitments.
 | **M0** | Foundations: repository, capture, statistics | 3–6 pw | Mostly landed |
 | **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
 | **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | Committed |
-| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | Triggered |
+| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Half built, entry triggers unmet** |
 | **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
 | **2.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
@@ -58,8 +58,10 @@ parity harness, the capture toolkit and the overfitting statistics are in
 and green, and `criterion` benchmarks now exist with a throughput floor
 enforced in CI. Still open on M1's gate is trade-by-trade parity against a
 reference implementation run — close, but not passed, and a gate that is
-nearly met is not met. Continuous capture is still a trial rather than a
-service. See the README for the built/not-built split.
+nearly met is not met. Capture has since run continuously for over a
+day across 23 streams on two venues with zero archive failures, which is
+past a trial and short of the exit gate: that asks for a *measured* gap
+rate and documented storage growth, and what exists is an uptime figure. See the README for the built/not-built split.
 
 One M1 item was deliberately built smaller than planned. The benchmark job
 asserts a **floor**, not a tracked baseline: shared CI runners vary by
@@ -69,6 +71,34 @@ order of magnitude slower, which is the regression that actually happens.
 Comparing two versions precisely is a local `cargo bench` job on one
 machine. This is a change to the plan, recorded rather than quietly
 dropped.
+
+**M3 was built to roughly half its scope with none of its four entry
+triggers met, and that is a departure from this document's own discipline
+rather than a revision of it.** The gateway speaks order entry and the user
+stream, the risk gate exists with a kill switch and a fatal startup check,
+and `oq-live` assembles them into a process that has placed and cancelled a
+real order on a testnet and seen both confirmed on the account stream. None
+of M3's four conditions — six months of public release, an attributed
+shadow run, two rehearsed cutovers, one outside user — has happened.
+
+Recorded because principle 4 at the top of this page says trigger, don't
+schedule, the expensive parts, and this is what it looks like when that is
+not followed. The work is not wasted and none of it is being reverted; the
+cost is that the ordering was the thing meant to ensure the expensive half
+got built against evidence, and it was built against enthusiasm instead.
+
+Still unbuilt in M3, so that "half" is a number rather than a feeling:
+snapshot recovery and graceful restart in `oq-live` (present in its
+comments, absent from its functions), the connector conformance suite, a
+second execution venue, observability of any kind, the live/backtest
+attribution, `oq-sim`, and the cutover playbook.
+
+**G6 is not merely unmet — by its own definition it is unmeasurable.** It
+asks for p99 latency from journal write to socket write, and the live path
+does not journal: `oq-live` depends on neither `oq-core` nor `oq-journal`,
+so there is no first timestamp to measure from. This is the same missing
+wire as the attribution item in M3's scope, which is why that item calls
+itself the first task of the milestone rather than the last.
 
 "Committed" means it is the current default plan. "Triggered" means the
 milestone has an entry condition stated below and will not be started before
