@@ -6,12 +6,46 @@
 
 use core::time::Duration;
 
-use super::{AckPolicy, Instrument, PollSpec, StreamSpec, Trade, Transport, Venue};
+use super::{AckPolicy, Deployment, Instrument, PollSpec, StreamSpec, Trade, Transport, Venue};
 use crate::depth::{DepthUpdate, ParseError, Scales, parse_fixed};
 
 /// Binance USD-M perpetual futures.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct BinancePerp;
+pub struct BinancePerp {
+    deployment: Deployment,
+}
+
+impl BinancePerp {
+    /// The mainnet adapter.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            deployment: Deployment::Live,
+        }
+    }
+
+    /// An adapter for a named deployment.
+    #[must_use]
+    pub const fn at(deployment: Deployment) -> Self {
+        Self { deployment }
+    }
+
+    /// Websocket host for market data.
+    const fn stream_host(&self) -> &'static str {
+        match self.deployment {
+            Deployment::Live => "wss://fstream.binance.com",
+            Deployment::Testnet => "wss://stream.binancefuture.com",
+        }
+    }
+
+    /// REST host for the polled streams.
+    const fn rest_host(&self) -> &'static str {
+        match self.deployment {
+            Deployment::Live => "https://fapi.binance.com",
+            Deployment::Testnet => "https://testnet.binancefuture.com",
+        }
+    }
+}
 
 /// How long a stream may stay silent after subscribing before the
 /// subscription is treated as failed.
@@ -56,7 +90,8 @@ impl Venue for BinancePerp {
         vec![PollSpec {
             name: "markPrice".to_string(),
             url: format!(
-                "https://fapi.binance.com/fapi/v1/premiumIndex?symbol={}",
+                "{}/fapi/v1/premiumIndex?symbol={}",
+                self.rest_host(),
                 symbol.to_uppercase()
             ),
             interval_secs: 1,
@@ -81,7 +116,7 @@ impl Venue for BinancePerp {
             _ => AckPolicy::None,
         };
         Transport {
-            url: format!("wss://fstream.binance.com/ws/{}", spec.topic),
+            url: format!("{}/ws/{}", self.stream_host(), spec.topic),
             subscribe: Vec::new(),
             ack,
             // This venue pings us, and answering in place is enough.
@@ -202,20 +237,23 @@ mod tests {
     fn event_time_is_read_from_the_e_field() {
         let payload = br#"{"e":"depthUpdate","E":1786780800123,"s":"BTCUSDT"}"#;
         assert_eq!(
-            BinancePerp.event_time_ns(payload),
+            BinancePerp::new().event_time_ns(payload),
             Some(1_786_780_800_123_000_000)
         );
     }
 
     #[test]
     fn a_payload_without_an_event_time_yields_none() {
-        assert_eq!(BinancePerp.event_time_ns(br#"{"result":null}"#), None);
+        assert_eq!(
+            BinancePerp::new().event_time_ns(br#"{"result":null}"#),
+            None
+        );
     }
 
     #[test]
     fn the_subscription_is_the_url_so_nothing_is_sent() {
-        let spec = &BinancePerp.streams("BTCUSDT")[0];
-        let t = BinancePerp.transport(spec);
+        let spec = &BinancePerp::new().streams("BTCUSDT")[0];
+        let t = BinancePerp::new().transport(spec);
         assert!(t.url.starts_with("wss://"));
         assert!(t.url.ends_with("btcusdt@depth@0ms"));
         assert!(
@@ -232,7 +270,7 @@ mod tests {
         // subscribes successfully and then says nothing forever. The
         // policy has to be one that treats that as an error.
         let spec = StreamSpec::new("depth", "btcusdt@aggTrade");
-        match BinancePerp.transport(&spec).ack {
+        match BinancePerp::new().transport(&spec).ack {
             AckPolicy::FirstDataIsAck { deadline } => {
                 assert!(deadline.as_secs() > 0 && deadline.as_secs() <= 300);
             }
@@ -245,16 +283,16 @@ mod tests {
         // Holding forceOrder to "first data confirms" would tear the
         // connection down every deadline through any quiet hour, which
         // is a worse failure than the dead subscription it detects.
-        let specs = BinancePerp.streams("BTCUSDT");
+        let specs = BinancePerp::new().streams("BTCUSDT");
         let force = specs
             .iter()
             .find(|s| s.name == "forceOrder")
             .expect("forceOrder");
-        assert_eq!(BinancePerp.transport(force).ack, AckPolicy::None);
+        assert_eq!(BinancePerp::new().transport(force).ack, AckPolicy::None);
 
         let depth = specs.iter().find(|s| s.name == "depth").expect("depth");
         assert!(matches!(
-            BinancePerp.transport(depth).ack,
+            BinancePerp::new().transport(depth).ack,
             AckPolicy::FirstDataIsAck { .. }
         ));
     }
@@ -263,16 +301,28 @@ mod tests {
     fn precisions_differ_between_contracts() {
         // The pair that made this necessary: replaying HYPEUSDT with
         // BTCUSDT's scale reported the archive as unreadable.
-        assert_eq!(BinancePerp.instrument("BTCUSDT").unwrap().price_scale, 2);
-        assert_eq!(BinancePerp.instrument("HYPEUSDT").unwrap().price_scale, 5);
-        assert!(BinancePerp.instrument("NOTLISTED").is_none());
+        assert_eq!(
+            BinancePerp::new()
+                .instrument("BTCUSDT")
+                .unwrap()
+                .price_scale,
+            2
+        );
+        assert_eq!(
+            BinancePerp::new()
+                .instrument("HYPEUSDT")
+                .unwrap()
+                .price_scale,
+            5
+        );
+        assert!(BinancePerp::new().instrument("NOTLISTED").is_none());
     }
 
     #[test]
     fn the_id_matches_the_registry_key() {
         // The archive path and the venue selector must be the same
         // string, or data lands under a name that cannot select it back.
-        assert_eq!(BinancePerp.id(), "binance-perp");
+        assert_eq!(BinancePerp::new().id(), "binance-perp");
         assert!(super::super::by_id("binance-perp").is_some());
         assert_eq!(
             super::super::by_id("binance-perp").unwrap().id(),
