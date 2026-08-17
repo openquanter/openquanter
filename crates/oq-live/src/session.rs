@@ -245,6 +245,21 @@ impl<E: Execution> Session<E> {
         }
     }
 
+    /// Withdraw a resting order.
+    ///
+    /// Not gated: the gate exists to stop exposure being taken on, and
+    /// a cancel only ever removes it. A gate that could block a cancel
+    /// would be a gate that traps a position, which is the failure mode
+    /// worth being careful about here — the kill switch stops new
+    /// orders and must not stop the way out.
+    pub fn cancel(&self, client_id: &str) -> Submission {
+        match self.venue.cancel(&self.symbol, client_id) {
+            Placed::Accepted(a) => Submission::Sent(a.client_id),
+            Placed::Rejected(r) => Submission::Rejected(r.message),
+            Placed::Unknown(u) => Submission::Unresolved(format!("{}: {}", u.client_id, u.reason)),
+        }
+    }
+
     /// Adopt the venue's own view after a reconciliation.
     pub fn reconcile(&mut self, venue_positions: &[PositionSnapshot]) {
         self.book.adopt(
