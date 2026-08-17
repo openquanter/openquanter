@@ -18,5 +18,8 @@ ureq = "3.4"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+tungstenite = { version = "0.30", default-features = false }
+
 [lints]
 workspace = true
