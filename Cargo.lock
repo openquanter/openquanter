@@ -470,6 +470,8 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "oq-engine",
  "oq-gateway",
+ "oq-ingest",
+ "oq-l2feed",
  "oq-risk",
  "oq-strategy",
  "oq-types",
