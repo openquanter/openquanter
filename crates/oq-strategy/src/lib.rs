@@ -34,6 +34,10 @@
 //! std Rust, so writing a strategy compiles three small crates and
 //! nothing else — no journal, no margin tables, no venue client.
 
+pub mod indicator;
+
+pub use indicator::{Ema, Macd, MacdValue, Rsi, Sma, Warmup, Window};
+
 use oq_types::{Fill, Offset, OrderId, PriceTicks, QtyLots, Side};
 
 /// What a strategy wants to happen next.
