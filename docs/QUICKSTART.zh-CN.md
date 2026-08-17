@@ -17,10 +17,15 @@ dev-dependency `criterion`。引擎本身——类型、journal、内核、撮�
 `oq-capture` 的东西可装：
 
 ```bash
+cargo install oq-cli      # oq —— 一个名字找到其余全部
 cargo install oq-l2feed   # oq-capture、oq-book-check、oq-trade-check、oq-merge、oq-resequence
 cargo install oq-ingest   # oq-ingest
-cargo install oq-gateway  # oq-recon
+cargo install oq-gateway  # oq-recon、oq-order-check
+cargo install oq-live     # oq-trade
 ```
+
+`oq` 单独执行会列出每个工具和它的用途，`oq <工具>` 则把参数原样转发给它。
+**它值得第一个装：它是唯一一个会告诉你其余工具存在的。**
 
 ```bash
 git clone https://github.com/openquanter/openquanter

@@ -19,10 +19,16 @@ The command-line tools ship inside those crates rather than as separate
 packages, so there is nothing named `oq-capture` on crates.io to install:
 
 ```bash
+cargo install oq-cli      # oq — one name that finds the rest
 cargo install oq-l2feed   # oq-capture, oq-book-check, oq-trade-check, oq-merge, oq-resequence
 cargo install oq-ingest   # oq-ingest
-cargo install oq-gateway  # oq-recon
+cargo install oq-gateway  # oq-recon, oq-order-check
+cargo install oq-live     # oq-trade
 ```
+
+`oq` on its own lists every tool with what it is for, and `oq <tool>` runs
+it with the arguments passed through unchanged. It is worth installing
+first: it is the only one that tells you the others exist.
 
 ```bash
 git clone https://github.com/openquanter/openquanter
