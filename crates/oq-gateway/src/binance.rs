@@ -205,6 +205,18 @@ impl Binance {
         self.clock_offset_ms
     }
 
+    /// Now, on the venue's clock.
+    ///
+    /// The same quantity every snapshot stamps itself with, exposed so
+    /// that something which has no snapshot to stamp — a read that
+    /// failed — can still be placed on the timeline beside the reads
+    /// that succeeded. A log carrying two clocks is harder to reason
+    /// about than one carrying a single clock and some gaps.
+    #[must_use]
+    pub fn venue_time_ms(&self) -> i64 {
+        now_ms() + self.clock_offset_ms
+    }
+
     /// Account balance and unrealized profit.
     ///
     /// # Errors
@@ -741,6 +753,26 @@ mod tests {
     fn a_failed_request_does_not_report_its_signature() {
         let url = "https://fapi.binance.com/fapi/v2/account?timestamp=1&signature=deadbeef";
         assert_eq!(redact(url), "https://fapi.binance.com/fapi/v2/account");
+    }
+
+    /// The stamp a failed read carries has to come off the same clock as
+    /// the stamp a successful one carries, or the log records an outage
+    /// on a timeline nothing else in it shares.
+    #[test]
+    fn venue_time_moves_with_the_measured_offset() {
+        let mut c = Binance::at(Endpoint::Testnet, Credentials::new("k", "s"));
+        let unadjusted = c.venue_time_ms();
+        assert!(
+            (unadjusted - now_ms()).abs() < 1_000,
+            "with no offset it should be local time"
+        );
+
+        c.clock_offset_ms = -30_000;
+        let adjusted = c.venue_time_ms();
+        assert!(
+            (adjusted - (unadjusted - 30_000)).abs() < 1_000,
+            "expected the offset to apply: {adjusted} vs {unadjusted}"
+        );
     }
 }
 
