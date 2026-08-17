@@ -179,6 +179,23 @@ pub struct Transport {
 /// venue that quotes contracts and one that quotes the asset.
 pub use oq_types::Instrument;
 
+/// Which deployment of a venue to connect to.
+///
+/// The execution side already had this as a type, for the reason that a
+/// string wrong by one character is production. Market data needed it
+/// for a second reason: a strategy trading on a test deployment has to
+/// see that deployment's prices, and pointing it at production's would
+/// give it a market it cannot trade in — one where its orders never
+/// fill because they were priced against somewhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Deployment {
+    /// Real money.
+    #[default]
+    Live,
+    /// The venue's test deployment.
+    Testnet,
+}
+
 /// What the capture path needs from a venue.
 ///
 /// Implementations are expected to be thin. Anything that can be left in
@@ -297,9 +314,25 @@ pub struct Trade {
 /// touches one file.
 #[must_use]
 pub fn by_id(id: &str) -> Option<Box<dyn Venue>> {
-    match id {
-        "binance-perp" => Some(Box::new(binance::BinancePerp)),
-        "okx-swap" => Some(Box::new(okx::OkxSwap)),
+    by_id_at(id, Deployment::Live)
+}
+
+/// The same registry, for a named deployment.
+///
+/// Returns `None` when the venue is unknown **or** when it has no
+/// implementation for that deployment. Refusing is the point: a venue
+/// that answered with its production endpoint after being asked for a
+/// test one would be the worst possible answer — the caller believes it
+/// is testing, and it is not.
+#[must_use]
+pub fn by_id_at(id: &str, deployment: Deployment) -> Option<Box<dyn Venue>> {
+    match (id, deployment) {
+        ("binance-perp", d) => Some(Box::new(binance::BinancePerp::at(d))),
+        // This venue's simulated trading is not implemented here. It is
+        // reachable, but reaching it takes a header this adapter does
+        // not send, and connecting without it lands on production.
+        ("okx-swap", Deployment::Live) => Some(Box::new(okx::OkxSwap)),
+        ("okx-swap", Deployment::Testnet) => None,
         _ => None,
     }
 }
