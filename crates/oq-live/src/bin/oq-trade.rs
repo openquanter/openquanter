@@ -588,6 +588,13 @@ fn main() -> ExitCode {
 
     println!("ticks            {ticks}");
     println!("orders           {sent} placed, {cancelled} withdrawn");
+    // The in-process segment only. G6's far boundary is the socket write,
+    // which the HTTP client does not expose, so this is not the gate's
+    // number and is not labelled as it.
+    println!(
+        "submit latency   {} (journal flush to client call)",
+        trader.latency()
+    );
     println!(
         "duplicates       {} redelivered fills discarded",
         trader.duplicates()
@@ -612,6 +619,7 @@ trait TraderLike {
     fn duplicates(&self) -> u64;
     fn foreign(&self) -> u64;
     fn record_tick(&mut self, tick: &oq_engine::Tick);
+    fn latency(&self) -> String;
     fn cancel_all(&mut self, symbol: &str);
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
     fn reconcile(&mut self, symbol: &str);
@@ -640,6 +648,9 @@ impl<S: Strategy> TraderLike for Trader<S, Binance> {
     }
     fn record_tick(&mut self, tick: &oq_engine::Tick) {
         self.session_mut().record_tick(tick);
+    }
+    fn latency(&self) -> String {
+        self.session().submit_latency().summary()
     }
     fn cancel_all(&mut self, _symbol: &str) {
         for id in self

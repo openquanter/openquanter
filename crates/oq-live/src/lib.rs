@@ -40,6 +40,7 @@
 
 pub mod book;
 pub mod feed;
+pub mod latency;
 pub mod record;
 pub mod recovery;
 pub mod session;
@@ -48,6 +49,7 @@ pub mod trader;
 
 pub use book::{Book, Position};
 pub use feed::{MarketData, Stream};
+pub use latency::Latency;
 pub use record::{OutcomeTag, Record};
 pub use recovery::{InFlight, Recovered, Unaccounted, recover};
 pub use session::{Session, SessionConfig, StartupRefusal, Submission};
