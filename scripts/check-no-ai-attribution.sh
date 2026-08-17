@@ -41,9 +41,22 @@
 set -uo pipefail
 
 # Anchored at the start of a line, so only trailers match.
+#
+# Matched on the vendor's address or on a model designation, never on a
+# bare given name. Claude is a name people have — Claude Monet had it —
+# and a contributor called Claude Dupont writes a co-author line
+# indistinguishable from an assistant's if you match the first word
+# alone. Blocking that person is not a small cost: it is a stranger's
+# first contribution refused by a machine that mistook their name for a
+# robot, and the repository would never hear why they left.
 PATTERNS=(
-  '^Co-authored-by:[[:space:]]*(Claude|GPT|Codex|Copilot|Gemini|Cursor|Devin|Aider)'
-  '^Co-authored-by:.*<noreply@(anthropic|openai)\.com>'
+  # Definitive: no person sends mail from an assistant vendor's domain.
+  '^Co-authored-by:.*<[^>]*@(anthropic|openai)\.com>'
+  # A model designation, not the name on its own.
+  '^Co-authored-by:[[:space:]]*Claude[[:space:]]+(Opus|Sonnet|Haiku|Fable|Code|[0-9])'
+  # These are product names rather than given names, but still require a
+  # separator after them so a surname beginning with one cannot match.
+  '^Co-authored-by:[[:space:]]*(GPT|Codex|Copilot|Gemini|Cursor|Devin|Aider)[[:space:]—–-]'
   '^[[:space:]]*🤖[[:space:]]*Generated with'
 )
 
@@ -56,6 +69,9 @@ self_test() {
     'Co-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>'
     'Co-authored-by: Someone Else <noreply@anthropic.com>'
     '🤖 Generated with [Claude Code](https://claude.com/claude-code)'
+    # No vendor address, so the model designation has to carry it.
+    'Co-authored-by: Claude Haiku 4.5 <someone@example.com>'
+    'Co-authored-by: GPT-5 <dev@example.com>'
   )
   # Real lines from this repository's history. Each names an assistant
   # and none is an attribution.
@@ -64,6 +80,10 @@ self_test() {
     'feat(analysis): backtest reflection via Claude Code headless'
     'local does not run claude code; route LLM via ssh to the build host'
     'Co-authored-by: 0xdtee <312484298+0xdtee@users.noreply.github.com>'
+    # People named Claude. The check must let them contribute.
+    'Co-authored-by: Claude Dupont <claude.dupont@example.fr>'
+    'Co-authored-by: Claude Monet <cmonet@giverny.example>'
+    'Co-authored-by: Jean-Claude Martin <jc@example.fr>'
   )
 
   local failures=0 sample pattern hit
