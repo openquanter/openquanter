@@ -25,7 +25,7 @@ fn trade(at: i64, price: &str, qty: &str) -> Record {
 
 fn convert(records: &[Record], window: i64) -> (Vec<Tick>, Report) {
     to_ticks(
-        &BinancePerp,
+        &BinancePerp::new(),
         &[Source {
             records,
             stream: "trade",
@@ -129,7 +129,7 @@ fn a_window_of_trades_still_reports_the_book() {
     let trades = vec![trade(T0 + 2 * SECOND, "100.00", "1.000")];
 
     let (ticks, _) = to_ticks(
-        &BinancePerp,
+        &BinancePerp::new(),
         &[
             Source {
                 records: core::slice::from_ref(&depth),
@@ -194,7 +194,7 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
         depth(T0 + 3 * SECOND, 9, 9, "98.00", "102.00"),
     ];
     let (ticks, report) = to_ticks(
-        &BinancePerp,
+        &BinancePerp::new(),
         &[Source {
             records: &records,
             stream: "depth",
@@ -219,5 +219,5 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
 
 #[test]
 fn a_zero_window_is_rejected_rather_than_dividing_by_it() {
-    assert!(to_ticks(&BinancePerp, &[], scales(), 0).is_err());
+    assert!(to_ticks(&BinancePerp::new(), &[], scales(), 0).is_err());
 }
