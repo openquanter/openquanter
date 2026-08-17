@@ -25,6 +25,10 @@ cd "$(git rev-parse --show-toplevel)"
 
 # crate:max third-party dependencies (transitive)
 BUDGETS=(
+  # The launcher. Zero, and it has to be: installing one name to find
+  # nine tools must not build a TLS stack. It dispatches rather than
+  # absorbs, so it does not even depend on the tools it launches.
+  "oq-cli:0"
   "oq-types:0"
   "oq-hash:0"
   "oq-journal:0"
