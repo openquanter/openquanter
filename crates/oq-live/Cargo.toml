@@ -10,7 +10,11 @@ repository.workspace = true
 [dependencies]
 oq-gateway.workspace = true
 oq-risk.workspace = true
+oq-strategy.workspace = true
 oq-types.workspace = true
+
+[dev-dependencies]
+oq-engine.workspace = true
 
 [lints]
 workspace = true

@@ -30,13 +30,14 @@
 //! per-window amount. Emitting per-window volume would look more natural
 //! and would silently halve every difference.
 
+pub mod agg;
+pub use agg::{Aggregator, Counts};
+
 use oq_engine::Tick;
-use oq_l2feed::book::Book;
 use oq_l2feed::depth::Scales;
 use oq_l2feed::frame::{Kind, Record};
 use oq_l2feed::manifest::is_gap;
 use oq_l2feed::venue::Venue;
-use oq_types::{Nanos, PriceTicks, QtyLots, Stamp};
 
 /// How the conversion went, so a caller can tell a thin market from a
 /// broken read.
@@ -138,80 +139,27 @@ pub fn to_ticks(
     // extremes both assume.
     events.sort_by_key(|e| (e.at, e.local));
 
+    // One aggregator, and the live feed uses the same one. Two
+    // implementations of this would agree until they did not, and the
+    // disagreement would be invisible: both sides produce things that
+    // look like plausible ticks.
+    let mut agg = Aggregator::new(window_ns)?;
     let mut ticks = Vec::new();
-    let mut book = Book::new();
-    let mut bootstrapped = false;
-    let mut volume_total: i64 = 0;
-    let mut bid: i64 = 0;
-    let mut ask: i64 = 0;
-    let mut open: Option<Window> = None;
 
     for event in &events {
-        let start = event.at - event.at.rem_euclid(window_ns);
-        match &mut open {
-            Some(w) if w.start == start => {}
-            Some(w) => {
-                ticks.push(w.close(bid, ask, volume_total));
-                if w.trades == 0 {
-                    report.quiet_windows += 1;
-                }
-                *w = Window::new(start);
-            }
-            None => open = Some(Window::new(start)),
-        }
-        let window = open.as_mut().expect("a window is open");
-        window.last_local = event.local;
-
-        match &event.kind {
-            EventKind::Gap => {
-                // The capture declared that it stopped listening, so the
-                // book cannot span this. Dropping it means the next
-                // windows carry no top of book until a fresh update
-                // rebuilds one, which is the honest answer: a stale best
-                // bid is worse than an absent one, because the engine
-                // treats zero as "unknown" and falls back to trades.
-                book = Book::new();
-                bootstrapped = false;
-                // A dropped book has no quote to report, and reporting
-                // the one from before the gap would be worse than
-                // reporting none.
-                bid = 0;
-                ask = 0;
-            }
-            EventKind::Depth(update) => {
-                if !bootstrapped {
-                    book.install_snapshot(update.first_id.saturating_sub(1), &[], &[]);
-                    bootstrapped = true;
-                }
-                if book.apply(update).is_ok() {
-                    report.depth_applied += 1;
-                } else {
-                    // A break the capture did not declare. Resynchronise
-                    // the way a live consumer would rather than carrying
-                    // a book that is now wrong.
-                    book = Book::new();
-                    book.install_snapshot(update.first_id.saturating_sub(1), &[], &[]);
-                    let _ = book.apply(update);
-                    report.depth_applied += 1;
-                }
-                bid = book.bids().best().map_or(0, |l| l.price);
-                ask = book.asks().best().map_or(0, |l| l.price);
-            }
-            EventKind::Trade(t) => {
-                report.trades += 1;
-                window.observe_trade(t.price);
-                volume_total = volume_total.saturating_add(t.qty);
-            }
-        }
+        let closed = match &event.kind {
+            EventKind::Gap => agg.on_gap(event.at, event.local),
+            EventKind::Depth(update) => agg.on_depth(event.at, event.local, update),
+            EventKind::Trade(t) => agg.on_trade(event.at, event.local, t),
+        };
+        ticks.extend(closed);
     }
+    ticks.extend(agg.flush());
 
-    if let Some(w) = open {
-        ticks.push(w.close(bid, ask, volume_total));
-        if w.trades == 0 {
-            report.quiet_windows += 1;
-        }
-    }
-
+    let counts = agg.counts();
+    report.depth_applied = counts.depth_applied;
+    report.trades = counts.trades;
+    report.quiet_windows = counts.quiet_windows;
     report.ticks = ticks.len() as u64;
     Ok((ticks, report))
 }
@@ -226,68 +174,6 @@ enum EventKind {
     Depth(Box<oq_l2feed::depth::DepthUpdate>),
     Trade(oq_l2feed::venue::Trade),
     Gap,
-}
-
-struct Window {
-    start: i64,
-    last_local: i64,
-    last: i64,
-    high: i64,
-    low: i64,
-    trades: u64,
-}
-
-impl Window {
-    fn new(start: i64) -> Self {
-        Self {
-            start,
-            last_local: start,
-            last: 0,
-            high: 0,
-            low: 0,
-            trades: 0,
-        }
-    }
-
-    /// Fold a trade into this window's extremes.
-    ///
-    /// `low` starts at zero meaning "unset" rather than "zero price", so
-    /// the first trade seeds it instead of losing to it.
-    fn observe_trade(&mut self, price: i64) {
-        self.last = price;
-        if self.trades == 0 {
-            self.high = price;
-            self.low = price;
-        } else {
-            self.high = self.high.max(price);
-            self.low = self.low.min(price);
-        }
-        self.trades += 1;
-    }
-
-    /// Close the window, reading top of book at the moment it ends.
-    ///
-    /// The book is passed in rather than accumulated in the window
-    /// because it is not a property of the window: it is state that
-    /// persists across them. Recording it only when a depth update
-    /// happened to land inside a window reported `bid = ask = 0` for
-    /// every other one, and the engine reads zero as "unknown" and falls
-    /// back to trade prices — so a window with trades and no depth
-    /// update quietly lost the quote it could have had.
-    fn close(&self, bid: i64, ask: i64, volume_total: i64) -> Tick {
-        Tick {
-            stamp: Stamp {
-                exch: Nanos(self.start),
-                local: Nanos(self.last_local),
-            },
-            last: PriceTicks(self.last),
-            high: PriceTicks(self.high),
-            low: PriceTicks(self.low),
-            bid: PriceTicks(bid),
-            ask: PriceTicks(ask),
-            volume: QtyLots(volume_total),
-        }
-    }
 }
 
 #[cfg(test)]
