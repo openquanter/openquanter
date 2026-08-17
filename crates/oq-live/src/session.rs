@@ -22,6 +22,7 @@ use oq_risk::{AccountState, Breach, Decision, Permit, ProposedOrder, RiskGate};
 use oq_types::{Instrument, Nanos, PriceTicks, Side};
 
 use crate::book::{Book, Position};
+use crate::latency::Latency;
 use crate::record::{OutcomeTag, Record};
 
 /// Why a session would not start.
@@ -117,6 +118,16 @@ impl Submission {
 
 /// A running trading process.
 pub struct Session<E: Execution> {
+    /// Time from the journal flush returning to the client being called.
+    ///
+    /// The in-process segment of what G6 asks for. The gate names the
+    /// socket write as its far boundary and the HTTP client does not
+    /// report that instant — connect, write and read happen inside one
+    /// call — so measuring the call would give a number dominated by the
+    /// venue's round trip, tens of milliseconds against a hundred
+    /// microsecond budget. This measures the part this project controls,
+    /// and G6 stays uncertified until the client boundary is instrumented.
+    submit_latency: Latency,
     /// Where decisions are written, if anywhere.
     ///
     /// Optional because a session without one is still a working session
@@ -196,6 +207,7 @@ impl<E: Execution> Session<E> {
         );
 
         Ok(Self {
+            submit_latency: Latency::new(),
             journal: None,
             venue,
             gate,
@@ -267,6 +279,12 @@ impl<E: Execution> Session<E> {
         });
     }
 
+    /// The in-process submit latency, so far.
+    #[must_use]
+    pub const fn submit_latency(&self) -> &Latency {
+        &self.submit_latency
+    }
+
     /// The gate, for tripping the kill switch from outside the loop.
     #[must_use]
     pub const fn gate(&self) -> &RiskGate {
@@ -325,6 +343,7 @@ impl<E: Execution> Session<E> {
             position_side: leg_for(self.position_side, approved.side, approved.reduce_only),
         };
         // Before the venue, not after. See `journalling`.
+        let journalled_at = std::time::Instant::now();
         self.write(&Record::Submitted {
             at: now,
             client_id: client_id.clone(),
@@ -333,6 +352,10 @@ impl<E: Execution> Session<E> {
             qty: order.qty,
             reduce_only: order.reduce_only,
         });
+        // Measured here: everything this process did between the record
+        // being durable and the client being handed the order.
+        self.submit_latency
+            .record(u64::try_from(journalled_at.elapsed().as_nanos()).unwrap_or(u64::MAX));
         let placed = self.venue.place(&order, &self.instrument);
         let (tag, detail) = match &placed {
             Placed::Accepted(a) => (OutcomeTag::Accepted, a.status.clone()),
