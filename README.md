@@ -2,6 +2,16 @@
 
 **Quantitative trading components in Rust. Take the whole engine, or one crate.**
 
+> ### Every cent between a backtest and the live run, accounted for.
+>
+> **P&L you cannot explain is not P&L.**
+>
+> The gap decomposes into slippage, queue position, funding, latency and fee
+> tier. What will not decompose is recorded as the **unexplained residual** —
+> and that number is this project's report card.
+>
+> This is the aim, not the state. How far off, see [Status](#status).
+
 [English](README.md) · [中文](README.zh-CN.md)
 
 > ⚠️ Early development. APIs are unstable before 2.0. Not financial advice; use at your own risk.
@@ -209,10 +219,23 @@ user data stream, and cancels it. That run is the evidence for everything
 claimed above, and it found a defect no unit test could — a price with the
 right number of decimal places that was not a multiple of the tick size.
 
-What remains unbuilt is the assembly. **Nothing composes the gate, the
-order path and the stream into a running process** — that is `oq-live`,
-and it does not exist. So the framework can trade; it does not yet have a
-process that trades.
+**The assembly now exists**: `oq-live` composes market data, the strategy,
+the risk gate and the order path into one process.
+
+**The attribution chain does not**, and that is the distance between the
+aim at the top of this page and where the code stands. The live process
+depends on neither `oq-core` nor `oq-journal`: what it shares with the
+backtest is the strategy and the matching types (`oq-strategy` →
+`oq-engine`), **not the kernel, the ledger or the margin model**. The
+consequence is concrete — live decisions are not journalled, so there is
+nothing to replay; and with nothing to replay, a live run cannot be put
+back through the kernel and diffed fill by fill to say where the gap came
+from.
+
+So "every cent accounted for" currently accounts for **none of them**.
+What is missing is wiring rather than invention: `oq-journal` has
+`replay()`, `oq-core` has `sequencer::replay()`, and both are tested.
+**The parts are there; they are not connected.**
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, not the L2 fidelity
