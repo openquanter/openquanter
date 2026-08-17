@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "openquanter"
+description = "Evaluate a backtest you already have: deflated Sharpe ratio and probability of backtest overfitting"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "OpenQuanter" }]
+keywords = ["trading", "quant", "backtesting", "overfitting", "sharpe"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/openquanter/openquanter"
+Repository = "https://github.com/openquanter/openquanter"
+
+[tool.maturin]
+module-name = "openquanter"
+features = ["extension-module"]

@@ -1,5 +1,29 @@
 [workspace]
 resolver = "3"
+# Everything except the Python binding. Building the engine must not
+# require a Python interpreter — D16's third cost — so `cargo build` and
+# `cargo test` skip `oq-py`, and CI builds it explicitly.
+default-members = [
+    "crates/oq-backtest",
+    "crates/oq-cli",
+    "crates/oq-core",
+    "crates/oq-data",
+    "crates/oq-engine",
+    "crates/oq-examples",
+    "crates/oq-gateway",
+    "crates/oq-hash",
+    "crates/oq-ingest",
+    "crates/oq-journal",
+    "crates/oq-l2feed",
+    "crates/oq-live",
+    "crates/oq-margin",
+    "crates/oq-parity",
+    "crates/oq-risk",
+    "crates/oq-sim",
+    "crates/oq-stats",
+    "crates/oq-strategy",
+    "crates/oq-types",
+]
 members = [
     "crates/oq-backtest",
     "crates/oq-cli",
@@ -14,6 +38,7 @@ members = [
     "crates/oq-live",
     "crates/oq-margin",
     "crates/oq-parity",
+    "crates/oq-py",
     "crates/oq-risk",
     "crates/oq-sim",
     "crates/oq-stats",
@@ -48,6 +73,7 @@ oq-l2feed = { path = "crates/oq-l2feed", version = "2.0.0-alpha.1" }
 oq-live = { path = "crates/oq-live", version = "2.0.0-alpha.1" }
 oq-margin = { path = "crates/oq-margin", version = "2.0.0-alpha.1" }
 oq-parity = { path = "crates/oq-parity", version = "2.0.0-alpha.1" }
+oq-py = { path = "crates/oq-py", version = "2.0.0-alpha.1" }
 oq-risk = { path = "crates/oq-risk", version = "2.0.0-alpha.1" }
 oq-sim = { path = "crates/oq-sim", version = "2.0.0-alpha.1" }
 oq-stats = { path = "crates/oq-stats", version = "2.0.0-alpha.1" }
