@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 oq-gateway.workspace = true
+oq-ingest.workspace = true
+oq-l2feed.workspace = true
 oq-risk.workspace = true
 oq-strategy.workspace = true
 oq-types.workspace = true
