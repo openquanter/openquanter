@@ -66,6 +66,8 @@ OPTIONS:
     --max-position <LOTS>  Largest position [default: 1]
     --max-notional <USDT>  Largest order notional [default: 200]
     --band-bps <BPS>       How far a limit may sit from the mark [default: 3000]
+    --journal <PATH>       Where to record decisions [default: oq-trade.oqj]
+    --no-journal           Trade without recording. Nothing can be replayed
     --adopt-existing       Start beside a position the venue already holds
     --live                 Trade with real money; needs OQ_ALLOW_LIVE=i-understand
     --help
@@ -322,6 +324,9 @@ fn main() -> ExitCode {
             println!("adopting         {} {} {}", p.symbol, p.side, p.amount);
         }
     }
+    let journal_path = value("--journal").unwrap_or_else(|| "oq-trade.oqj".to_string());
+    let no_journal = args.iter().any(|a| a == "--no-journal");
+
     let session = match Session::start(
         venue,
         RiskGate::new(limits),
@@ -337,6 +342,25 @@ fn main() -> ExitCode {
         }
     };
     println!("startup          the venue agrees with what this process expects");
+
+    // Recording is the default. A run that cannot be replayed cannot be
+    // attributed, and attribution is the thing the live path exists to
+    // eventually provide — so not recording has to be asked for.
+    let session = if no_journal {
+        println!("journal          off, by request; nothing here can be replayed");
+        session
+    } else {
+        match oq_journal::Writer::open(&journal_path, oq_journal::SyncPolicy::EveryRecordNoFsync) {
+            Ok(w) => {
+                println!("journal          {journal_path}");
+                session.journalling(w)
+            }
+            Err(e) => {
+                eprintln!("journal          FAILED to open {journal_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
 
     let stream = match session.venue().open_user_stream() {
         Ok(s) => s,
@@ -422,6 +446,7 @@ fn main() -> ExitCode {
                     };
                     if let Some(tick) = closed {
                         ticks += 1;
+                        trader.record_tick(&tick);
                         let ctx = Context {
                             tick,
                             position: QtyLots(0),
@@ -517,6 +542,7 @@ trait TraderLike {
     fn working(&self) -> u32;
     fn duplicates(&self) -> u64;
     fn foreign(&self) -> u64;
+    fn record_tick(&mut self, tick: &oq_engine::Tick);
     fn cancel_all(&mut self, symbol: &str);
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
     fn reconcile(&mut self, symbol: &str);
@@ -542,6 +568,9 @@ impl<S: Strategy> TraderLike for Trader<S, Binance> {
     }
     fn foreign(&self) -> u64 {
         self.session().book().foreign()
+    }
+    fn record_tick(&mut self, tick: &oq_engine::Tick) {
+        self.session_mut().record_tick(tick);
     }
     fn cancel_all(&mut self, _symbol: &str) {
         for id in self

@@ -1,0 +1,241 @@
+//! The record exists before the order does.
+//!
+//! That ordering is the only reason a crash is recoverable. Sending first
+//! and recording after leaves, on a crash in between, a live order whose
+//! client id was never written — and the client id is the one handle that
+//! could ask the venue what happened. Recording first leaves a record
+//! with no outcome beside it, which is a placement whose answer never
+//! arrived: the same question `Submission` answers after a timeout,
+//! asked after a restart.
+//!
+//! These tests read the journal back rather than trusting the calls, and
+//! the venue used here refuses to answer until it has been able to see
+//! that the record is already on disk.
+
+use std::cell::RefCell;
+
+use oq_gateway::{Execution, NewOrder, OrderAck, Placed, PositionSide, VenueError};
+use oq_journal::{Reader, SyncPolicy, Writer};
+use oq_live::record::{OutcomeTag, Record, kind};
+use oq_live::{Session, SessionConfig};
+use oq_risk::{Limits, ProposedOrder, RiskGate};
+use oq_types::{Cash, Instrument, Nanos, PriceTicks, QtyLots, Ratio, Side};
+
+/// A venue that reads the journal at the moment it is asked to place an
+/// order, so a test can assert what was already durable by then.
+struct Watching {
+    journal: std::path::PathBuf,
+    /// Kinds present in the journal when `place` was called.
+    seen_at_place: RefCell<Vec<u16>>,
+}
+
+impl Execution for Watching {
+    fn place(&self, order: &NewOrder, _i: &Instrument) -> Placed {
+        let kinds = Reader::open(&self.journal)
+            .and_then(|r| r.replay())
+            .map(|r| r.since(0).map(|f| f.kind).collect::<Vec<_>>())
+            .unwrap_or_default();
+        *self.seen_at_place.borrow_mut() = kinds;
+        Placed::Accepted(OrderAck {
+            venue_id: 1,
+            client_id: order.client_id.clone(),
+            status: "NEW".into(),
+            executed_qty: "0".into(),
+        })
+    }
+    fn cancel(&self, _s: &str, c: &str) -> Placed {
+        Placed::Accepted(OrderAck {
+            venue_id: 0,
+            client_id: c.into(),
+            status: "CANCELED".into(),
+            executed_qty: "0".into(),
+        })
+    }
+    fn order_status(&self, _s: &str, _c: &str) -> Result<Option<OrderAck>, VenueError> {
+        Ok(None)
+    }
+}
+
+fn limits() -> Limits {
+    Limits {
+        max_order_qty: QtyLots(100),
+        max_position_qty: QtyLots(1000),
+        max_order_notional: Cash(1_000_000 * oq_types::CASH_SCALE),
+        price_band: Ratio(500_000_000),
+        max_working: 10,
+        max_rate: 100,
+        rate_window: Nanos(1_000_000_000),
+    }
+}
+
+fn buy() -> ProposedOrder {
+    ProposedOrder {
+        side: Side::Buy,
+        limit_price: Some(PriceTicks(6_000_000)),
+        qty: QtyLots(1),
+        reduce_only: false,
+    }
+}
+
+fn temp(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("oq-live-journal-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir.join(name)
+}
+
+fn records(path: &std::path::Path) -> Vec<Record> {
+    let reader = Reader::open(path).expect("open");
+    let replay = reader.replay().expect("replay");
+    replay
+        .since(0)
+        .filter_map(|f| Record::decode(f.kind, &f.payload))
+        .collect()
+}
+
+#[test]
+fn the_order_is_on_disk_before_the_venue_is_called() {
+    let path = temp("before.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.submit(buy(), PriceTicks(6_000_000), Nanos(7));
+
+    let seen = s.venue().seen_at_place.borrow().clone();
+    assert!(
+        seen.contains(&kind::SUBMITTED),
+        "the submission must be durable before the venue is called; saw {seen:?}"
+    );
+    assert!(
+        !seen.contains(&kind::OUTCOME),
+        "the outcome cannot be known yet; saw {seen:?}"
+    );
+}
+
+#[test]
+fn a_run_writes_its_identity_the_order_and_the_outcome_in_that_order() {
+    let path = temp("sequence.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.submit(buy(), PriceTicks(6_000_000), Nanos(7));
+
+    let all = records(&path);
+    assert!(
+        matches!(all.first(), Some(Record::SessionStart { .. })),
+        "{all:?}"
+    );
+    let submitted = all
+        .iter()
+        .position(|r| matches!(r, Record::Submitted { .. }));
+    let outcome = all.iter().position(|r| matches!(r, Record::Outcome { .. }));
+    assert!(submitted < outcome, "submitted before outcome: {all:?}");
+    match &all[outcome.expect("an outcome")] {
+        Record::Outcome { tag, client_id, .. } => {
+            assert_eq!(*tag, OutcomeTag::Accepted);
+            assert!(client_id.starts_with("oq-"), "{client_id}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_refusal_is_recorded_and_no_order_is() {
+    // The gate said no, so nothing was sent — and a journal that showed a
+    // submission here would describe an order that never existed.
+    let path = temp("refused.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(Limits::closed()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.submit(buy(), PriceTicks(6_000_000), Nanos(7));
+
+    let all = records(&path);
+    assert!(
+        all.iter().any(|r| matches!(r, Record::Refused { .. })),
+        "the refusal is part of the record: {all:?}"
+    );
+    assert!(
+        !all.iter().any(|r| matches!(r, Record::Submitted { .. })),
+        "nothing was sent, so nothing may claim to have been: {all:?}"
+    );
+}
+
+#[test]
+fn a_session_without_a_journal_still_trades() {
+    // Journalling is a choice a caller makes, not a precondition. A
+    // session that required one would make the audit trail a reason not
+    // to trade.
+    let path = temp("unused.oqj");
+    let venue = Watching {
+        journal: path,
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts");
+    assert!(s.submit(buy(), PriceTicks(6_000_000), Nanos(7)).is_sent());
+}
