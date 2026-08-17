@@ -490,6 +490,55 @@ fn objects(body: &str) -> Vec<String> {
 /// different place depending on which one is looking is a value that gets
 /// silently truncated. `clientOrderId` is the field a reconciler matches
 /// on, so a truncated one is an order that appears to have vanished.
+/// The innermost JSON object containing `needle`.
+///
+/// Brace-matched outward from the match, honouring strings, so a
+/// contract's own definition is returned rather than the array or the
+/// document that holds it. [`objects`] cannot do this: exchangeInfo is a
+/// single top-level object, so splitting at depth zero yields the whole
+/// body, and reading a field from that returns whichever contract
+/// happens to be listed first — which is right for exactly one symbol
+/// and silently wrong for every other.
+fn object_containing(body: &str, needle: &str) -> Option<String> {
+    let at = body.find(needle)?;
+    let mut depth = 0i32;
+    let mut start = None;
+    for (i, c) in body[..at].char_indices().rev() {
+        match c {
+            '}' => depth += 1,
+            '{' if depth == 0 => {
+                start = Some(i);
+                break;
+            }
+            '{' => depth -= 1,
+            _ => {}
+        }
+    }
+    let start = start?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in body[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(body[start..=start + i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn raw_field(body: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let at = body.find(&needle)? + needle.len();
@@ -1352,13 +1401,19 @@ impl Binance {
     /// Anything the request reports, or a symbol the venue does not list.
     pub fn exchange_info(&self, symbol: &str) -> Result<String, VenueError> {
         let body = self.get_public("/fapi/v1/exchangeInfo", &format!("symbol={symbol}"))?;
-        objects(&body)
-            .into_iter()
-            .find(|o| field_str(o, "symbol").as_deref() == Some(symbol))
-            .ok_or_else(|| VenueError::Malformed {
+        // The `symbol=` filter is advisory: at least one deployment
+        // ignores it and answers with every contract it lists. So the
+        // one wanted has to be found inside the response rather than
+        // assumed to be the response, and `objects` cannot do it —
+        // exchangeInfo is a single top-level object, so splitting on
+        // depth zero yields the whole body and reading a field from that
+        // returns whichever contract happens to be listed first.
+        object_containing(&body, &format!("\"symbol\":\"{symbol}\"")).ok_or_else(|| {
+            VenueError::Malformed {
                 what: "symbol not listed",
                 body: symbol.to_string(),
-            })
+            }
+        })
     }
 
     /// Last traded price for one symbol, as raw JSON.
@@ -1448,5 +1503,60 @@ mod hedged_accounts {
             &Instrument::linear(2, 3),
         );
         assert!(q.contains("newOrderRespType=RESULT"), "{q}");
+    }
+}
+
+#[cfg(test)]
+mod listings {
+    use super::*;
+
+    /// The shape the venue actually answers with: one top-level object,
+    /// an array of contracts, each with a nested array of filters. The
+    /// wanted contract is deliberately not the first.
+    const BODY: &str = r#"{"timezone":"UTC","symbols":[
+      {"symbol":"BTCUSDT","pricePrecision":2,"quantityPrecision":3,
+       "filters":[{"filterType":"PRICE_FILTER","tickSize":"0.10"},
+                  {"filterType":"LOT_SIZE","stepSize":"0.001"}]},
+      {"symbol":"ETHUSDT","pricePrecision":2,"quantityPrecision":4,
+       "filters":[{"filterType":"PRICE_FILTER","tickSize":"0.01"},
+                  {"filterType":"LOT_SIZE","stepSize":"0.0001"}]}
+    ]}"#;
+
+    #[test]
+    fn a_contract_that_is_not_the_first_is_still_found() {
+        // The defect this replaces answered with the first contract for
+        // every question, so it was right for one symbol and silently
+        // wrong for the other six hundred.
+        let eth = object_containing(BODY, r#""symbol":"ETHUSDT""#).expect("listed");
+        assert_eq!(field_str(&eth, "symbol").as_deref(), Some("ETHUSDT"));
+        assert_eq!(field_i64(&eth, "quantityPrecision"), Some(4));
+        assert!(
+            eth.contains("0.0001"),
+            "its own filters came with it: {eth}"
+        );
+        assert!(!eth.contains("BTCUSDT"), "and only its own: {eth}");
+    }
+
+    #[test]
+    fn the_first_contract_is_still_found_correctly() {
+        let btc = object_containing(BODY, r#""symbol":"BTCUSDT""#).expect("listed");
+        assert_eq!(field_i64(&btc, "quantityPrecision"), Some(3));
+        assert!(!btc.contains("ETHUSDT"), "{btc}");
+    }
+
+    #[test]
+    fn a_contract_the_venue_does_not_list_is_none() {
+        assert!(object_containing(BODY, r#""symbol":"NOTLISTED""#).is_none());
+    }
+
+    #[test]
+    fn a_brace_inside_a_string_does_not_close_the_object_early() {
+        let body = r#"{"a":[{"symbol":"X","note":"has a } inside","v":1}]}"#;
+        let x = object_containing(body, r#""symbol":"X""#).expect("found");
+        assert_eq!(
+            field_i64(&x, "v"),
+            Some(1),
+            "the object ran to its real end: {x}"
+        );
     }
 }

@@ -106,6 +106,14 @@ pub struct SessionConfig {
     pub id_prefix: String,
 }
 
+impl Submission {
+    /// Whether an order reached the venue.
+    #[must_use]
+    pub const fn is_sent(&self) -> bool {
+        matches!(self, Self::Sent(_))
+    }
+}
+
 /// A running trading process.
 pub struct Session<E: Execution> {
     venue: E,
@@ -204,7 +212,11 @@ impl<E: Execution> Session<E> {
     /// without a permit because the permit is what carries the order.
     pub fn submit(&mut self, order: ProposedOrder, mark: PriceTicks, now: Nanos) -> Submission {
         let account = AccountState {
-            position: oq_types::QtyLots(0),
+            // The position the venue last confirmed, not zero. A limit
+            // compared against a hardcoded zero can never fire, which
+            // makes the position cap decoration — the exact failure the
+            // gate's own documentation warns about.
+            position: self.book.net_lots(&self.symbol, self.instrument.qty_scale),
             mark,
             working: self.book.working(),
         };

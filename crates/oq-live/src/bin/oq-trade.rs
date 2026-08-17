@@ -15,6 +15,16 @@
 //! well. Two independent gestures, because one is a flag somebody can
 //! leave in a shell history and press up-arrow into.
 //!
+//! # An existing position has to be acknowledged, not assumed
+//!
+//! By default any open position stops the run, because risk limits
+//! computed against a picture that is already wrong are not limits.
+//! `--adopt-existing` is how an operator says they know: it declares
+//! whatever the venue holds and starts beside it, and the gate is then
+//! shown that position rather than a zero. The flag exists so the
+//! acknowledgement is a deliberate act; the check exists so that
+//! forgetting is not silent.
+//!
 //! # The strategies here are not strategies
 //!
 //! `observe` never trades: it proves the whole loop — connection,
@@ -56,6 +66,7 @@ OPTIONS:
     --max-position <LOTS>  Largest position [default: 1]
     --max-notional <USDT>  Largest order notional [default: 200]
     --band-bps <BPS>       How far a limit may sit from the mark [default: 3000]
+    --adopt-existing       Start beside a position the venue already holds
     --live                 Trade with real money; needs OQ_ALLOW_LIVE=i-understand
     --help
 ";
@@ -250,11 +261,29 @@ fn main() -> ExitCode {
         id_prefix: format!("oq{}", std::process::id()),
     };
 
-    // Nothing is declared, so any position at all stops the run. That
-    // is the strict reading on purpose: this binary is for a clean
-    // account, and an operator who wants to trade beside an existing
-    // position should say so rather than have it assumed.
-    let expected: Vec<Position> = Vec::new();
+    // Nothing is declared unless the operator says otherwise, so any
+    // position at all stops the run. `--adopt-existing` is that saying:
+    // it declares what the venue holds, and the gate is then shown that
+    // position rather than a zero.
+    let adopt = args.iter().any(|a| a == "--adopt-existing");
+    let expected: Vec<Position> = if adopt {
+        positions
+            .iter()
+            .filter(|p| p.amount != 0.0)
+            .map(|p| Position {
+                symbol: p.symbol.clone(),
+                side: p.position_side.clone(),
+                amount: p.amount,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if adopt && !expected.is_empty() {
+        for p in &expected {
+            println!("adopting         {} {} {}", p.symbol, p.side, p.amount);
+        }
+    }
     let session = match Session::start(
         venue,
         RiskGate::new(limits),
