@@ -19,9 +19,29 @@
 #                       aliases — belong here, NOT in this script. A
 #                       public deny-list of your own host names is itself
 #                       a disclosure.
+#
+#                       The same reasoning covers a private strategy's
+#                       identifiers: its parameter names, class names and
+#                       characteristic constants are among the things the
+#                       public/private split exists to keep. Listing them
+#                       in a public script to guard them would publish
+#                       exactly what the guard is for. They go here.
+#
 #   .secretscan-allow   regexes for known false positives.
 #
 # Both files are git-ignored.
+#
+# Local patterns are read from two places, in this order:
+#
+#   $(git rev-parse --git-common-dir)/secretscan-local
+#       Lives inside .git, so it is shared by every worktree of the clone
+#       and cannot be committed even deliberately — nothing under .git is
+#       a path git will add. Prefer this one.
+#   .secretscan-local
+#       At the repository root. Git-ignored, but per-worktree, and one
+#       `git add -f` away from being published — which for a file whose
+#       whole content is the list of things that must not be published is
+#       a poor place to keep it.
 
 set -uo pipefail
 
@@ -66,12 +86,23 @@ TREE_ONLY_PATTERNS=(
   '/home/(ubuntu|ec2-user|admin)/'
 )
 
-if [ -f .secretscan-local ]; then
+load_local_patterns() {
+  local file="$1" count=0 line
+  [ -f "$file" ] || return 0
   while IFS= read -r line; do
-    [ -n "$line" ] && [[ "$line" != \#* ]] && PATTERNS+=("$line")
-  done < .secretscan-local
-  echo "loaded $(grep -cvE '^\s*(#|$)' .secretscan-local) local pattern(s)"
-fi
+    [ -z "$line" ] && continue
+    [[ "$line" == \#* ]] && continue
+    PATTERNS+=("$line")
+    count=$((count + 1))
+  done < "$file"
+  # The count, never the patterns. Echoing them would put the private
+  # list into every CI log that runs this.
+  [ "$count" -gt 0 ] && echo "loaded $count local pattern(s) from ${file##*/}"
+  return 0
+}
+
+load_local_patterns "$(git rev-parse --git-common-dir)/secretscan-local"
+load_local_patterns .secretscan-local
 
 self_test() {
   # Each sample must be flagged by at least one pattern. A scanner that
@@ -121,6 +152,25 @@ self_test() {
       failures=$((failures + 1))
     fi
   done
+
+  # A loader that silently reads nothing is the same failure as a
+  # pattern that silently matches nothing, and it fails in the same
+  # direction: a clean report from a scanner that never loaded the list
+  # of private terms is indistinguishable from a clean repository. The
+  # probe runs in a subshell so it cannot leave anything in PATTERNS.
+  local added
+  added=$(
+    probe="$(mktemp)"
+    printf '# a comment\n\nZZ_LOADER_PROBE_[0-9]+\n' > "$probe"
+    before=${#PATTERNS[@]}
+    load_local_patterns "$probe" > /dev/null
+    echo $(( ${#PATTERNS[@]} - before ))
+    rm -f "$probe"
+  )
+  if [ "$added" != "1" ]; then
+    echo "SELF-TEST FAIL: local pattern loader took $added of 1 pattern"
+    failures=$((failures + 1))
+  fi
 
   if [ "$failures" -gt 0 ]; then
     echo "$failures sample(s) were not detected"
