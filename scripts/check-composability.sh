@@ -47,6 +47,11 @@ BUDGETS=(
   # would renumber every scenario, and the seed in a bug report would
   # stop meaning what it meant.
   "oq-sim:0"
+  # The Python binding. The only crate here allowed an interpreter in its
+  # tree, and the only one excluded from the workspace's default members —
+  # building the engine must not require Python, which is D16's third cost
+  # and is enforced by that exclusion rather than by intention.
+  "oq-py:20"
   "oq-stats:0"
   # The strategy contract. Zero, and it has to stay zero for a reason
   # the other zeros do not share: this is the crate a user writes
