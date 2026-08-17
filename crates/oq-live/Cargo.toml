@@ -8,15 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+oq-engine.workspace = true
 oq-gateway.workspace = true
 oq-ingest.workspace = true
+oq-journal.workspace = true
 oq-l2feed.workspace = true
 oq-risk.workspace = true
 oq-strategy.workspace = true
 oq-types.workspace = true
-
-[dev-dependencies]
-oq-engine.workspace = true
 
 [lints]
 workspace = true

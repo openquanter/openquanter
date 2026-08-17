@@ -22,6 +22,7 @@ use oq_risk::{AccountState, Breach, Decision, Permit, ProposedOrder, RiskGate};
 use oq_types::{Instrument, Nanos, PriceTicks, Side};
 
 use crate::book::{Book, Position};
+use crate::record::{OutcomeTag, Record};
 
 /// Why a session would not start.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +117,13 @@ impl Submission {
 
 /// A running trading process.
 pub struct Session<E: Execution> {
+    /// Where decisions are written, if anywhere.
+    ///
+    /// Optional because a session without one is still a working session
+    /// — it simply cannot be replayed or attributed afterwards, and that
+    /// is a choice a caller should have to make rather than a default it
+    /// falls into. `oq-trade` opens one unless told not to.
+    journal: Option<oq_journal::Writer>,
     venue: E,
     gate: RiskGate,
     book: Book,
@@ -188,6 +196,7 @@ impl<E: Execution> Session<E> {
         );
 
         Ok(Self {
+            journal: None,
             venue,
             gate,
             book,
@@ -197,6 +206,65 @@ impl<E: Execution> Session<E> {
             sequence: 0,
             prefix: config.id_prefix,
         })
+    }
+
+    /// Write decisions to `journal` from here on.
+    ///
+    /// Records go down **before** the venue is called, which is the
+    /// ordering `oq-core` already enforces for its own path. Sending
+    /// first and recording after leaves, on a crash in between, a live
+    /// order this process's own journal has never heard of — and no
+    /// recovery is possible, because the client id that could ask the
+    /// venue about it was never written. Recording first leaves the
+    /// opposite: a record with no outcome beside it, which is exactly a
+    /// placement whose answer never arrived, asked after a restart
+    /// instead of after a timeout.
+    #[must_use]
+    pub fn journalling(mut self, journal: oq_journal::Writer) -> Self {
+        let start = Record::SessionStart {
+            prefix: self.prefix.clone(),
+            symbol: self.symbol.clone(),
+            price_scale: self.instrument.price_scale,
+            qty_scale: self.instrument.qty_scale,
+        };
+        self.journal = Some(journal);
+        self.write(&start);
+        self
+    }
+
+    /// Append one record, if journalling, flushing before returning.
+    ///
+    /// Failures are reported and do not stop the session. A journal that
+    /// cannot be written is a lost audit trail; refusing to trade
+    /// because of it would turn a recording problem into a trading
+    /// outage, and the venue does not care either way. The count of
+    /// failures is what a reader should look at.
+    fn write(&mut self, record: &Record) {
+        let Some(journal) = self.journal.as_mut() else {
+            return;
+        };
+        let payload = record.encode();
+        if let Err(e) = journal.append(record.kind(), &payload) {
+            eprintln!("journal: could not append {:?}: {e}", record.kind());
+            return;
+        }
+        // Flushed here rather than on drop: the whole point is that the
+        // record exists before the order does, and a record sitting in a
+        // buffer does not exist to anything that reads the file.
+        if let Err(e) = journal.flush() {
+            eprintln!("journal: could not flush: {e}");
+        }
+    }
+
+    /// A tick the strategy is about to see.
+    pub fn record_tick(&mut self, tick: &oq_engine::Tick) {
+        self.write(&Record::Tick {
+            at: tick.stamp.exch,
+            last: tick.last,
+            bid: tick.bid,
+            ask: tick.ask,
+            volume: tick.volume,
+        });
     }
 
     /// The gate, for tripping the kill switch from outside the loop.
@@ -226,13 +294,19 @@ impl<E: Execution> Session<E> {
         };
         let permit = match self.gate.check(&order, &account, &self.instrument, now) {
             Decision::Permit(p) => p,
-            Decision::Refuse(b) => return Submission::Refused(b),
+            Decision::Refuse(b) => {
+                self.write(&Record::Refused {
+                    at: now,
+                    breach: format!("{b:?}"),
+                });
+                return Submission::Refused(b);
+            }
         };
-        self.send(&permit)
+        self.send(&permit, now)
     }
 
     /// Turn a permit into an order and send it.
-    fn send(&mut self, permit: &Permit) -> Submission {
+    fn send(&mut self, permit: &Permit, now: Nanos) -> Submission {
         let approved = permit.order();
         self.sequence += 1;
         let client_id = format!("{}-{}", self.prefix, self.sequence);
@@ -250,7 +324,28 @@ impl<E: Execution> Session<E> {
             reduce_only: approved.reduce_only && !self.position_side.is_hedged(),
             position_side: leg_for(self.position_side, approved.side, approved.reduce_only),
         };
-        match self.venue.place(&order, &self.instrument) {
+        // Before the venue, not after. See `journalling`.
+        self.write(&Record::Submitted {
+            at: now,
+            client_id: client_id.clone(),
+            side: order.side,
+            limit_price: order.limit_price.unwrap_or(PriceTicks(0)),
+            qty: order.qty,
+            reduce_only: order.reduce_only,
+        });
+        let placed = self.venue.place(&order, &self.instrument);
+        let (tag, detail) = match &placed {
+            Placed::Accepted(a) => (OutcomeTag::Accepted, a.status.clone()),
+            Placed::Rejected(r) => (OutcomeTag::Rejected, r.message.clone()),
+            Placed::Unknown(u) => (OutcomeTag::Unknown, u.reason.clone()),
+        };
+        self.write(&Record::Outcome {
+            at: now,
+            client_id: client_id.clone(),
+            tag,
+            detail,
+        });
+        match placed {
             Placed::Accepted(a) => Submission::Sent(a.client_id),
             Placed::Rejected(r) => Submission::Rejected(r.message),
             // Ask, using the id chosen before sending. This is the
