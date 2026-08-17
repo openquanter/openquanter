@@ -317,7 +317,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::super::binance::BinancePerp.event_time_ns(payload),
+            super::super::binance::BinancePerp::new().event_time_ns(payload),
             None,
             "the other venue's reader must not silently half-work on this shape"
         );
@@ -391,11 +391,13 @@ mod tests {
         assert_eq!(OkxSwap.trade_ids(okx), vec![2_836_635_170]);
         assert!(OkxSwap.trade_ids(binance).is_empty());
         assert_eq!(
-            super::super::binance::BinancePerp.trade_ids(binance),
+            super::super::binance::BinancePerp::new().trade_ids(binance),
             vec![12345]
         );
         assert!(
-            super::super::binance::BinancePerp.trade_ids(okx).is_empty(),
+            super::super::binance::BinancePerp::new()
+                .trade_ids(okx)
+                .is_empty(),
             "a quoted id must not be read as a bare one"
         );
     }
