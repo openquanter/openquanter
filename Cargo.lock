@@ -380,6 +380,7 @@ dependencies = [
  "oq-core",
  "oq-engine",
  "oq-margin",
+ "oq-stats",
  "oq-strategy",
  "oq-types",
 ]
