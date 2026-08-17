@@ -7,6 +7,7 @@ document links to its counterpart at the top.
 
 | Document | Contents |
 |---|---|
+| [**Why OpenQuanter exists**](WHY.md) · [中文](WHY.zh-CN.md) | **What it is for, who for, the wall a predecessor hit after years live, and where it stands** |
 | [Quickstart](QUICKSTART.md) · [中文](QUICKSTART.zh-CN.md) | Clone to a running backtest, three worked examples, how to write your own strategy |
 | [Versioning](VERSIONING.md) · [中文](VERSIONING.zh-CN.md) | One version across the workspace, why it starts at 2, and what each stage promises |
 | [Requirements Specification](REQUIREMENTS.md) · [中文](REQUIREMENTS.zh-CN.md) | Positioning, users, functional and non-functional requirements, acceptance goals, fidelity ladder, non-goals |

@@ -136,6 +136,7 @@ deciding whether to use this now.
 
 | Document | Contents |
 |---|---|
+| [**Why OpenQuanter exists**](docs/WHY.md) | **What it is for, who for, and the wall a predecessor hit after years of live trading** |
 | [Requirements Specification](docs/REQUIREMENTS.md) | What the framework must do, and how acceptance is measured |
 | [Roadmap](docs/ROADMAP.md) | Milestones, entry triggers, exit gates, path to 2.0 |
 | [Implementation Plan](docs/IMPLEMENTATION.md) | Architecture, design decisions, crate map, task plan |
