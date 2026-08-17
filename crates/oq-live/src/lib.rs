@@ -40,12 +40,14 @@
 
 pub mod book;
 pub mod feed;
+pub mod record;
 pub mod session;
 pub mod supervisor;
 pub mod trader;
 
 pub use book::{Book, Position};
 pub use feed::{MarketData, Stream};
+pub use record::{OutcomeTag, Record};
 pub use session::{Session, SessionConfig, StartupRefusal, Submission};
 pub use supervisor::{Action, Supervisor, Timings};
 pub use trader::{Outcome, Trader};

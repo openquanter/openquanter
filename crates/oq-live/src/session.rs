@@ -19,7 +19,7 @@
 
 use oq_gateway::{Execution, NewOrder, Placed, PositionSide, PositionSnapshot, VenueError};
 use oq_risk::{AccountState, Breach, Decision, Permit, ProposedOrder, RiskGate};
-use oq_types::{Instrument, Nanos, PriceTicks};
+use oq_types::{Instrument, Nanos, PriceTicks, Side};
 
 use crate::book::{Book, Position};
 
@@ -170,7 +170,11 @@ impl<E: Execution> Session<E> {
             });
         }
 
-        let mut book = Book::new();
+        // Scoped to this process's own client ids: the account stream
+        // carries every order the account places, including another
+        // system's, and counting those would let them consume this
+        // process's limits.
+        let mut book = Book::owning(&config.id_prefix);
         book.adopt(
             venue_positions
                 .iter()
@@ -239,8 +243,12 @@ impl<E: Execution> Session<E> {
             qty: approved.qty,
             tif: oq_types::TimeInForce::GoodTilCancel,
             client_id: client_id.clone(),
+            // On a one-way account the flag is how a close is expressed.
+            // On a hedged one the venue refuses the flag and expects the
+            // leg to be named instead, so the flag is dropped and the leg
+            // carries the meaning.
             reduce_only: approved.reduce_only && !self.position_side.is_hedged(),
-            position_side: self.position_side,
+            position_side: leg_for(self.position_side, approved.side, approved.reduce_only),
         };
         match self.venue.place(&order, &self.instrument) {
             Placed::Accepted(a) => Submission::Sent(a.client_id),
@@ -296,6 +304,38 @@ impl<E: Execution> Session<E> {
     #[must_use]
     pub const fn venue(&self) -> &E {
         &self.venue
+    }
+}
+
+/// Which leg an order belongs to on a hedged account.
+///
+/// The mapping that a fixed leg per session gets wrong, and gets wrong in
+/// the worst available direction. A hedged venue refuses `reduceOnly` and
+/// expects the leg to be named, so with the leg pinned to one value a
+/// strategy's close became an open on that leg: an exit that increased
+/// the position instead of reducing it.
+///
+/// The leg is decided by the direction and the intent together, which is
+/// how the venue reads it — `side` says what to do, `positionSide` says
+/// to which leg:
+///
+/// | intent | side | leg |
+/// |---|---|---|
+/// | open | buy | long |
+/// | open | sell | short |
+/// | close | sell | long — selling closes the long |
+/// | close | buy | short — buying closes the short |
+///
+/// A one-way account passes through unchanged: it has one position and
+/// names no leg.
+#[must_use]
+pub const fn leg_for(configured: PositionSide, side: Side, closing: bool) -> PositionSide {
+    if !configured.is_hedged() {
+        return configured;
+    }
+    match (side, closing) {
+        (Side::Buy, false) | (Side::Sell, true) => PositionSide::Long,
+        (Side::Sell, false) | (Side::Buy, true) => PositionSide::Short,
     }
 }
 
