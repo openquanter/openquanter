@@ -12,6 +12,13 @@
 >
 > This is the aim, not the state. How far off, see [Status](#status).
 
+**Who it is for.** Levered traders with money at stake and someone to answer
+to; teams rewriting or migrating an engine who must prove the behaviour did
+not change; anyone who has to show results to a third party. **Not for** those
+wanting a large indicator library, dozens of broker integrations, or hosting —
+each of those conflicts directly with auditability. The reasoning and the
+trade-offs are in [Why OpenQuanter exists](docs/WHY.md).
+
 [English](README.md) · [中文](README.zh-CN.md)
 
 > ⚠️ Early development. APIs are unstable before 2.0. Not financial advice; use at your own risk.
@@ -105,6 +112,11 @@ years, not because it seemed like a good feature. And the first requirement was
 one specific need of one specific user, which is why this README leads with
 what the components are rather than with the migration that started them.
 
+The six concrete shapes that wall took — silent failure, an unattributable
+gap, two implementations diverging unnoticed, slowness that narrows research,
+conclusions that expire without saying so, and overfitting with no price tag —
+are in [Why OpenQuanter exists](docs/WHY.md).
+
 ### Design pillars
 
 These describe the architecture the project is being built towards. What
@@ -131,6 +143,11 @@ deciding whether to use this now.
   gym-style environments for RL, and sandboxed hooks for LLM-driven research.
 - **Overfitting statistics built in** — parameter sweeps report Deflated
   Sharpe Ratio and Probability of Backtest Overfitting by default.
+- **Gap attribution** — decompose the live/backtest difference into slippage,
+  queue position, funding, latency and fee tier, and report what will not
+  decompose as an **unexplained residual**. This is the aim at the top of the
+  page made concrete, and it is the **furthest away** of these pillars: it
+  requires the live process to journal its decisions, which it does not yet.
 
 ## Documentation
 
