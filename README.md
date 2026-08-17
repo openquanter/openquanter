@@ -212,13 +212,28 @@ above. The pillars section describes where this is going; this section
 describes where it is.
 
 **On live trading specifically,** because the pieces above make it easy to
-overstate. The order path has been exercised end to end against a real
-venue's testnet: `oq-order-check` synchronises the clock, reads the
-contract's precision and grid from that deployment, detects the account's
-position mode, places a limit order, sees the same order arrive on the
-user data stream, and cancels it. That run is the evidence for everything
-claimed above, and it found a defect no unit test could — a price with the
-right number of decimal places that was not a multiple of the tick size.
+overstate. The whole loop has run against a real venue's testnet.
+`oq-trade` reads the contract's precision, grid and order floor from that
+deployment, refuses to start beside a position it was not told about,
+connects market data and the account stream, folds ticks, hands them to a
+strategy, sends what the gate approved, watches the same order arrive on
+the account stream, cancels it, and sees the cancellation confirmed there
+too: 523 ticks, one order placed and withdrawn, no redelivered fills.
+
+Those runs are the evidence for everything claimed above, and each of them
+found something no unit test could reach — a price with the right number
+of decimal places that was not a multiple of the tick size; a risk gate
+handed a hardcoded position of zero, so its position cap could never fire;
+a contract lookup that returned whichever symbol the venue listed first,
+correct for one and silently wrong for six hundred; a read timeout
+reported as a lost connection, costing fourteen reconnections in two
+minutes on a market doing nothing; and an order below the venue's minimum,
+because knowing the precision and the grid is not knowing the floor.
+
+What has not happened is a strategy with an edge running unattended with
+money behind it. The two strategies that ship are deliberately not
+strategies: one never trades and exists to prove the loop, the other rests
+one order far from the market and withdraws it.
 
 **The assembly now exists**: `oq-live` composes market data, the strategy,
 the risk gate and the order path into one process.
