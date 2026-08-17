@@ -95,7 +95,10 @@ attribution, `oq-sim`, and the cutover playbook.
 
 **G6 is not merely unmet — by its own definition it is unmeasurable.** It
 asks for p99 latency from journal write to socket write, and the live path
-does not journal: `oq-live` depends on neither `oq-core` nor `oq-journal`,
+did not journal: `oq-live` now depends on `oq-journal` and writes in
+`record.rs`, so the starting timestamp exists. What is still missing is the
+instrumentation itself, and the kernel — `oq-live` depends on neither `oq-core`
+nor `oq-margin`,
 so there is no first timestamp to measure from. This is the same missing
 wire as the attribution item in M3's scope, which is why that item calls
 itself the first task of the milestone rather than the last.
@@ -245,9 +248,10 @@ not in the matching kernel.
   slippage, queue position, funding against model, latency, and fee tier, and
   reports what will not decompose as an **unexplained residual**. Its
   prerequisite is that the live process journals its decisions, which today it
-  does not: `oq-live` depends on neither `oq-core` nor `oq-journal`, so there is
-  no record to replay and therefore nothing to attribute against. Wiring that is
-  the first task of this milestone, not the last.
+  does now — `oq-live` depends on `oq-journal` and writes in `record.rs`. The
+  second is not met: `oq-live` still depends on neither `oq-core` nor
+  `oq-margin`, so there is a record to replay and nothing to replay it into.
+  Closing that is the first task of this milestone, not the last.
 - `oq-sim` at full strength: the entire scenario catalogue plus gateway fuzzing
   (disconnects, reordering, duplication, partial fills).
 - **Position-carrying cutover playbook**, rehearsed end-to-end.
