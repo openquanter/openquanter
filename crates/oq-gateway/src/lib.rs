@@ -1,13 +1,11 @@
-//! Reading an account at the venue.
+//! The account side of a venue: reading it, and sending to it.
 //!
-//! **This crate cannot place or cancel an order.** Not by convention —
-//! there is no code here that does it, and adding some is a change a
-//! reviewer sees. That boundary is the point: the first thing worth
-//! building against a live account is the ability to check what it
-//! actually holds, and that has to be usable long before anything is
-//! trusted to trade.
+//! Reads first, and for a long time reads only. The order path in
+//! [`exec`] and the socket in [`stream`] were added after the read path
+//! had run against a live account for weeks; until then this crate
+//! genuinely could not place an order, and that was the point.
 //!
-//! ## Why read-only first
+//! ## Why the read path came first
 //!
 //! A backtest engine that agrees with a reference over two years has
 //! shown it computes the right answer from a file. It has shown nothing
@@ -24,10 +22,16 @@
 //!
 //! ## What is here
 //!
-//! [`Credentials`] and request signing, and typed reads of the account:
-//! balance, positions, open orders, recent executions. Signing is
-//! HMAC-SHA256 over the query string, which is what Binance's USDT-M
-//! futures API specifies.
+//! [`Credentials`] and request signing; typed reads of the account —
+//! balance, positions, open orders, recent executions; the order path in
+//! [`exec`]; the user data socket in [`stream`]; and [`reconcile`] plus
+//! [`watch`], which compare what is held against what was expected.
+//! Signing is HMAC-SHA256 over the query string, which is what Binance's
+//! USDT-M futures API specifies.
+//!
+//! The reading half remains usable on its own. `oq-recon` is built from
+//! this crate and places nothing, which is what makes it safe to point at
+//! a production account that something else is trading.
 //!
 //! ## Naming
 //!

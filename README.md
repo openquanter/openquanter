@@ -255,20 +255,21 @@ one order far from the market and withdraws it.
 **The assembly now exists**: `oq-live` composes market data, the strategy,
 the risk gate and the order path into one process.
 
-**The attribution chain does not**, and that is the distance between the
-aim at the top of this page and where the code stands. The live process
-depends on neither `oq-core` nor `oq-journal`: what it shares with the
-backtest is the strategy and the matching types (`oq-strategy` →
-`oq-engine`), **not the kernel, the ledger or the margin model**. The
-consequence is concrete — live decisions are not journalled, so there is
-nothing to replay; and with nothing to replay, a live run cannot be put
-back through the kernel and diffed fill by fill to say where the gap came
-from.
+**The first half of the attribution chain is connected.** The live
+process now depends on `oq-journal` and writes through `record.rs`, so
+there is a record to replay.
 
-So "every cent accounted for" currently accounts for **none of them**.
-What is missing is wiring rather than invention: `oq-journal` has
-`replay()`, `oq-core` has `sequencer::replay()`, and both are tested.
-**The parts are there; they are not connected.**
+**The second half is not.** `oq-live` still depends on neither `oq-core`
+nor `oq-margin`: what it shares with the backtest is the strategy and the
+matching types (`oq-strategy` → `oq-engine`), **not the kernel, the
+ledger or the margin model**. So there is now something to replay and
+nothing to replay it into, and a live run still cannot be diffed fill by
+fill against what the kernel would have done.
+
+So "every cent accounted for" still accounts for **none of them** — but
+the gap is one link rather than two. `oq-core` has `sequencer::replay()`
+and it is tested. **What is missing is the wire between it and the live
+process.**
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, not the L2 fidelity
