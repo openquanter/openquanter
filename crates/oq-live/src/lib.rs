@@ -41,6 +41,7 @@
 pub mod book;
 pub mod feed;
 pub mod record;
+pub mod recovery;
 pub mod session;
 pub mod supervisor;
 pub mod trader;
@@ -48,6 +49,7 @@ pub mod trader;
 pub use book::{Book, Position};
 pub use feed::{MarketData, Stream};
 pub use record::{OutcomeTag, Record};
+pub use recovery::{InFlight, Recovered, Unaccounted, recover};
 pub use session::{Session, SessionConfig, StartupRefusal, Submission};
 pub use supervisor::{Action, Supervisor, Timings};
 pub use trader::{Outcome, Trader};
