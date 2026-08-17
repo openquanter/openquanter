@@ -85,11 +85,27 @@ impl Strategy for Observe {
     }
 }
 
-/// Places one order far from the market, then cancels it.
+/// Places an order far from the market, cancels it, waits, repeats.
+///
+/// Cyclic on purpose. A single pass proves the order path once; a long
+/// run of single passes proves it once and then watches an idle socket
+/// for an hour. Repeating exercises placement, the account stream, the
+/// cancel path and the id map continuously, and because every order rests
+/// far below the market and is withdrawn, the account never carries a
+/// position from it.
 struct Probe {
     placed: bool,
     cancelled: bool,
     ticks: u64,
+    /// Ticks to wait after a cancel before placing again.
+    idle_ticks: u64,
+    /// Tick count at the last cancel.
+    cancelled_at: u64,
+    /// Completed cycles, for the closing report.
+    cycles: u64,
+    /// Strategy-side id, bumped per cycle so a stale confirmation cannot
+    /// be mistaken for the current order's.
+    next_id: u64,
     /// How far below the market to rest, in parts per ten thousand.
     away_bps: i64,
     /// The contract, for sizing against its floor and its grid.
@@ -112,13 +128,22 @@ impl Strategy for Probe {
         if reference.0 <= 0 {
             return;
         }
+        // Rest a while after a cancel, so the run is a sequence of
+        // cycles rather than a tight loop against the venue's rate
+        // limit.
+        if self.cancelled && self.ticks.saturating_sub(self.cancelled_at) >= self.idle_ticks {
+            self.placed = false;
+            self.cancelled = false;
+            self.cycles += 1;
+            self.next_id += 1;
+        }
         if !self.placed {
             self.placed = true;
             let price = self.instrument.snap_price_down(PriceTicks(
                 reference.0 - reference.0 * self.away_bps / 10_000,
             ));
             out.push(Intent::Limit {
-                id: OrderId(1),
+                id: OrderId(self.next_id),
                 side: Side::Buy,
                 price,
                 qty: self
@@ -126,9 +151,10 @@ impl Strategy for Probe {
                     .snap_qty_up(smallest_allowed(&self.instrument, price)),
                 offset: Offset::Open,
             });
-        } else if !self.cancelled && self.ticks > 5 {
+        } else if !self.cancelled && self.ticks.saturating_sub(self.cancelled_at) > 5 {
             self.cancelled = true;
-            out.push(Intent::Cancel(OrderId(1)));
+            self.cancelled_at = self.ticks;
+            out.push(Intent::Cancel(OrderId(self.next_id)));
         }
     }
     fn name(&self) -> &str {
@@ -346,6 +372,10 @@ fn main() -> ExitCode {
                 placed: false,
                 cancelled: false,
                 ticks: 0,
+                idle_ticks: 30,
+                cancelled_at: 0,
+                cycles: 0,
+                next_id: 1,
                 away_bps: 2000,
                 instrument,
             },
@@ -363,6 +393,8 @@ fn main() -> ExitCode {
     println!();
 
     let mut ticks = 0_u64;
+    let mut sent = 0_u64;
+    let mut cancelled = 0_u64;
     let mut last_tick_report = Instant::now();
 
     while Instant::now() < deadline && !shutdown_requested() {
@@ -400,6 +432,11 @@ fn main() -> ExitCode {
                             working: trader.working() as usize,
                         };
                         for outcome in trader.on_tick(&ctx, now) {
+                            match &outcome {
+                                Outcome::Sent { .. } => sent += 1,
+                                Outcome::Cancelled { .. } => cancelled += 1,
+                                _ => {}
+                            }
                             report(&outcome);
                         }
                     }
@@ -456,6 +493,7 @@ fn main() -> ExitCode {
     let _ = trader.close_stream();
 
     println!("ticks            {ticks}");
+    println!("orders           {sent} placed, {cancelled} withdrawn");
     println!(
         "duplicates       {} redelivered fills discarded",
         trader.duplicates()
