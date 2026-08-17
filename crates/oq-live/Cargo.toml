@@ -1,0 +1,16 @@
+[package]
+name = "oq-live"
+version.workspace = true
+description = "Live process assembly for the OpenQuanter trading framework: startup reconciliation, stream supervision, and the only path that can send an order"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oq-gateway.workspace = true
+oq-risk.workspace = true
+oq-types.workspace = true
+
+[lints]
+workspace = true
