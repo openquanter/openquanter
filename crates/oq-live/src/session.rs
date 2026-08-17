@@ -170,7 +170,11 @@ impl<E: Execution> Session<E> {
             });
         }
 
-        let mut book = Book::new();
+        // Scoped to this process's own client ids: the account stream
+        // carries every order the account places, including another
+        // system's, and counting those would let them consume this
+        // process's limits.
+        let mut book = Book::owning(&config.id_prefix);
         book.adopt(
             venue_positions
                 .iter()

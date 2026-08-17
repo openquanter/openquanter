@@ -460,6 +460,13 @@ fn main() -> ExitCode {
         "duplicates       {} redelivered fills discarded",
         trader.duplicates()
     );
+    // Above zero means the account is shared. Worth reading here rather
+    // than inferring it later from a limit that filled up while this
+    // process placed nothing.
+    println!(
+        "other systems    {} events on this account belonged to something else",
+        trader.foreign()
+    );
     ExitCode::SUCCESS
 }
 
@@ -471,6 +478,7 @@ trait TraderLike {
     fn forget(&mut self, client_id: &str);
     fn working(&self) -> u32;
     fn duplicates(&self) -> u64;
+    fn foreign(&self) -> u64;
     fn cancel_all(&mut self, symbol: &str);
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
     fn reconcile(&mut self, symbol: &str);
@@ -493,6 +501,9 @@ impl<S: Strategy> TraderLike for Trader<S, Binance> {
     }
     fn duplicates(&self) -> u64 {
         self.session().book().duplicates()
+    }
+    fn foreign(&self) -> u64 {
+        self.session().book().foreign()
     }
     fn cancel_all(&mut self, _symbol: &str) {
         for id in self
