@@ -314,3 +314,77 @@ mod tests {
         assert!(a.flush().is_none());
     }
 }
+
+#[cfg(test)]
+mod batching {
+    use super::*;
+
+    const SEC: i64 = 1_000_000_000;
+
+    fn trade(price: i64, qty: i64) -> Trade {
+        Trade { price, qty }
+    }
+
+    /// Feed a sequence through one aggregator, in `chunks` pieces.
+    ///
+    /// The pieces are only a division of the calls; the aggregator is the
+    /// same one throughout, which is exactly what the hourly conversion
+    /// does with an hour as the piece.
+    fn run(events: &[(i64, i64, i64)], chunks: usize) -> Vec<Tick> {
+        let mut a = Aggregator::new(SEC).expect("positive window");
+        let mut out = Vec::new();
+        let size = events.len().div_ceil(chunks.max(1));
+        for chunk in events.chunks(size.max(1)) {
+            for (at, price, qty) in chunk {
+                out.extend(a.on_trade(*at, *at, &trade(*price, *qty)));
+            }
+        }
+        out.extend(a.flush());
+        out
+    }
+
+    #[test]
+    fn folding_in_batches_gives_exactly_what_folding_at_once_gives() {
+        // The invariant the hourly conversion rests on. If a batch
+        // boundary changed a single tick, the memory saving would have
+        // been bought with a different answer — and the difference would
+        // be invisible, because both outputs look like plausible ticks.
+        let events: Vec<(i64, i64, i64)> = (0..40)
+            .map(|i| (i * SEC / 3, 100 + i % 7, 1 + i % 3))
+            .collect();
+
+        let whole = run(&events, 1);
+        assert!(!whole.is_empty(), "the fixture produces ticks");
+        for chunks in [2, 3, 5, 8, 40] {
+            assert_eq!(
+                run(&events, chunks),
+                whole,
+                "{chunks} batches must equal one batch"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_boundary_inside_a_window_does_not_split_the_window() {
+        // Three trades in one second, cut between the second and third.
+        // A window closed at the boundary would report two ticks where
+        // the data has one, and its extremes would each be half right.
+        let events = [(0, 100, 1), (SEC / 2, 300, 1), (SEC / 2 + 1, 200, 1)];
+        let whole = run(&events, 1);
+        assert_eq!(whole.len(), 1, "one second, one tick");
+        assert_eq!(run(&events, 2), whole);
+        assert_eq!(run(&events, 3), whole);
+        assert_eq!(whole[0].high, PriceTicks(300));
+        assert_eq!(whole[0].low, PriceTicks(100));
+    }
+
+    #[test]
+    fn the_cumulative_volume_does_not_restart_at_a_boundary() {
+        // The failure a fresh aggregator per batch would cause, and the
+        // reason the aggregator is carried rather than recreated.
+        let events = [(0, 100, 5), (2 * SEC, 100, 3), (4 * SEC, 100, 2)];
+        let ticks = run(&events, 3);
+        let volumes: Vec<i64> = ticks.iter().map(|t| t.volume.0).collect();
+        assert_eq!(volumes, vec![5, 8, 10], "cumulative across batches");
+    }
+}
