@@ -15,6 +15,7 @@ members = [
     "crates/oq-margin",
     "crates/oq-parity",
     "crates/oq-risk",
+    "crates/oq-sim",
     "crates/oq-stats",
     "crates/oq-strategy",
     "crates/oq-types",
@@ -48,6 +49,7 @@ oq-live = { path = "crates/oq-live", version = "2.0.0-alpha.1" }
 oq-margin = { path = "crates/oq-margin", version = "2.0.0-alpha.1" }
 oq-parity = { path = "crates/oq-parity", version = "2.0.0-alpha.1" }
 oq-risk = { path = "crates/oq-risk", version = "2.0.0-alpha.1" }
+oq-sim = { path = "crates/oq-sim", version = "2.0.0-alpha.1" }
 oq-stats = { path = "crates/oq-stats", version = "2.0.0-alpha.1" }
 oq-strategy = { path = "crates/oq-strategy", version = "2.0.0-alpha.1" }
 oq-types = { path = "crates/oq-types", version = "2.0.0-alpha.1" }

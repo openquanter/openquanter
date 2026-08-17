@@ -17,5 +17,8 @@ oq-risk.workspace = true
 oq-strategy.workspace = true
 oq-types.workspace = true
 
+[dev-dependencies]
+oq-sim.workspace = true
+
 [lints]
 workspace = true

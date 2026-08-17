@@ -1,0 +1,13 @@
+[package]
+name = "oq-sim"
+version.workspace = true
+description = "Deterministic fault injection for the OpenQuanter framework: the failures a venue actually produces, reproducible from a seed"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
