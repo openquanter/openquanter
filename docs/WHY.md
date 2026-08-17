@@ -402,8 +402,9 @@ This project is still small enough to pay it.
 not, and what has test coverage is in [the README's status
 section](../README.md#status), which is written to be deliberately unflattering
 — including the admission that "every cent accounted for" currently accounts
-for **none of them**: the live process does not yet journal its decisions, so
-the first link of the attribution chain is missing.
+for **none of them**: the first link of the chain is connected — the live
+process journals its decisions now — and the second is not, because the kernel
+is not in the live path, so there is a record and nowhere to replay it into.
 
 What each milestone unlocks, what triggers it, and what its exit gate is, is in
 the [roadmap](ROADMAP.md).
