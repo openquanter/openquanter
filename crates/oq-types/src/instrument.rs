@@ -81,6 +81,15 @@ pub struct Instrument {
     /// [`Instrument::qty_scale`] implies. `1` allows every
     /// representable quantity.
     pub qty_step: i64,
+    /// Smallest notional the venue will accept for one order, in the
+    /// units [`Cash`] counts in. Zero means no floor is known.
+    ///
+    /// A venue constraint rather than a risk preference, which is why it
+    /// sits here beside the grid and not in the risk limits: it is a
+    /// property of the contract, the same as how finely it can be
+    /// priced. A strategy that has to learn it by being refused learns
+    /// it once per strategy.
+    pub min_notional: Cash,
 }
 
 impl Instrument {
@@ -97,6 +106,7 @@ impl Instrument {
             contract_size: CONTRACT_SCALE,
             price_tick: 1,
             qty_step: 1,
+            min_notional: Cash(0),
         }
     }
 
@@ -110,6 +120,7 @@ impl Instrument {
             contract_size,
             price_tick: 1,
             qty_step: 1,
+            min_notional: Cash(0),
         }
     }
 
@@ -123,6 +134,13 @@ impl Instrument {
     pub const fn with_grid(mut self, price_tick: i64, qty_step: i64) -> Self {
         self.price_tick = if price_tick > 0 { price_tick } else { 1 };
         self.qty_step = if qty_step > 0 { qty_step } else { 1 };
+        self
+    }
+
+    /// The same contract, with the venue's order floor.
+    #[must_use]
+    pub const fn with_min_notional(mut self, min_notional: Cash) -> Self {
+        self.min_notional = min_notional;
         self
     }
 
