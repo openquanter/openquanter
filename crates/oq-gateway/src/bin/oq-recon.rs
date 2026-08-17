@@ -167,14 +167,22 @@ fn main() -> std::process::ExitCode {
                 // A partial read is never diffed. Everything it had not
                 // reached would look like it had vanished from the venue.
                 watcher.incomplete();
+                // Stamped, and on the venue's clock — the same one every
+                // change line carries. Failures were the only lines here
+                // without a time, which put the record of an outage in
+                // the one form that cannot be lined up against anything
+                // else that happened. Fifteen hours of watching produced
+                // thirty-nine consecutive failed reads whose duration the
+                // log could not state.
+                let at = venue.venue_time_ms();
                 for (part, why) in &failed {
                     // The reason, not just the name. Unattended for weeks,
                     // the difference between a rate limit and a dropped
                     // link is the difference between backing off and
                     // fixing the network — and it is only in this string.
-                    eprintln!("read failed: {} — {why}", part.name());
+                    eprintln!("  [{at}] read failed: {} — {why}", part.name());
                 }
-                eprintln!("incomplete read, nothing compared");
+                eprintln!("  [{at}] incomplete read, nothing compared");
                 if interval.is_none() {
                     // Single-shot is the startup-gate mode. Exiting zero
                     // here would report "the account matches" on the
