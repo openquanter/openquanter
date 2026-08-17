@@ -898,6 +898,37 @@ fn ack_from(body: &str, client_id: &str) -> Placed {
 /// Checked before sending rather than after being refused, because an
 /// id containing `&` or `=` would not merely be invalid — it would
 /// change the meaning of the signed query.
+/// Whether an order is worth less than the contract's floor.
+///
+/// Pure, so the arithmetic is testable without a venue. Refused locally
+/// rather than by the venue because the venue's message names its floor
+/// and not what the order was worth, which leaves the reader to work out
+/// whether the price or the size was the problem.
+///
+/// A market order is not checked: its notional depends on where it
+/// fills, and refusing on a guess would refuse orders the venue accepts.
+fn below_floor(order: &NewOrder, instrument: &Instrument) -> Option<Reject> {
+    if instrument.min_notional.0 <= 0 {
+        return None;
+    }
+    let price = order.limit_price?;
+    if price.0 <= 0 {
+        return None;
+    }
+    let notional = instrument.notional(price, order.qty)?;
+    if notional.0 >= instrument.min_notional.0 {
+        return None;
+    }
+    Some(Reject {
+        code: None,
+        message: format!(
+            "order notional {} is below this contract's floor of {}",
+            decimal(notional.0, 8),
+            decimal(instrument.min_notional.0, 8)
+        ),
+    })
+}
+
 fn valid_client_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 36
@@ -995,6 +1026,9 @@ impl Execution for Binance {
                     instrument.qty_scale
                 ),
             });
+        }
+        if let Some(reject) = below_floor(order, instrument) {
+            return Placed::Rejected(reject);
         }
         if order.reduce_only && order.position_side.is_hedged() {
             // The venue refuses this combination, and its message names
@@ -1558,5 +1592,82 @@ mod listings {
             Some(1),
             "the object ran to its real end: {x}"
         );
+    }
+}
+
+#[cfg(test)]
+mod floors {
+    use super::*;
+    use oq_types::{Cash, PriceTicks, QtyLots};
+
+    fn eth_testnet() -> Instrument {
+        // Two decimal places of price, three of quantity, and a floor of
+        // twenty units of quote — the contract that produced this code.
+        Instrument::linear(2, 3).with_min_notional(Cash(20 * oq_types::CASH_SCALE))
+    }
+
+    fn order_at(price: i64, qty: i64) -> NewOrder {
+        NewOrder {
+            symbol: "ETHUSDT".into(),
+            side: Side::Buy,
+            limit_price: Some(PriceTicks(price)),
+            qty: QtyLots(qty),
+            tif: TimeInForce::GoodTilCancel,
+            client_id: "oq-1".into(),
+            reduce_only: false,
+            position_side: PositionSide::OneWay,
+        }
+    }
+
+    #[test]
+    fn an_order_under_the_floor_is_refused_with_both_numbers() {
+        // 0.001 of a contract at 3000 is 3 units of quote, against a
+        // floor of 20. The venue refuses this and names its floor
+        // without naming what the order was worth, which leaves the
+        // reader guessing whether the price or the size was wrong.
+        let i = eth_testnet();
+        let o = order_at(300_000, 1);
+        match below_floor(&o, &i) {
+            Some(r) => {
+                assert!(
+                    r.message.contains("below this contract's floor"),
+                    "{}",
+                    r.message
+                );
+                assert!(
+                    r.message.contains("3.00000000"),
+                    "the order's worth: {}",
+                    r.message
+                );
+                assert!(
+                    r.message.contains("20.00000000"),
+                    "and the floor: {}",
+                    r.message
+                );
+            }
+            None => panic!("an order worth 3 against a floor of 20 must be refused"),
+        }
+    }
+
+    #[test]
+    fn an_order_over_the_floor_passes() {
+        let i = eth_testnet();
+        // 0.008 at 3000 is 24 units of quote, over the floor of 20.
+        assert!(below_floor(&order_at(300_000, 8), &i).is_none());
+    }
+
+    #[test]
+    fn a_contract_with_no_stated_floor_refuses_nothing() {
+        let i = Instrument::linear(2, 3);
+        assert!(below_floor(&order_at(300_000, 1), &i).is_none());
+    }
+
+    #[test]
+    fn a_market_order_is_not_checked_against_the_floor() {
+        // Its notional depends on where it fills, and refusing on a
+        // guess would refuse orders the venue accepts.
+        let mut o = order_at(300_000, 1);
+        o.limit_price = None;
+        assert!(below_floor(&o, &eth_testnet()).is_none());
     }
 }

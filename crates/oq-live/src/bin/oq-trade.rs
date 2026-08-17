@@ -49,7 +49,7 @@ use oq_live::{
 };
 use oq_risk::{Limits, RiskGate};
 use oq_strategy::{Context, Intent, Strategy};
-use oq_types::{Cash, Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side};
+use oq_types::{Cash, Instrument, Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side};
 
 const USAGE: &str = "\
 oq-trade — run a strategy against a venue
@@ -92,6 +92,13 @@ struct Probe {
     ticks: u64,
     /// How far below the market to rest, in parts per ten thousand.
     away_bps: i64,
+    /// The contract, for sizing against its floor and its grid.
+    ///
+    /// A probe that hardcodes one lot is a probe that gets refused for
+    /// notional on every contract whose lot is small, which is most of
+    /// them. Measured: 0.001 of one contract was worth about three units
+    /// of quote against a floor of twenty.
+    instrument: Instrument,
 }
 
 impl Strategy for Probe {
@@ -107,11 +114,16 @@ impl Strategy for Probe {
         }
         if !self.placed {
             self.placed = true;
+            let price = self.instrument.snap_price_down(PriceTicks(
+                reference.0 - reference.0 * self.away_bps / 10_000,
+            ));
             out.push(Intent::Limit {
                 id: OrderId(1),
                 side: Side::Buy,
-                price: PriceTicks(reference.0 - reference.0 * self.away_bps / 10_000),
-                qty: QtyLots(1),
+                price,
+                qty: self
+                    .instrument
+                    .snap_qty_up(smallest_allowed(&self.instrument, price)),
                 offset: Offset::Open,
             });
         } else if !self.cancelled && self.ticks > 5 {
@@ -335,6 +347,7 @@ fn main() -> ExitCode {
                 cancelled: false,
                 ticks: 0,
                 away_bps: 2000,
+                instrument,
             },
             session,
         )),
@@ -534,6 +547,27 @@ fn report(outcome: &Outcome) {
     }
 }
 
+/// The smallest quantity whose notional clears the contract's floor.
+///
+/// A tenth over it rather than exactly it, because the floor is checked
+/// against a price that can move between sizing and arrival, and landing
+/// exactly on a minimum is landing under it half the time.
+fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
+    if instrument.min_notional.0 <= 0 || price.0 <= 0 {
+        return QtyLots(1);
+    }
+    let Some(tick_cash) = instrument.tick_cash() else {
+        return QtyLots(1);
+    };
+    let per_lot = i128::from(price.0) * i128::from(tick_cash);
+    if per_lot <= 0 {
+        return QtyLots(1);
+    }
+    let need = i128::from(instrument.min_notional.0) * 11 / 10;
+    let lots = (need + per_lot - 1) / per_lot;
+    QtyLots(i64::try_from(lots).unwrap_or(1).max(1))
+}
+
 /// Precision and grid for `symbol`, from this deployment.
 fn instrument_of(venue: &Binance, symbol: &str) -> Result<oq_types::Instrument, String> {
     let body = venue.exchange_info(symbol).map_err(|e| e.to_string())?;
@@ -543,7 +577,14 @@ fn instrument_of(venue: &Binance, symbol: &str) -> Result<oq_types::Instrument, 
     let qty_scale = u8::try_from(qty_scale).map_err(|_| "implausible quantity precision")?;
     let tick = decimal_field(&body, "tickSize", price_scale).unwrap_or(1);
     let step = decimal_field(&body, "stepSize", qty_scale).unwrap_or(1);
-    Ok(oq_types::Instrument::linear(price_scale, qty_scale).with_grid(tick, step))
+    // The venue also refuses orders below a notional floor, and its
+    // message names the floor without naming what the order was worth.
+    // Carried on the instrument so a strategy does not learn it by
+    // being refused.
+    let floor = decimal_field(&body, "notional", 8).unwrap_or(0);
+    Ok(oq_types::Instrument::linear(price_scale, qty_scale)
+        .with_grid(tick, step)
+        .with_min_notional(Cash(floor)))
 }
 
 /// An unquoted integer field.
