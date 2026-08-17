@@ -37,6 +37,17 @@ pub enum MarginMode {
 /// How a run is configured.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
+    /// Sample equity every this many ticks, or never when zero.
+    ///
+    /// A sweep needs a return series and a run did not produce one, so
+    /// the statistics this workspace already implements could not be fed
+    /// by the runs it already had. Sampled rather than per-tick for a
+    /// reason that is not memory: **a Sharpe ratio is a function of its
+    /// return frequency**, and one computed from per-tick returns is not
+    /// comparable to any number anyone has published. Stating the
+    /// interval makes the frequency part of the result rather than an
+    /// accident of the data's density.
+    pub equity_every: usize,
     pub instrument: InstrumentId,
     pub contract: Contract,
     pub table: TierTable,
@@ -67,6 +78,9 @@ impl RunConfig {
         starting_balance: Cash,
     ) -> Self {
         Self {
+            // Off by default: a run that nobody asked for a curve from
+            // should not pay for one, and a sweep asks.
+            equity_every: 0,
             instrument,
             contract,
             table,
@@ -76,6 +90,13 @@ impl RunConfig {
             fees: oq_core::Fees::none(),
             position_mode: oq_core::PositionMode::OneWay,
         }
+    }
+
+    /// Sample equity every `n` ticks. Zero turns it off.
+    #[must_use]
+    pub const fn sampling_equity_every(mut self, n: usize) -> Self {
+        self.equity_every = n;
+        self
     }
 
     #[must_use]
@@ -116,6 +137,12 @@ pub struct RunResult {
     /// The number a drawdown statistic is computed from, and the one a
     /// margin-free run reports as survivable when it was not.
     pub min_equity: Cash,
+    /// Equity sampled every [`RunConfig::equity_every`] ticks.
+    ///
+    /// Empty when sampling is off. The first entry is the starting
+    /// balance, so a curve of length n yields n-1 returns and a run that
+    /// sampled nothing yields none rather than a spurious zero.
+    pub equity_curve: Vec<Cash>,
     /// The largest adverse excursion against the open position, in
     /// ticks. Reported in ticks rather than money because that is the
     /// unit a position sizing decision is made in.
@@ -185,6 +212,14 @@ where
     let mut liquidations = Vec::new();
     let mut intents = Vec::new();
     let mut min_equity = config.starting_balance;
+    // Seeded with the opening balance so the first sampled interval has a
+    // return, rather than the curve starting at the first sample and
+    // silently discarding it.
+    let mut equity_curve: Vec<Cash> = if config.equity_every > 0 {
+        vec![config.starting_balance]
+    } else {
+        Vec::new()
+    };
     let mut max_adverse: i64 = 0;
     let mut next_order_id = 1u64;
     let mut last_funding = Nanos(i64::MIN);
@@ -248,6 +283,9 @@ where
         }
 
         let summary = kernel.summary();
+        if config.equity_every > 0 && tick_count % config.equity_every == 0 {
+            equity_curve.push(summary.equity);
+        }
         if summary.equity < min_equity {
             min_equity = summary.equity;
         }
@@ -341,6 +379,7 @@ where
         funding_paid: summary.funding,
         fees_paid: summary.fees,
         min_equity,
+        equity_curve,
         max_adverse_ticks: max_adverse,
     }
 }
