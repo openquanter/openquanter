@@ -17,6 +17,7 @@
 
 pub mod deviation;
 pub mod run;
+pub mod sweep;
 
 pub use deviation::{DeviationReport, Verdict};
 /// The strategy contract, re-exported so `oq_backtest::strategy::…` keeps
@@ -24,6 +25,7 @@ pub use deviation::{DeviationReport, Verdict};
 pub use oq_strategy as strategy;
 pub use oq_strategy::{Context, Intent, Strategy};
 pub use run::{Liquidation, MarginMode, RunConfig, RunResult, run, tick_at};
+pub use sweep::{Candidate, SweepReport, returns, sweep};
 
 /// Re-exported because [`RunConfig::with_fees`] takes it. Configuring a
 /// run should not require naming a second crate.
