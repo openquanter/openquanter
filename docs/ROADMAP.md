@@ -1,7 +1,12 @@
 # OpenQuanter — Roadmap
 
 > Status: **Draft for review** · [中文版](ROADMAP.zh-CN.md)
-> Companion documents: [Requirements](REQUIREMENTS.md) · [Implementation Plan](IMPLEMENTATION.md)
+> Companion documents: [Why this exists](WHY.md) · [Requirements](REQUIREMENTS.md) · [Implementation Plan](IMPLEMENTATION.md)
+
+**What every milestone is ultimately for:** every cent between a backtest and
+the live run, accounted for. [Why that is the goal](WHY.md), and what the
+predecessor hit that made it the goal, is a separate document; this one is
+about the order of the work.
 
 This roadmap describes the path from where the project is today to a 2.0
 release, and the research directions beyond it. It is organized by
@@ -203,6 +208,16 @@ not in the matching kernel.
   process per account.
 - Observability: latency histograms at the defined measurement boundary,
   structured metrics, alert integration hooks.
+- **Attribution of the live/backtest gap.** Both the entry trigger and the exit
+  gate above require every divergence to be *attributed rather than tolerated*,
+  and nothing currently produces that attribution — the requirement names a
+  standard without naming an instrument. The instrument decomposes the gap into
+  slippage, queue position, funding against model, latency, and fee tier, and
+  reports what will not decompose as an **unexplained residual**. Its
+  prerequisite is that the live process journals its decisions, which today it
+  does not: `oq-live` depends on neither `oq-core` nor `oq-journal`, so there is
+  no record to replay and therefore nothing to attribute against. Wiring that is
+  the first task of this milestone, not the last.
 - `oq-sim` at full strength: the entire scenario catalogue plus gateway fuzzing
   (disconnects, reordering, duplication, partial fills).
 - **Position-carrying cutover playbook**, rehearsed end-to-end.

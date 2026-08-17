@@ -107,6 +107,7 @@ OpenQuanter 1.x 是一个**闭源的交易平台，已经实盘运行数年**。
 
 | 文档 | 内容 |
 |---|---|
+| [**为什么有 OpenQuanter**](docs/WHY.zh-CN.md) | **定位、目标人群，以及前身实盘多年撞到的那堵墙** |
 | [需求规格说明](docs/REQUIREMENTS.zh-CN.md) | 框架必须做到什么，以及如何验收 |
 | [路线图](docs/ROADMAP.zh-CN.md) | 里程碑、启动触发条件、验收门、通往 2.0 的路径 |
 | [实施方案](docs/IMPLEMENTATION.zh-CN.md) | 架构、设计决策、crate 划分、任务计划 |
