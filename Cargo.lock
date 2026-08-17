@@ -385,6 +385,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oq-cli"
+version = "2.0.0-alpha.1"
+
+[[package]]
 name = "oq-core"
 version = "2.0.0-alpha.1"
 dependencies = [
