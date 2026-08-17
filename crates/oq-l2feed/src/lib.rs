@@ -11,6 +11,7 @@
 pub const FORMAT_VERSION: u32 = 1;
 
 pub mod book;
+pub mod conformance;
 pub mod day;
 pub mod depth;
 pub mod disk;
