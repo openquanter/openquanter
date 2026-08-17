@@ -39,7 +39,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use oq_gateway::binance::Binance;
-use oq_gateway::exec::Endpoint;
+use oq_gateway::exec::{Endpoint, Execution};
 use oq_gateway::{Credentials, StreamOutcome, UserEvent, UserStreamReader};
 use oq_ingest::Aggregator;
 use oq_l2feed::session::{install_signal_handlers, now_ns, shutdown_requested};
@@ -66,6 +66,7 @@ OPTIONS:
     --max-position <LOTS>  Largest position [default: 1]
     --max-notional <USDT>  Largest order notional [default: 200]
     --band-bps <BPS>       How far a limit may sit from the mark [default: 3000]
+    --id-prefix <TEXT>     Client order id prefix [default: oq]
     --journal <PATH>       Where to record decisions [default: oq-trade.oqj]
     --no-journal           Trade without recording. Nothing can be replayed
     --adopt-existing       Start beside a position the venue already holds
@@ -290,6 +291,13 @@ fn main() -> ExitCode {
         rate_window: Nanos(60 * 1_000_000_000),
     };
 
+    // Stable across restarts unless overridden, so a recovered run
+    // recognises its own previous orders on the account stream. A prefix
+    // derived from the process id would change on every restart and make
+    // every prior order look like another system's.
+    let id_prefix = value("--id-prefix").unwrap_or_else(|| "oq".to_string());
+    let config_prefix = id_prefix.clone();
+
     let config = SessionConfig {
         symbol: symbol.clone(),
         instrument,
@@ -298,7 +306,7 @@ fn main() -> ExitCode {
         } else {
             oq_gateway::PositionSide::OneWay
         },
-        id_prefix: format!("oq{}", std::process::id()),
+        id_prefix: id_prefix.clone(),
     };
 
     // Nothing is declared unless the operator says otherwise, so any
@@ -342,6 +350,67 @@ fn main() -> ExitCode {
         }
     };
     println!("startup          the venue agrees with what this process expects");
+
+    // Before anything is recorded, read what the last run left. An order
+    // this process wrote and never heard about may be resting right now,
+    // and starting to trade beside it is the same failure as starting
+    // beside an unknown position — which the startup check already
+    // refuses.
+    if !no_journal && std::path::Path::new(&journal_path).exists() {
+        match oq_live::recover(&journal_path) {
+            Ok(prior) => {
+                if prior.in_flight.is_empty() {
+                    println!("recovery         previous run left nothing unresolved");
+                } else {
+                    println!(
+                        "recovery         {} order(s) unaccounted for in {journal_path}",
+                        prior.in_flight.len()
+                    );
+                    let mut unresolved = 0;
+                    for f in &prior.in_flight {
+                        match session.venue().order_status(&symbol, &f.client_id) {
+                            Ok(Some(a)) => println!(
+                                "                 {} exists at the venue: {} ({:?})",
+                                f.client_id, a.status, f.reason
+                            ),
+                            Ok(None) => println!(
+                                "                 {} never reached the venue ({:?})",
+                                f.client_id, f.reason
+                            ),
+                            Err(e) => {
+                                eprintln!(
+                                    "                 {} could not be resolved: {e}",
+                                    f.client_id
+                                );
+                                unresolved += 1;
+                            }
+                        }
+                    }
+                    if unresolved > 0 {
+                        eprintln!(
+                            "recovery         REFUSING to start: {unresolved} order(s) could not be \
+                             resolved. Trading beside an order whose state is unknown makes every \
+                             limit meaningless."
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+                if let Some(prefix) = prior.prefix {
+                    if prefix != config_prefix {
+                        println!(
+                            "recovery         previous prefix was {prefix}, this run uses \
+                             {config_prefix}; older orders will read as another system's"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("recovery         FAILED to read {journal_path}: {e}");
+                eprintln!("                 An unreadable journal is not an empty one.");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     // Recording is the default. A run that cannot be replayed cannot be
     // attributed, and attribution is the thing the live path exists to
