@@ -69,6 +69,10 @@ BUDGETS=(
   # is no way to hear them over HTTPS. Isolated here for the same
   # reason as the capture crate — the engine must not inherit it.
   "oq-gateway:60"
+  # The process assembly. Inherits the gateway's tree because it has to
+  # talk to a venue; carries nothing of its own. Everything it decides
+  # is in oq-risk and its own supervisor, both at zero.
+  "oq-live:60"
 )
 
 third_party_count() {

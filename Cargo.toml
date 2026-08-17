@@ -10,6 +10,7 @@ members = [
     "crates/oq-journal",
     "crates/oq-ingest",
     "crates/oq-l2feed",
+    "crates/oq-live",
     "crates/oq-margin",
     "crates/oq-parity",
     "crates/oq-risk",
@@ -36,10 +37,12 @@ oq-backtest = { path = "crates/oq-backtest", version = "2.0.0-alpha.1" }
 oq-core = { path = "crates/oq-core", version = "2.0.0-alpha.1" }
 oq-data = { path = "crates/oq-data", version = "2.0.0-alpha.1" }
 oq-engine = { path = "crates/oq-engine", version = "2.0.0-alpha.1" }
+oq-gateway = { path = "crates/oq-gateway", version = "2.0.0-alpha.1" }
 oq-hash = { path = "crates/oq-hash", version = "2.0.0-alpha.1" }
 oq-journal = { path = "crates/oq-journal", version = "2.0.0-alpha.1" }
 oq-ingest = { path = "crates/oq-ingest", version = "2.0.0-alpha.1" }
 oq-l2feed = { path = "crates/oq-l2feed", version = "2.0.0-alpha.1" }
+oq-live = { path = "crates/oq-live", version = "2.0.0-alpha.1" }
 oq-margin = { path = "crates/oq-margin", version = "2.0.0-alpha.1" }
 oq-parity = { path = "crates/oq-parity", version = "2.0.0-alpha.1" }
 oq-risk = { path = "crates/oq-risk", version = "2.0.0-alpha.1" }
