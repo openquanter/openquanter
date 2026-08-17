@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 
 use oq_gateway::OrderUpdate;
+use oq_types::QtyLots;
 
 /// One leg of one contract.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +110,23 @@ impl Book {
     #[must_use]
     pub const fn duplicates(&self) -> u64 {
         self.duplicates
+    }
+
+    /// Net signed quantity in the contract's own lots.
+    ///
+    /// The form the risk gate needs. Venues report positions as decimal
+    /// text and this crate keeps them as `f64`, but a limit is compared
+    /// in lots, and converting at the comparison rather than here is how
+    /// one caller ends up comparing coins against lots — a factor of ten
+    /// thousand on this contract, in the check that is supposed to stop
+    /// exactly that kind of mistake.
+    #[must_use]
+    pub fn net_lots(&self, symbol: &str, qty_scale: u8) -> QtyLots {
+        let scale = 10_f64.powi(i32::from(qty_scale));
+        // Rounded rather than truncated: a position of 0.0159999 from a
+        // decimal round-trip is 160 lots, and truncating it to 159 would
+        // make the gate believe the account is smaller than it is.
+        QtyLots((self.net(symbol) * scale).round() as i64)
     }
 
     /// Net signed quantity for a symbol across every leg.

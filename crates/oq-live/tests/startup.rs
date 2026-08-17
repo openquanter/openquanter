@@ -278,3 +278,78 @@ fn client_ids_do_not_repeat_within_a_run() {
     let ids: std::collections::HashSet<_> = sent.iter().map(|o| o.client_id.clone()).collect();
     assert_eq!(ids.len(), sent.len(), "every order got its own id");
 }
+
+#[test]
+fn the_gate_is_shown_the_position_the_venue_confirmed() {
+    // A position cap compared against a hardcoded zero can never fire,
+    // which makes it decoration. The number the venue reported has to
+    // reach the check.
+    //
+    // 0.016 of a contract quoted to three decimal places is 16 lots.
+    // The cap here is 10, so an order that would take the account
+    // further out must be refused for the position rather than
+    // permitted because the gate thought the account was flat.
+    let mut s = session(
+        Recording::accepting(),
+        &[held("BTCUSDT", "BOTH", 0.016)],
+        &[],
+        &[Position {
+            symbol: "BTCUSDT".into(),
+            side: "BOTH".into(),
+            amount: 0.016,
+        }],
+    )
+    .expect("declared, so it starts");
+
+    assert_eq!(
+        s.book().net_lots("BTCUSDT", 3),
+        QtyLots(16),
+        "decimal amount to lots"
+    );
+
+    // max_position_qty is 1000 in these limits, so tighten it by using
+    // a fresh gate through a second session with a smaller cap.
+    let mut tight = Session::start(
+        Recording::accepting(),
+        RiskGate::new(Limits {
+            max_position_qty: QtyLots(10),
+            ..limits()
+        }),
+        SessionConfig {
+            symbol: "BTCUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "live".into(),
+        },
+        &[held("BTCUSDT", "BOTH", 0.016)],
+        &[],
+        &[Position {
+            symbol: "BTCUSDT".into(),
+            side: "BOTH".into(),
+            amount: 0.016,
+        }],
+    )
+    .expect("declared");
+
+    match tight.submit(buy(1), PriceTicks(6_000_000), Nanos(0)) {
+        Submission::Refused(oq_risk::Breach::PositionWouldExceed { resulting, limit }) => {
+            assert_eq!(
+                resulting,
+                QtyLots(17),
+                "16 already held plus the 1 requested"
+            );
+            assert_eq!(limit, QtyLots(10));
+        }
+        other => panic!("the cap must see the real position: {other:?}"),
+    }
+
+    // And the same order is permitted when the cap has room, so the
+    // check is reading the number rather than refusing everything.
+    assert!(s.submit(buy(1), PriceTicks(6_000_000), Nanos(0)).is_sent());
+}
+
+#[test]
+fn a_flat_account_still_reports_zero_lots() {
+    let s = session(Recording::accepting(), &[], &[], &[]).expect("starts");
+    assert_eq!(s.book().net_lots("BTCUSDT", 3), QtyLots(0));
+}
