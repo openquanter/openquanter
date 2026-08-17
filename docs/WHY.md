@@ -122,6 +122,153 @@ curve goes hunting for the button labelled "tell me this might be fake".
 
 ---
 
+## The wall is not only ours
+
+If those six only happened to one project, they would be that project's
+problem. They are not.
+
+Lay out the trading frameworks that have accumulated over the years — open
+source, commercial, in-house — and **the same set of problems recurs, in almost
+the same shape**. 1.x was not special. It was one of them, and like most of
+them it had evolved out of an earlier framework before it.
+
+**Every item on the list below, 1.x had in full.** This is not criticism from
+outside. It is a description of where we climbed out of.
+
+### The ones a practitioner recognises immediately
+
+- **Backtest and live are two codebases.** Nearly every older framework has a
+  `BacktestEngine` and a `LiveEngine` sharing some interfaces, with behavioural
+  agreement maintained by hand. Nothing prevents them from diverging, and when
+  they do, **nothing raises an error**.
+- **Matching is too kind.** Resting orders fill, you get the price you asked
+  for, there is no queue, no partial fill, no rejection, and liquidity is
+  infinite. The most profitable part of a backtest often comes precisely from
+  assumptions that do not exist.
+- **The account can never blow up.** Margin and liquidation are missing or
+  approximated, so the tail risk of a levered strategy is systematically
+  hidden — **and the tail is the only part of a levered strategy that
+  ultimately matters.**
+- **Fees and slippage are a constant.** No maker/taker split, no tier, no
+  size dependence, no rebates.
+- **Look-ahead is not preventable.** Bar-based backtests decide on a completed
+  bar whose high contains prices that came after the decision; indicators are
+  normalised over the whole sample; history is re-run after data is revised.
+  These errors **do not crash and do not alert. They just make the curve look
+  better.**
+- **Data has no identity.** The same script produces a different number this
+  month than last, and nobody can say whether the code changed, the data was
+  repaired, or a parameter moved.
+- **State recovery is a JSON file.** A restarted process reads a file, and when
+  the file and the venue disagree the outcome ranges from a reconciliation
+  headache to placing orders against a position that does not exist.
+- **Incidents cannot be replayed.** Logs are written for humans, not for
+  replay. Post-mortems are assembled from fragments and memory.
+- **The dependency tree is too large to upgrade.** Installing a framework
+  brings in a hundred packages, and one day a transitive dependency changes
+  behaviour and costs a day to find.
+- **The framework is a platform.** Want only its margin model, or only its data
+  layer? You cannot. Take all of it, or rewrite it.
+
+### The ones a beginner hits directly
+
+If you are new to this, the list above may still be abstract. These are the
+ones you meet **in the first week**:
+
+- **It will not install.** Dependency conflicts, version hell, a package that
+  needs a compiler you do not have. Many people give up here, and **this has
+  nothing to do with trading ability.**
+- **The tutorial runs; your own data breaks it.** Because the sample data was
+  cleaned, and real data has gaps, duplicates, out-of-order rows and timezone
+  problems.
+- **The backtest return is implausibly good and the live account loses money.**
+  This is the one that hurts: you thought you had found a strategy, and you had
+  found an assumption in the framework.
+- **You cannot tell what you did wrong.** No error, just a nice curve and a
+  shrinking balance. So you ask in a chat group, where nobody can tell either.
+- **Documentation does not match the code.** The examples use an API from two
+  years ago, the error message has no search results, and the only recourse is
+  reading source that has no comments.
+- **Changing one parameter costs an afternoon.** So you stop trying the ideas
+  that are probably useless but worth a look.
+
+**These two lists are the same list.** Beginners meet the symptoms;
+practitioners recognise the causes. And many practitioners spent years meeting
+the symptoms before they could name the causes — **ourselves included**.
+
+### Why these are hard to fix
+
+To be fair about it: **the maintainers of those frameworks know, and it is not
+that they do not want to fix them.**
+
+A framework with users carries three things:
+
+1. **The API cannot be overturned.** Thousands of lines of user code are
+   written against it. Change one semantic and somebody's strategy behaves
+   differently one morning — possibly while holding a position.
+2. **Past results cannot be voided.** Admitting "old backtests are not
+   reproducible" means telling users that years of their conclusions need
+   re-verifying. No maintainer wants to say that, and it is hard to demand.
+3. **What is running cannot stop.** Rebuilding the matching core means every
+   user pauses, re-tests and re-deploys. That cost is not paid by the
+   maintainer; it is paid by every user.
+
+So a mature framework can only add **increments on top of the burden**: another
+optional parameter, a compatibility shim, a paragraph explaining why some
+historical behaviour is the way it is. **Every step is rational, and together
+they cannot reach the root.**
+
+That is what 1.x hit. We profiled, we took the obvious optimisations, and what
+remained **was structural** — no further tuning of that codebase was going to
+move it, because the limit was the architecture rather than the code.
+
+---
+
+## So 2.x is an attempt with the burden put down
+
+We do not carry those three things: **no external users, no historical
+conclusions to defend, nobody else's live trading on top of us.**
+
+Today that is a disadvantage. No users, no ecosystem, no community. But it buys
+one thing a mature framework cannot: **the ability to do it the right way from
+day one, even where the right way is more expensive.**
+
+Content-addressed data, reference baselines that pin engine behaviour, a
+journal of every decision, overfitting statistics in the default output —
+**none of these can be added afterwards.** A framework that decides to want
+reproducibility in its third year cannot make its first-year results
+reproducible. It is a discipline cost payable only from the beginning, **and we
+are still in a position to pay it.**
+
+### We would like to be the guinea pig
+
+Plainly: **we do not know whether this path works.**
+
+"Every cent accounted for" is an aim, not a verified conclusion. The
+decomposition may stall partway. The unexplained residual may stay stubbornly
+large. The discipline may turn out to cost more than a working team can carry.
+
+But there is one thing we are in a position to do: **try it with real money and
+report what happens.**
+
+1.x is running. 2.x will run beside it — same market, same data, same strategy.
+**Where they differ, we will measure it line by line, including when the
+measurement is unflattering.**
+
+So the promise this project makes is not that we solved these problems. It is:
+
+> **We will walk this path with real money in a real market, and write down
+> every wall we hit — including the case where the conclusion is that it does
+> not work.**
+
+If it works, the people after us can skip these years.
+If it does not, the record of the failure is worth something too — **at least
+the next person knows not to try it here again.**
+
+That is probably the only valuable thing a project with no users yet can offer.
+
+---
+
 ## What 2.x is for
 
 Those six have one shape in common:
