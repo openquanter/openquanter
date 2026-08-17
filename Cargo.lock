@@ -468,8 +468,10 @@ dependencies = [
 name = "oq-live"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "oq-engine",
  "oq-gateway",
  "oq-risk",
+ "oq-strategy",
  "oq-types",
 ]
 
