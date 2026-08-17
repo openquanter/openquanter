@@ -297,6 +297,64 @@ payload reader written for one venue finds nothing in another and returns an
 empty result rather than failing — so parsing belongs to the venue too, or a
 perfectly readable archive converts to nothing and reports itself as empty.
 
+### D16 — Python is a binding, not a compromise
+
+The case against a Python tier was that it dilutes the zero-dependency
+claim. Checked against what the repository actually enforces, it does not,
+and the objection rests on a claim this project does not make.
+
+`scripts/check-composability.sh` sets a dependency budget **per crate**:
+twelve crates at zero, four at sixty. The README's claim is correspondingly
+specific — the *engine* has no third-party dependencies, and every crate
+that carries a tree is one that has to talk to something outside the
+process. `oq-l2feed` carries a TLS stack because it speaks to a venue.
+A binding crate would carry PyO3 because it speaks to Python. Neither
+changes the twelve zeros, and CI proves it on every pull request rather
+than asking anyone to believe it.
+
+So the reason to be careful about Python is not dependency hygiene. It is
+three other things, and they are worth naming because they are the ones
+that actually cost:
+
+**The Python surface becomes the API.** Whatever is exposed first is what
+users write against, and it freezes hardest. This is an argument for
+exposing a small surface early rather than a large one, not for exposing
+none.
+
+**Distribution stops being `cargo build`.** A binding ships as wheels, per
+platform, per interpreter. As of 2026 that means an `abi3` wheel for the
+minimum supported version, a version-specific `cp314t` wheel for
+free-threaded 3.14, and an `abi3t` wheel once 3.15 lands — PEP 803 was
+approved in 2026 and defines a stable ABI for free-threaded builds. This
+is real work and it is build infrastructure, not architecture.
+
+**A Rust-only path has to stay usable.** The engine must remain buildable
+and testable without a Python interpreter anywhere near it, or the Rust
+core quietly becomes an implementation detail of a Python library. The
+per-crate budgets already enforce the dependency half of this; the
+composability check's standalone-build pass enforces the rest.
+
+The most comparable project resolves it the same way. NautilusTrader runs
+a Rust core with PyO3 bindings and Python as the control plane, and keeps
+a pure-Rust path that runs without Python at all.
+
+**One risk this supersedes.** The register's entry about PyO3 callback
+overhead was written for a world with a global interpreter lock. PyO3
+v0.28 supports free-threaded Python 3.14 and the GIL-release API, and a
+module whose pipeline holds no shared Python state can declare
+`gil_used = false` and run on a free-threaded interpreter without
+re-enabling the lock. The overhead question is now measurable rather than
+structural, which is a different kind of risk and is recorded as one.
+
+**Sequencing, and the reason for it.** The narrow proposal — expose the
+statistics and the margin-deviation report, so a Python user can *evaluate
+their existing backtest* rather than migrate to a new one — is kept, not
+as an alternative to full bindings but as the first stage of them. Its
+merit is not that it is safer; it is that it is the shortest path to an
+outside user, and an outside user is one of M3's four entry conditions and
+the only one that cannot be bought with engineering time. Full bindings
+follow. Nothing about the small surface forecloses the large one.
+
 ## 3. Technology choices
 
 | Area | Choice | Rationale |
