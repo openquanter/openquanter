@@ -1,0 +1,16 @@
+[package]
+name = "oq-features"
+version.workspace = true
+description = "Point-in-time feature layer for the OpenQuanter trading framework: one definition, two execution paths, and a metric that says whether they agree"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oq-engine.workspace = true
+oq-strategy.workspace = true
+oq-types.workspace = true
+
+[lints]
+workspace = true

@@ -146,7 +146,9 @@ M3 仍未建的部分,所以"一半"是个数字而不是感觉:`oq-live` 的快
   [MARGIN-FIDELITY.zh-CN.md](MARGIN-FIDELITY.zh-CN.md)。对杠杆策略而言，这是整个计划中价值最高的单一
   交付物：它量化了无保证金回测究竟乐观了多少。
 - `oq-data`：双时戳 Arrow/Parquet 层、双时间参考数据、严格 as-of join 工具；
-  `oq-features` 骨架。
+  `oq-features` 骨架——一个定义、
+  两条由它派生（而非各写一遍）的执行路径，以及一个针对四类经典漂移方式做过测试
+  的一致性指标。
 - `oq-cli`：已交付 `data` 与 `replay` 子命令；集成 `oq-stats` 使扫描默认输出
   DSR/PBO。原计划的 `backtest`、`sweep`、`parity` **不会**再写，原因来自设计本身
   而非进度：策略是编译进二进制的 Rust 代码，没有任何参数能指名一个策略，子命令
