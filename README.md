@@ -258,6 +258,16 @@ Pre-alpha, and specific about it. **Built and tested today:**
   pandas without a custom reader. Behind a feature flag, because the tree is
   ninety crates and a backtest must not pay for it.
 
+- **Strategies you already know** — RSI reversion, MACD, Bollinger bands,
+  Donchian breakout, grid, Dual Thrust, with their published parameters and
+  none of them tuned here. Not recommendations: every one is decades old and
+  traded by enough people that whatever edge it had is not waiting in a public
+  repository. They exist so the framework can be learned by recognising
+  something rather than by learning two things at once, and the example runs
+  each with liquidation modelled and without. Unlevered the two columns agree
+  for all six — which is the finding, not a flaw in the fixture: a margin model
+  is invisible until leverage is real. `cargo run --example classics`.
+
 **Designed but not built:** fidelity tier L2 (L0 and L1 are implemented; L1
 wraps L0 rather than replacing it, so L0 stays frozen by construction) and
 everything under *AI-native* above. The pillars section describes where this
