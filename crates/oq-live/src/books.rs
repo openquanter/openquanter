@@ -35,6 +35,23 @@
 //!
 //! # What it is not
 //!
+//! # Fills are deduplicated by the venue's trade id
+//!
+//! A reconnecting stream repeats what it already said — that is routine
+//! rather than exotic, and `oq-sim`'s corpus has a scenario for it. A
+//! set of books that applied a redelivered fill would double the
+//! position, and the second copy is indistinguishable from the first.
+//!
+//! A fill with **no** trade id is refused rather than applied. It cannot
+//! be deduplicated, so accepting it means accepting an unbounded number
+//! of copies of one trade; and a position that is too large because of
+//! a redelivery looks exactly like a position that is too large because
+//! of a bug. Only [`Books::adopt`] bypasses this, and it does so through
+//! its own path — a position adopted at startup answers to no venue
+//! trade at all.
+//!
+//! # What it is not
+//!
 //! Not the source of truth about the account. The venue is, and
 //! [`Books::reconcile`] exists because the kernel's view and the
 //! venue's can differ — a fill this process never heard about, a
@@ -69,10 +86,24 @@ impl Mismatch {
     }
 }
 
+/// What happened to a fill the venue reported.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Booked {
+    /// Applied, with whatever the kernel decided.
+    Applied(Vec<Output>),
+    /// This trade id was already booked. The books did not move.
+    Duplicate,
+    /// The report carries no trade id, so it cannot be deduplicated and
+    /// was not applied.
+    Unidentifiable,
+}
+
 /// The live account, kept by the kernel.
 pub struct Books {
     kernel: Kernel,
     instrument: InstrumentId,
+    /// Venue trade ids already booked.
+    seen: std::collections::HashSet<u64>,
     /// Orders submitted and not yet resolved, so `Context::working` is
     /// the process's own count rather than a guess.
     working: usize,
@@ -100,6 +131,7 @@ impl Books {
         Self {
             kernel: Kernel::new(state),
             instrument,
+            seen: std::collections::HashSet::new(),
             working: 0,
         }
     }
@@ -161,9 +193,29 @@ impl Books {
     }
 
     /// Book a fill the venue reported.
-    pub fn on_venue_fill(&mut self, fill: &Fill) -> Vec<Output> {
+    ///
+    /// Returns [`Booked::Duplicate`] for a trade already applied and
+    /// [`Booked::Unidentifiable`] for one with no trade id — neither
+    /// changes the books. A redelivered fill is routine after a
+    /// reconnect, and applying one would double a position in a way
+    /// indistinguishable from a bug.
+    pub fn on_venue_fill(&mut self, fill: &Fill) -> Booked {
+        if fill.trade.0 == 0 {
+            // Not deduplicable, so accepting it means accepting an
+            // unbounded number of copies of one trade.
+            return Booked::Unidentifiable;
+        }
+        if !self.seen.insert(fill.trade.0) {
+            return Booked::Duplicate;
+        }
         self.working = self.working.saturating_sub(1);
-        self.kernel.apply(&Event::VenueFill(*fill)).to_vec()
+        Booked::Applied(self.kernel.apply(&Event::VenueFill(*fill)).to_vec())
+    }
+
+    /// Distinct trades booked.
+    #[must_use]
+    pub fn booked(&self) -> usize {
+        self.seen.len()
     }
 
     /// The strategy's view, for this observation.
@@ -249,7 +301,10 @@ mod tests {
             stamp: Stamp::new(ns, ns),
             instrument: InstrumentId::new(1),
             order: OrderId(order),
-            trade: TradeId(1),
+            // Distinct per fill: the books deduplicate by trade id, so
+            // a fixture that reused one would silently test the
+            // deduplication rather than whatever it meant to test.
+            trade: TradeId(order * 1_000 + ns.unsigned_abs()),
             side,
             offset,
             price: PriceTicks(price),
@@ -405,5 +460,21 @@ mod tests {
             );
         }
         assert_eq!(b.net_position(), QtyLots(0));
+    }
+    /// A redelivered fill must not double the position. A reconnecting
+    /// stream repeats what it already said, which is routine.
+    #[test]
+    fn a_redelivered_fill_does_not_double_the_position() {
+        let mut b = books();
+        b.on_tick(&tick(SEC, 6_000_000));
+        let f = fill(2 * SEC, 1, Side::Buy, 6_000_000, 4, Offset::Open);
+        b.on_venue_fill(&f);
+        let after_first = b.net_position();
+        b.on_venue_fill(&f);
+        assert_eq!(
+            b.net_position(),
+            after_first,
+            "the same trade arrived twice and was booked twice"
+        );
     }
 }

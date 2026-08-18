@@ -602,8 +602,25 @@ fn main() -> ExitCode {
                 );
                 trader.apply(&u);
                 if let Some(fill) = fill_of(&u, &instrument) {
-                    for output in books.on_venue_fill(&fill) {
-                        println!("books            {output:?}");
+                    match books.on_venue_fill(&fill) {
+                        oq_live::books::Booked::Applied(outputs) => {
+                            for output in outputs {
+                                println!("books            {output:?}");
+                            }
+                        }
+                        // Routine after a reconnect, and worth a line:
+                        // a stream repeating itself is a fact about the
+                        // link, and silence would hide how often.
+                        oq_live::books::Booked::Duplicate => {
+                            println!("books            trade {} already booked", fill.trade.0);
+                        }
+                        oq_live::books::Booked::Unidentifiable => {
+                            println!(
+                                "books            {} reported a fill with no trade id; \
+                                 not booked, because it cannot be deduplicated",
+                                u.client_id
+                            );
+                        }
                     }
                 } else if matches!(u.status.as_str(), "CANCELED" | "EXPIRED") {
                     books.on_closed();
@@ -873,7 +890,9 @@ fn fill_of(u: &oq_gateway::OrderUpdate, instrument: &Instrument) -> Option<oq_ty
         stamp: oq_types::Stamp::new(now_ns(), now_ns()),
         instrument: oq_types::InstrumentId::new(1),
         order: OrderId(0),
-        trade: oq_types::TradeId(0),
+        // The deduplication key. Without it the fill cannot be
+        // booked at all, which `Books` enforces rather than trusting.
+        trade: oq_types::TradeId(u.trade_id.unwrap_or(0).unsigned_abs()),
         side: if u.side.eq_ignore_ascii_case("BUY") {
             Side::Buy
         } else {
