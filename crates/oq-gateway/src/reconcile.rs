@@ -617,8 +617,8 @@ mod tests {
     #[test]
     fn an_agreement_is_newline_terminated_like_everything_else() {
         let r = reconcile(
-            &expect(vec![want("LONG", 0.016, 63_735.2)], vec![]),
-            &snapshot(vec![leg("LONG", 0.016, 63_735.2)], vec![]),
+            &expect(vec![want("LONG", 0.400, 30_000.0)], vec![]),
+            &snapshot(vec![leg("LONG", 0.400, 30_000.0)], vec![]),
             Tolerance::default(),
         );
         assert!(r.agrees());
