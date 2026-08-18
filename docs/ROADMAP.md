@@ -312,7 +312,11 @@ not in the matching kernel.
   Closing that is the first task of this milestone, not the last.
 - `oq-sim` at full strength: the entire scenario catalogue plus gateway fuzzing
   (disconnects, reordering, duplication, partial fills).
-- **Position-carrying cutover playbook**, rehearsed end-to-end.
+- **Position-carrying cutover playbook**, rehearsed end-to-end. The playbook
+  itself is written — [CUTOVER.md](CUTOVER.md) — and is explicit that it is a
+  skeleton: every step is specified and every command in it exists, and none
+  of it has been rehearsed. Its §6 lists what is missing before a rehearsal
+  can be run at all, and §7 what each rehearsal must produce.
 
 **Exit gate.**
 

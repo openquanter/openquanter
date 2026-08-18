@@ -14,6 +14,7 @@ document links to its counterpart at the top.
 | [Roadmap](ROADMAP.md) · [中文](ROADMAP.zh-CN.md) | Milestones M0–M5 and 2.0, entry triggers and exit gates, release cadence, risk register |
 | [Implementation Plan](IMPLEMENTATION.md) · [中文](IMPLEMENTATION.zh-CN.md) | Architecture, design decisions, crate map, phase-by-phase task plan, testing strategy, performance budgets |
 | [Tick Format](TICK-FORMAT.md) · [中文](TICK-FORMAT.zh-CN.md) | The on-disk format a backtest reads: layout, the append-only field rule, integrity versus identity. **§4 onward specifies a proposed v3**; `oq-data` implements v2 |
+| [Cutover](CUTOVER.md) · [中文](CUTOVER.zh-CN.md) | **Moving a live strategy between systems without flattening the position**: the one-system invariant, the exposed interval, and what an abort is — a skeleton, unrehearsed, and explicit about which |
 | [Margin Fidelity](MARGIN-FIDELITY.md) · [中文](MARGIN-FIDELITY.zh-CN.md) | **How wrong a backtest with no margin model is**, why the answer is a cross-window tail rather than a mean, and which of its numbers survive a change of window mix |
 | [Execution](EXECUTION.md) · [中文](EXECUTION.zh-CN.md) | The venue-independent order contract: the three-state outcome, client order ids, and what a lost answer costs |
 | [Live Path](LIVE-PATH.md) · [中文](LIVE-PATH.zh-CN.md) | Journal-before-send, recovery from a killed process, and what the supervisor is allowed to decide |
