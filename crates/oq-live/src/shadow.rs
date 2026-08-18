@@ -158,9 +158,18 @@ impl Divergence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Pending {
     id: OrderId,
+    side: Side,
     price: PriceTicks,
     qty: QtyLots,
     at: Nanos,
+    /// The price prevailing when this fill happened.
+    ///
+    /// Recorded here rather than looked up later because "prevailing"
+    /// means *at that moment*, and a shadow that reconstructed it
+    /// afterwards would be attributing slippage against a price the
+    /// order never saw. `None` before the first observation, which is
+    /// what makes slippage and latency unavailable rather than wrong.
+    reference: Option<PriceTicks>,
 }
 
 /// The engine, run beside a live session.
@@ -172,6 +181,13 @@ struct Pending {
 /// available.
 pub struct Shadow {
     kernel: Kernel,
+    /// The last observation, for the prevailing price at a fill.
+    last: Option<PriceTicks>,
+    /// Fills both sides made, kept so the gap can be attributed rather
+    /// than only counted.
+    matched: Vec<oq_parity::attribution::Matched>,
+    /// Fills only one side made, likewise.
+    unpaired: Vec<oq_parity::attribution::Unmatched>,
     /// Model fills waiting for the venue to confirm them.
     unmatched_model: Vec<Pending>,
     /// Venue fills waiting for the model to produce them.
@@ -201,6 +217,9 @@ impl Shadow {
     ) -> Self {
         Self {
             kernel: Kernel::new(State::new(instrument, contract, table, starting_balance)),
+            last: None,
+            matched: Vec::new(),
+            unpaired: Vec::new(),
             unmatched_model: Vec::new(),
             unmatched_venue: Vec::new(),
             divergences: Vec::new(),
@@ -238,16 +257,38 @@ impl Shadow {
 
     /// Convenience for the commonest event.
     pub fn on_tick(&mut self, tick: Tick) {
+        // The prevailing price, for the fills that happen next. Recorded
+        // before the kernel sees the observation, because a fill the
+        // kernel makes from *this* tick happened at this price.
+        self.last = Some(tick.last);
         self.apply(&Event::Tick(tick));
     }
 
     /// Tell the shadow what the venue actually did.
-    pub fn on_venue_fill(&mut self, id: OrderId, price: PriceTicks, qty: QtyLots, at: Nanos) {
+    pub fn on_venue_fill(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        price: PriceTicks,
+        qty: QtyLots,
+        at: Nanos,
+    ) {
         // Match against a model fill for the same order, if there is
         // one. Matching by order id rather than by price: the whole
         // point is to notice when the prices differ.
         if let Some(i) = self.unmatched_model.iter().position(|p| p.id == id) {
             let model = self.unmatched_model.remove(i);
+            // Kept whether or not it diverged: a matched pair with the
+            // same price contributes zero slippage, and a decomposition
+            // that only saw the divergent pairs would be attributing a
+            // gap against a subset of the trades that caused it.
+            self.matched.push(oq_parity::attribution::Matched {
+                side: model.side,
+                qty: model.qty,
+                model_price: model.price,
+                venue_price: price,
+                reference_price: model.reference,
+            });
             if model.price != price {
                 self.divergences.push(Divergence::Price {
                     id,
@@ -264,7 +305,14 @@ impl Shadow {
             }
             return;
         }
-        self.unmatched_venue.push(Pending { id, price, qty, at });
+        self.unmatched_venue.push(Pending {
+            id,
+            side,
+            price,
+            qty,
+            at,
+            reference: self.last,
+        });
         self.expire(at);
     }
 
@@ -319,6 +367,50 @@ impl Shadow {
             .count()
     }
 
+    /// Everything the attribution decomposition needs from this run.
+    ///
+    /// The bridge between what a shadow observes and what
+    /// `oq_parity::attribution` decomposes — the two halves of the
+    /// project's headline claim, which until this existed did not
+    /// connect: the shadow produced divergences and the decomposition
+    /// wanted evidence, and nothing turned one into the other.
+    ///
+    /// `funding` and `fees` are the caller's, as `(venue, model)` pairs,
+    /// and they are **arguments rather than fields** because a shadow
+    /// does not see them. The venue's statement is the only source for
+    /// what was charged, and a shadow that defaulted them to zero would
+    /// report a gap fully explained by causes nobody looked at — which
+    /// `FR-ATTRIB-6` exists to prevent. Passing `None` says so, and the
+    /// report then declines to produce a residual at all.
+    ///
+    /// Call [`Shadow::finish`] first. Fills still inside the grace
+    /// period are neither matched nor reported as unmatched, so
+    /// evidence taken before it is evidence with a hole in it.
+    #[must_use]
+    pub fn evidence(
+        &self,
+        funding: Option<(Cash, Cash)>,
+        fees: Option<(Cash, Cash)>,
+    ) -> oq_parity::attribution::Evidence {
+        oq_parity::attribution::Evidence {
+            matched: self.matched.clone(),
+            unmatched: self.unpaired.clone(),
+            funding,
+            fees,
+        }
+    }
+
+    /// The model's realized result, for the decomposition's other side.
+    ///
+    /// The gap `attribute` decomposes is the venue's P&L minus this one,
+    /// and the two must come from independent sources — deriving either
+    /// from the components would make the residual zero by construction.
+    #[must_use]
+    pub fn model_pnl(&self) -> Cash {
+        let s = self.kernel.state();
+        Cash(s.realized.0 - s.fees.0 + s.funding.0)
+    }
+
     /// Flush anything still unmatched, at the end of a run.
     ///
     /// Without this, a fill in the last second of a session is neither
@@ -350,6 +442,8 @@ impl Shadow {
         }
         self.unmatched_model.push(Pending {
             id: fill.order,
+            side: fill.side,
+            reference: self.last,
             price: fill.price,
             qty: fill.qty,
             at,
@@ -368,6 +462,13 @@ impl Shadow {
                     qty: p.qty,
                     at: p.at,
                 });
+                self.unpaired.push(oq_parity::attribution::Unmatched {
+                    side: p.side,
+                    qty: p.qty,
+                    price: p.price,
+                    reference_price: p.reference,
+                    at_venue: false,
+                });
             } else {
                 still_waiting.push(p);
             }
@@ -382,6 +483,13 @@ impl Shadow {
                     price: p.price,
                     qty: p.qty,
                     at: p.at,
+                });
+                self.unpaired.push(oq_parity::attribution::Unmatched {
+                    side: p.side,
+                    qty: p.qty,
+                    price: p.price,
+                    reference_price: p.reference,
+                    at_venue: true,
                 });
             } else {
                 still_waiting.push(p);
@@ -485,7 +593,13 @@ mod tests {
             "the model must have filled, or this test is vacuous"
         );
 
-        s.on_venue_fill(OrderId(1), PriceTicks(6_000_001), QtyLots(1), Nanos(SEC));
+        s.on_venue_fill(
+            OrderId(1),
+            Side::Buy,
+            PriceTicks(6_000_001),
+            QtyLots(1),
+            Nanos(SEC),
+        );
         s.finish(Nanos(10 * SEC));
         assert_eq!(s.divergences(), &[], "identical fills must not diverge");
     }
@@ -514,7 +628,13 @@ mod tests {
     fn a_fill_the_model_never_made_is_reported_and_is_not_flattering() {
         let mut s = shadow();
         s.on_tick(tick(SEC, 6_000_000));
-        s.on_venue_fill(OrderId(9), PriceTicks(6_000_000), QtyLots(1), Nanos(SEC));
+        s.on_venue_fill(
+            OrderId(9),
+            Side::Buy,
+            PriceTicks(6_000_000),
+            QtyLots(1),
+            Nanos(SEC),
+        );
         s.finish(Nanos(60 * SEC));
 
         assert_eq!(s.divergences().len(), 1, "{:?}", s.divergences());
@@ -536,7 +656,13 @@ mod tests {
     fn a_different_price_is_reported_with_the_difference() {
         let mut s = shadow();
         buy(&mut s, 1, SEC, 6_000_000);
-        s.on_venue_fill(OrderId(1), PriceTicks(6_000_050), QtyLots(1), Nanos(SEC));
+        s.on_venue_fill(
+            OrderId(1),
+            Side::Buy,
+            PriceTicks(6_000_050),
+            QtyLots(1),
+            Nanos(SEC),
+        );
         s.finish(Nanos(10 * SEC));
 
         match s.divergences() {
@@ -573,6 +699,7 @@ mod tests {
         s.on_tick(tick(2 * SEC, 6_000_000));
         s.on_venue_fill(
             OrderId(1),
+            Side::Buy,
             PriceTicks(6_000_001),
             QtyLots(3),
             Nanos(2 * SEC),
@@ -624,6 +751,7 @@ mod tests {
 
         s.on_venue_fill(
             OrderId(1),
+            Side::Buy,
             PriceTicks(6_000_001),
             QtyLots(1),
             Nanos(4 * SEC),

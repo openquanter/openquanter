@@ -783,6 +783,7 @@ dependencies = [
  "oq-journal",
  "oq-l2feed",
  "oq-margin",
+ "oq-parity",
  "oq-risk",
  "oq-sim",
  "oq-strategy",
