@@ -303,7 +303,7 @@ fn the_gate_is_shown_the_position_the_venue_confirmed() {
 
     assert_eq!(
         s.book().net_lots("BTCUSDT", 3),
-        QtyLots(16),
+        QtyLots(400),
         "decimal amount to lots"
     );
 
@@ -335,8 +335,8 @@ fn the_gate_is_shown_the_position_the_venue_confirmed() {
         Submission::Refused(oq_risk::Breach::PositionWouldExceed { resulting, limit }) => {
             assert_eq!(
                 resulting,
-                QtyLots(17),
-                "16 already held plus the 1 requested"
+                QtyLots(401),
+                "400 already held plus the 1 requested"
             );
             assert_eq!(limit, QtyLots(10));
         }
