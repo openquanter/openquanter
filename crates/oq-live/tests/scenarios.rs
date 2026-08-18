@@ -22,6 +22,8 @@ fn fill(client_id: &str, trade_id: i64) -> OrderUpdate {
         last_qty: "0.001".into(),
         cumulative_qty: "0.001".into(),
         last_price: "3000.00".into(),
+        side: "BUY".to_string(),
+        maker: false,
         trade_id: Some(trade_id),
         event_ms: trade_id,
     }
