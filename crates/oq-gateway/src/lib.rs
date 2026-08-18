@@ -49,6 +49,7 @@ pub mod exec;
 pub(crate) mod json;
 pub mod okx;
 pub mod reconcile;
+pub mod record;
 pub mod snapshot;
 pub mod stream;
 pub mod watch;
