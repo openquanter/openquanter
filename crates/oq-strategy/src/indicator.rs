@@ -118,6 +118,48 @@ impl Window {
         let sum: f64 = self.buf[..self.filled].iter().sum();
         Some(sum / self.filled as f64)
     }
+
+    /// Population standard deviation of what is present.
+    ///
+    /// `None` while empty, and **`None` with one sample** rather than
+    /// zero: one observation has no dispersion to report, and a band
+    /// built on a zero would sit exactly on the price and signal on
+    /// every tick. The population form, not the sample form, because
+    /// this window *is* the population being described — there is no
+    /// wider set it was drawn from.
+    #[must_use]
+    pub fn std_dev(&self) -> Option<f64> {
+        if self.filled < 2 {
+            return None;
+        }
+        let mean = self.mean()?;
+        let n = self.filled as f64;
+        let variance: f64 = self.buf[..self.filled]
+            .iter()
+            .map(|v| (v - mean) * (v - mean))
+            .sum::<f64>()
+            / n;
+        Some(variance.sqrt())
+    }
+
+    /// Lowest and highest of what is present, or `None` while empty.
+    ///
+    /// The pair rather than two calls, because a breakout compares
+    /// against both and reading them separately invites reading them
+    /// from different states.
+    #[must_use]
+    pub fn extremes(&self) -> Option<(f64, f64)> {
+        if self.filled == 0 {
+            return None;
+        }
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for v in &self.buf[..self.filled] {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+        Some((lo, hi))
+    }
 }
 
 /// A simple moving average.
@@ -337,6 +379,57 @@ impl Rsi {
         }
         let rs = g / l;
         Some(100.0 - 100.0 / (1.0 + rs))
+    }
+}
+
+#[cfg(test)]
+mod window_stats {
+    use super::Window;
+
+    /// One sample has no dispersion, and a zero would put a band exactly
+    /// on the price — signalling on every observation.
+    #[test]
+    fn one_sample_has_no_standard_deviation() {
+        let mut w = Window::new(4);
+        assert_eq!(w.std_dev(), None, "empty");
+        w.push(10.0);
+        assert_eq!(w.std_dev(), None, "one sample");
+        w.push(10.0);
+        assert_eq!(
+            w.std_dev(),
+            Some(0.0),
+            "two identical samples do have one, and it is zero"
+        );
+    }
+
+    /// The population form, checked against arithmetic done by hand.
+    #[test]
+    fn the_standard_deviation_is_the_population_one() {
+        let mut w = Window::new(4);
+        for v in [2.0, 4.0, 4.0, 4.0] {
+            w.push(v);
+        }
+        // mean 3.5; deviations -1.5, .5, .5, .5; variance 0.75
+        let sd = w.std_dev().expect("four samples");
+        assert!((sd - 0.75f64.sqrt()).abs() < 1e-12, "{sd}");
+    }
+
+    /// A window that has rolled reports the window, not the history.
+    #[test]
+    fn extremes_follow_the_window_rather_than_everything_seen() {
+        let mut w = Window::new(3);
+        for v in [100.0, 1.0, 50.0] {
+            w.push(v);
+        }
+        assert_eq!(w.extremes(), Some((1.0, 100.0)));
+        // 100 rolls out.
+        w.push(60.0);
+        assert_eq!(w.extremes(), Some((1.0, 60.0)));
+    }
+
+    #[test]
+    fn an_empty_window_has_no_extremes() {
+        assert_eq!(Window::new(3).extremes(), None);
     }
 }
 
