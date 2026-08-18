@@ -776,11 +776,13 @@ dependencies = [
 name = "oq-live"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "oq-core",
  "oq-engine",
  "oq-gateway",
  "oq-ingest",
  "oq-journal",
  "oq-l2feed",
+ "oq-margin",
  "oq-risk",
  "oq-sim",
  "oq-strategy",

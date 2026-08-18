@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+oq-core.workspace = true
 oq-engine.workspace = true
+oq-margin.workspace = true
 oq-gateway.workspace = true
 oq-ingest.workspace = true
 oq-journal.workspace = true
