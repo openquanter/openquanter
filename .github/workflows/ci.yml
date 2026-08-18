@@ -93,3 +93,10 @@ jobs:
       # compare two versions on one machine.
       - name: Backtest throughput must stay above the floor
         run: cargo run --release -p oq-examples --example throughput
+
+      # G4: a hundred configurations with DSR and PBO inside thirty
+      # minutes. The budget is generous enough that a shared runner
+      # having a bad hour cannot fail it, which is the point — this
+      # catches the sweep becoming unusable, not the runner being slow.
+      - name: Sweep gate (G4)
+        run: cargo run --release -p oq-examples --example sweep_100

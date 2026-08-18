@@ -214,7 +214,12 @@ depends on the invariants established here.
 
 **Exit gate.**
 
-- **G3** throughput and **G4** sweep targets met.
+- **G3** throughput and **G4** sweep targets met. G4 is met and checked in
+  CI by `cargo run --release -p oq-examples --example sweep_100`: 100
+  configurations over 600,000 ticks each, with DSR and PBO, in 2.65 s of a
+  1,800 s budget on a development machine. G3 still needs the throughput mode
+  it is defined against, and a same-machine run of the predecessor to compare
+  with.
 - **G5** margin fidelity verified; tail-divergence methodology published.
 - **G7** — a strategy runs unchanged in compatibility mode and, after
   throughput-mode conversion, re-passes parity.
