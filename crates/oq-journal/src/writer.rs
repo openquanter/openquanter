@@ -45,6 +45,8 @@ pub enum SyncPolicy {
 #[derive(Debug)]
 pub struct Writer {
     path: PathBuf,
+    /// Removed on drop. Its presence is what stops a second writer.
+    lock: PathBuf,
     file: BufWriter<File>,
     policy: SyncPolicy,
     next_seq: u64,
@@ -68,6 +70,11 @@ impl Writer {
     /// I/O failures, or corruption in the middle of the existing file.
     pub fn open(path: impl AsRef<Path>, policy: SyncPolicy) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+
+        // Taken before anything is read, because the tail scan and the
+        // truncation below both assume nobody else is writing.
+        let lock = acquire(&path)?;
+
         let (next_seq, clean_len) = crate::reader::scan_tail(&path)?;
 
         // Drop a torn tail rather than appending after it: a reader that
@@ -82,6 +89,7 @@ impl Writer {
 
         Ok(Self {
             path,
+            lock,
             file: BufWriter::with_capacity(1 << 16, file),
             policy,
             next_seq,
@@ -162,6 +170,11 @@ impl Drop for Writer {
         // returned from drop; callers that need the guarantee call
         // `sync` explicitly, which is why `sync` is public.
         let _ = self.file.flush();
+        // Best effort: a process killed outright leaves this behind, and
+        // the next start refuses until someone looks. That is the safe
+        // direction for a journal — a stale lock costs a human a minute,
+        // a shared journal costs the record.
+        let _ = std::fs::remove_file(&self.lock);
     }
 }
 
@@ -188,8 +201,89 @@ impl Writer {
     }
 }
 
+/// Claim exclusive use of a journal, or say who has it.
+///
+/// `create_new` is the whole mechanism: the file system decides, once,
+/// which caller creates the file. No check-then-act, so no window
+/// between deciding it is free and taking it — which is the failure a
+/// `pgrep` in a start script cannot avoid, and the reason this lives
+/// here rather than in one.
+fn acquire(journal: &Path) -> Result<PathBuf> {
+    let lock = journal.with_extension("lock");
+    match OpenOptions::new().write(true).create_new(true).open(&lock) {
+        Ok(mut f) => {
+            // Written for a human reading it after a crash. The pid is
+            // the useful part; the rest says which journal and when, so
+            // a stale file can be recognised as stale.
+            let _ = writeln!(
+                f,
+                "pid {} opened {} at {}",
+                std::process::id(),
+                journal.display(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            );
+            let _ = f.sync_all();
+            Ok(lock)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let held_by = std::fs::read_to_string(&lock)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            Err(JournalError::AlreadyOpen {
+                lock,
+                held_by: if held_by.is_empty() {
+                    "nothing about itself".to_string()
+                } else {
+                    held_by
+                },
+            })
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The failure this exists to prevent, reproduced.
+    ///
+    /// Two `oqp-live` processes were once started ninety-two seconds
+    /// apart by a command that ran twice, and both appended here. The
+    /// result is not repairable by a reader: sequence numbers stay
+    /// contiguous, every frame decodes, and the history describes a
+    /// session that never took place.
+    #[test]
+    fn a_second_writer_is_refused_while_the_first_holds_it() {
+        let dir = std::env::temp_dir().join(format!("oqj-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("held.oqj");
+
+        let first = Writer::open(&path, SyncPolicy::Never).expect("first opens");
+        match Writer::open(&path, SyncPolicy::Never) {
+            Err(JournalError::AlreadyOpen { held_by, .. }) => {
+                // The message has to name the holder, or the operator is
+                // told only that something is wrong.
+                assert!(
+                    held_by.contains(&std::process::id().to_string()),
+                    "the holder should be named: {held_by}"
+                );
+            }
+            Err(e) => panic!("wrong error: {e}"),
+            Ok(_) => panic!("two writers opened the same journal"),
+        }
+
+        // Dropping the first releases it, so a restart after a clean
+        // shutdown is not blocked by yesterday's lock.
+        drop(first);
+        let _second = Writer::open(&path, SyncPolicy::Never).expect("reopens after drop");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use crate::reader::Reader;
 
