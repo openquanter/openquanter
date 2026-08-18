@@ -190,7 +190,8 @@ depends on the invariants established here.
   implemented (subscription granularity, batched callbacks, mirrored state).
 - **Margin fidelity reporting (G5).** Recompute historical stress windows with
   and without the margin overlay and publish the methodology behind the
-  **tail-divergence report**. For leveraged strategies this is the single most
+  **tail-divergence report**, published as
+  [MARGIN-FIDELITY.md](MARGIN-FIDELITY.md). For leveraged strategies this is the single most
   valuable deliverable of the entire plan: it quantifies how optimistic
   margin-free backtesting actually is.
 - `oq-data`: dual-timestamp Arrow/Parquet layer, bitemporal reference data,

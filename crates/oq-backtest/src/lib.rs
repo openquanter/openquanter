@@ -16,10 +16,14 @@
 #![forbid(unsafe_code)]
 
 pub mod deviation;
+pub mod fidelity;
 pub mod run;
 pub mod sweep;
 
 pub use deviation::{DeviationReport, Verdict};
+pub use fidelity::{
+    Arm, Fidelity, StressReport, TailPoint, Unusable, Window, stress, tail_divergence,
+};
 /// The strategy contract, re-exported so `oq_backtest::strategy::…` keeps
 /// resolving for code written before it moved out.
 pub use oq_strategy as strategy;

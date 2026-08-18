@@ -13,6 +13,9 @@
 | [路线图](ROADMAP.zh-CN.md) · [English](ROADMAP.md) | M0–M5 与 2.0 各里程碑、启动触发条件与验收门、发布节奏、风险清单 |
 | [实施方案](IMPLEMENTATION.zh-CN.md) · [English](IMPLEMENTATION.md) | 架构、设计决策、crate 划分、分阶段任务计划、测试策略、性能预算 |
 | [Tick 格式规范](TICK-FORMAT.zh-CN.md) · [English](TICK-FORMAT.md) | 回测读取的磁盘格式：布局、只追加字段规则、完整性与身份的区分。**§4 起是提案中的 v3**；`oq-data` 实现的是 v2 |
+| [保证金保真度](MARGIN-FIDELITY.zh-CN.md) · [English](MARGIN-FIDELITY.md) | **没有保证金模型的回测错得有多离谱**、为什么答案是跨窗口尾部而不是均值、以及哪些数字在改变窗口配比后依然成立 |
+| [执行契约](EXECUTION.zh-CN.md) · [English](EXECUTION.md) | 与交易所无关的下单契约：三态结果、客户端订单号、以及"答案丢失"的代价 |
+| [实盘路径](LIVE-PATH.zh-CN.md) · [English](LIVE-PATH.md) | 先落账再发送、进程被杀后的恢复、以及 supervisor 被允许决定什么 |
 | [采集格式规范](CAPTURE-FORMAT.zh-CN.md) · [English](CAPTURE-FORMAT.md) | 行情采集的分帧、控制记录、按天密封、归档校验与容量规划 |
 | [变更日志](../CHANGELOG.zh-CN.md) · [English](../CHANGELOG.md) | 变了什么；语义或事件 schema 的改动必须记录在哪里 |
 
