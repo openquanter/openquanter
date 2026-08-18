@@ -42,6 +42,7 @@ pub mod book;
 pub mod books;
 pub mod feed;
 pub mod latency;
+pub mod metrics;
 pub mod record;
 pub mod recovery;
 pub mod run;

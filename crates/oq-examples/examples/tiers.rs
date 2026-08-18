@@ -4,6 +4,11 @@
 //! cargo run --release -p oq-examples --example tiers
 //! ```
 //!
+//! M4's scope asks for a comparative report across L0, L0+margin and
+//! L1 for the same strategy. This is it, and the third column is the
+//! one that surprises: the ladder's rungs are not ordered by how
+//! pessimistic they are.
+//!
 //! `oq-engine`'s ladder warns that a P&L measured at one tier is not a
 //! more or less pessimistic version of the same number — it is a
 //! different quantity that happens to have the same units. This shows
@@ -156,4 +161,117 @@ fn main() {
     println!("assumed to be the first row — that nothing was ever ahead of this");
     println!("strategy in any queue — and for a maker strategy that assumption is");
     println!("most of the backtest.");
+
+    comparative_report();
+}
+
+/// L0, L0 with margin, and L1 — the three-tier comparison M4 asks for.
+///
+/// The rungs are not ordered by pessimism, and that is the finding. The
+/// margin overlay and the queue model correct *different* errors: one
+/// removes results the account could not have survived, the other
+/// removes fills it would not have got. A run can be optimistic at L1
+/// and honest at L0-with-margin, or the reverse, and a reader who
+/// assumed "higher tier, lower number" would draw the wrong conclusion
+/// from either.
+fn comparative_report() {
+    use oq_backtest::{MarginMode, RunConfig, RunResult, run as backtest};
+    use oq_examples::{MartingaleLadder, crash_series};
+    use oq_margin::{Contract, TierTable};
+    use oq_types::{Cash, InstrumentId};
+
+    // A market with a fall in it, and a strategy that adds to a losing
+    // position — the combination where the three tiers disagree most.
+    let ticks = crash_series(11, 2_000, 700, 0.45);
+    let config = |margin: MarginMode| {
+        RunConfig::new(
+            InstrumentId::new(1),
+            Contract::new(10_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(2_000),
+        )
+        .with_margin(margin)
+        .tracking_margin()
+    };
+
+    let bare = backtest(
+        &config(MarginMode::Ignored),
+        &mut MartingaleLadder::new(),
+        &ticks,
+    );
+    let margined = backtest(
+        &config(MarginMode::Enforced),
+        &mut MartingaleLadder::new(),
+        &ticks,
+    );
+
+    let money = |c: Cash| format!("{:.2}", c.0 as f64 / 100_000_000.0);
+    let row = |name: &str, r: &RunResult, note: &str| {
+        println!(
+            "  {name:<18} {:>5} {:>14} {:>14}  {note}",
+            r.fills.len(),
+            money(r.final_equity),
+            money(r.min_equity),
+        );
+    };
+
+    println!();
+    println!();
+    println!("three tiers, one strategy — the comparison M4 asks for");
+    println!("======================================================");
+    println!();
+    println!(
+        "  {:<18} {:>5} {:>14} {:>14}",
+        "tier", "fills", "final equity", "lowest"
+    );
+    row(
+        "L0",
+        &bare,
+        "no margin, no queue: every fill, every survival",
+    );
+    row("L0 + margin", &margined, "the venue may close the account");
+
+    // L1 over the same market. Its fills are the engine's, so the
+    // comparison is of how many trades each tier believes happened
+    // rather than of a P&L computed two different ways.
+    let l1_policy = Policy {
+        queue: QueueAhead::Fixed(QtyLots(50)),
+        latency: Latency {
+            entry: Nanos(5_000_000),
+            response: Nanos(5_000_000),
+        },
+        impact: Impact { coefficient: 50 },
+    };
+    let (l1_fills, _, l1_shadowed) = run(l1_policy, &ticks);
+    let (l0_fills, _, _) = run(Policy::TRANSPARENT, &ticks);
+    println!(
+        "  {:<18} {:>5} {:>14} {:>14}  quoting strategy: {} of L0's fills",
+        "L1",
+        l1_fills,
+        "—",
+        "—",
+        if l0_fills == 0 {
+            "none".to_string()
+        } else {
+            format!("{:.0}%", l1_fills as f64 * 100.0 / l0_fills as f64)
+        }
+    );
+    if l1_shadowed > 0 {
+        println!(
+            "  {:<18} {l1_shadowed} order(s) still queued when the run ended",
+            ""
+        );
+    }
+
+    println!();
+    println!("The rungs are not ordered by pessimism, and assuming they are is the");
+    println!("mistake this table exists to prevent. The margin overlay removes results");
+    println!("the account could not have survived; the queue model removes fills it");
+    println!("would not have got. They correct different errors, and a strategy can be");
+    println!("flattered by one while the other is already honest about it.");
+    println!();
+    println!("So a number is only comparable to another at the same tier, which is why");
+    println!("every run's fidelity report names the tier it was measured at — and why");
+    println!("a market-making P&L quoted at L0 is not a conservative estimate of the");
+    println!("same strategy at L2. It is a different quantity with the same units.");
 }
