@@ -324,16 +324,29 @@ not in the matching kernel.
   reports what will not decompose as an **unexplained residual**. Its
   prerequisite is that the live process journals its decisions, which today it
   does now — `oq-live` depends on `oq-journal` and writes in `record.rs`. The
-  second is now partly met: `oq-live` depends on `oq-core` and `oq-margin`,
-  and `oq_live::shadow` runs the same `Kernel` a backtest runs beside the
-  live session, fed the same events. It places nothing; its product is the
-  list of places it and the venue disagree, in four named kinds — the model
-  filled and the venue did not, the venue filled and the model did not, both
-  filled at different prices, both filled for different quantities — plus a
-  position comparison, which is the one that compounds. That is the
-  instrument entry trigger 2 requires and nothing produced. What remains is
-  the other half: the live process does not yet *drive* itself from the
-  kernel, so the shadow observes rather than decides.
+  second is now met at the kernel: `oq-live` depends on `oq-core` and
+  `oq-margin`; `oq_live::shadow` runs the same `Kernel` a backtest runs beside
+  the live session, reporting where it and the venue disagree in four named
+  kinds plus a position comparison; and `oq_core::Matching` closes the half
+  that was missing. A kernel can now take fills the **venue** decided rather
+  than producing its own, with identical accounting — a test asserts the same
+  trade booked both ways leaves the same position, entry, fees, balance and
+  equity. That is what makes §1's claim, that backtest and live differ only in
+  the event producer, true rather than aspirational: one implementation of the
+  books, and only the source of fills moves.
+
+  Two refusals hold it together. Under `Matching::Venue` the matcher never
+  fills, because a kernel that both matched and took venue fills would book
+  every trade twice and the second copy would look exactly like the first. And
+  a venue fill arriving at a `Simulated` kernel is refused rather than applied,
+  since a simulated run produces its own. A filled order also leaves the book,
+  which is about *replay* rather than the live run: a journal carrying both the
+  submit and the venue's fill, replayed by a build whose mode was not set,
+  would rest the order and match it too.
+
+  What remains is assembly — `oq-live` does not yet drive itself from a kernel
+  in `Venue` mode, it observes one beside itself. The kernel is ready for it;
+  the process is not.
 - `oq-sim` at full strength: the entire scenario catalogue plus gateway fuzzing
   (disconnects, reordering, duplication, partial fills).
 - **Position-carrying cutover playbook**, rehearsed end-to-end. The playbook

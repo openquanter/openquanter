@@ -33,6 +33,16 @@ pub mod kind {
     pub const FUNDING: u16 = 4;
     pub const TIME: u16 = 5;
     pub const MARGIN_DEPOSIT: u16 = 6;
+    /// A fill the **venue** decided, rather than one the matcher
+    /// produced.
+    ///
+    /// The difference is the whole of what separates a backtest from a
+    /// live run: in a backtest the matcher decides which orders trade,
+    /// and live the venue does. Both end up as the same accounting, so
+    /// the kernel applies both the same way — but the journal records
+    /// which it was, because a replay that fed a venue fill back through
+    /// a matcher would book it twice.
+    pub const VENUE_FILL: u16 = 8;
 }
 
 /// An input to the core.
@@ -70,6 +80,12 @@ pub enum Event {
     Time(Nanos),
     /// Collateral added to or removed from the account.
     MarginDeposit { amount: i64, at: Nanos },
+    /// A fill the venue decided.
+    ///
+    /// Only meaningful under [`crate::kernel::Matching::Venue`]; a
+    /// simulated run produces its own fills and one arriving from
+    /// outside would be a second matcher.
+    VenueFill(oq_types::Fill),
 }
 
 impl Event {
@@ -83,6 +99,7 @@ impl Event {
             Self::Funding { .. } => kind::FUNDING,
             Self::Time(_) => kind::TIME,
             Self::MarginDeposit { .. } => kind::MARGIN_DEPOSIT,
+            Self::VenueFill(_) => kind::VENUE_FILL,
         }
     }
 
@@ -93,6 +110,10 @@ impl Event {
             Self::Tick(t) => t.stamp.exch,
             Self::Submit { stamp, .. } | Self::Cancel { stamp, .. } => stamp.exch,
             Self::Funding { at, .. } | Self::Time(at) | Self::MarginDeposit { at, .. } => *at,
+            // The venue's clock, not this process's. A fill is ordered
+            // by when it happened, and the local receive time is a
+            // property of the link rather than of the trade.
+            Self::VenueFill(f) => f.stamp.exch,
         }
     }
 
@@ -154,6 +175,27 @@ impl Event {
                 put_i64(&mut out, mark.0);
             }
             Self::Time(at) => put_i64(&mut out, at.0),
+            Self::VenueFill(f) => {
+                put_i64(&mut out, f.stamp.exch.0);
+                put_i64(&mut out, f.stamp.local.0);
+                out.extend_from_slice(&f.instrument.0.to_le_bytes());
+                out.extend_from_slice(&f.order.0.to_le_bytes());
+                out.extend_from_slice(&f.trade.0.to_le_bytes());
+                put_i64(&mut out, f.price.0);
+                put_i64(&mut out, f.qty.0);
+                out.push(match f.side {
+                    Side::Buy => 0,
+                    Side::Sell => 1,
+                });
+                out.push(match f.offset {
+                    oq_types::Offset::Open => 0,
+                    oq_types::Offset::Close => 1,
+                });
+                out.push(match f.liquidity {
+                    oq_types::Liquidity::Maker => 0,
+                    oq_types::Liquidity::Taker => 1,
+                });
+            }
             Self::MarginDeposit { amount, at } => {
                 put_i64(&mut out, amount);
                 put_i64(&mut out, at.0);
@@ -266,6 +308,50 @@ impl Event {
                     amount: i64_at(payload, 0)?,
                     at: Nanos(i64_at(payload, 1)?),
                 })
+            }
+            kind::VENUE_FILL => {
+                // Exact length, like every other kind: a truncated
+                // record must not read as a valid shorter one.
+                // 8+8 stamp, 4 instrument, 8 order, 8 trade, 8 price,
+                // 8 qty, and three one-byte enums.
+                if payload.len() != 55 {
+                    return None;
+                }
+                let u32_at = |i: usize| -> Option<u32> {
+                    payload
+                        .get(i..i + 4)
+                        .map(|s| u32::from_le_bytes(s.try_into().expect("4")))
+                };
+                let u64_at = |i: usize| -> Option<u64> {
+                    payload
+                        .get(i..i + 8)
+                        .map(|s| u64::from_le_bytes(s.try_into().expect("8")))
+                };
+                Some(Self::VenueFill(oq_types::Fill {
+                    stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
+                    instrument: oq_types::InstrumentId(u32_at(16)?),
+                    order: OrderId(u64_at(20)?),
+                    trade: oq_types::TradeId(u64_at(28)?),
+                    price: PriceTicks(i64::from_le_bytes(payload.get(36..44)?.try_into().ok()?)),
+                    qty: oq_types::QtyLots(i64::from_le_bytes(
+                        payload.get(44..52)?.try_into().ok()?,
+                    )),
+                    side: match payload.get(52)? {
+                        0 => Side::Buy,
+                        1 => Side::Sell,
+                        _ => return None,
+                    },
+                    offset: match payload.get(53)? {
+                        0 => oq_types::Offset::Open,
+                        1 => oq_types::Offset::Close,
+                        _ => return None,
+                    },
+                    liquidity: match payload.get(54)? {
+                        0 => oq_types::Liquidity::Maker,
+                        1 => oq_types::Liquidity::Taker,
+                        _ => return None,
+                    },
+                }))
             }
             _ => None,
         }
