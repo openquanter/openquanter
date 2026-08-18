@@ -10,6 +10,7 @@ default-members = [
     "crates/oq-data",
     "crates/oq-engine",
     "crates/oq-examples",
+    "crates/oq-features",
     "crates/oq-gateway",
     "crates/oq-hash",
     "crates/oq-ingest",
@@ -31,6 +32,7 @@ members = [
     "crates/oq-data",
     "crates/oq-engine",
     "crates/oq-examples",
+    "crates/oq-features",
     "crates/oq-hash",
     "crates/oq-journal",
     "crates/oq-ingest",
@@ -65,6 +67,7 @@ oq-cli = { path = "crates/oq-cli", version = "2.0.0-alpha.1" }
 oq-core = { path = "crates/oq-core", version = "2.0.0-alpha.1" }
 oq-data = { path = "crates/oq-data", version = "2.0.0-alpha.1" }
 oq-engine = { path = "crates/oq-engine", version = "2.0.0-alpha.1" }
+oq-features = { path = "crates/oq-features", version = "2.0.0-alpha.1" }
 oq-gateway = { path = "crates/oq-gateway", version = "2.0.0-alpha.1" }
 oq-hash = { path = "crates/oq-hash", version = "2.0.0-alpha.1" }
 oq-journal = { path = "crates/oq-journal", version = "2.0.0-alpha.1" }
