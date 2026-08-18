@@ -210,16 +210,17 @@ depends on the invariants established here.
   strict as-of join utilities; `oq-features` skeleton — one definition, two
   execution paths derived from it rather than written twice, and a
   consistency metric tested against the four classic ways they drift apart.
-- `oq-cli`: `data` and `replay` subcommands, shipped; `oq-stats` integrated so
-  sweeps emit DSR/PBO by default. `backtest`, `sweep`, and `parity` were
-  planned here and are **not** being written, for reasons that are properties
-  of the design rather than of the schedule: a strategy is compiled Rust, so no
-  argument can name one and the subcommand could only ever be a worse
-  `cargo run --example`; and `oq-parity`'s `compare` takes a `RunManifest` and a
-  `RunOutput`, neither of which has a serialised form, so a `parity` subcommand
-  would first have to invent that file format. The file format is the real
-  missing piece and is tracked as such; the wrapper is not. `oq` names all
-  three when asked for them, rather than reporting an unknown command.
+- `oq-cli`: `data`, `replay` and `parity` subcommands, shipped; `oq-stats`
+  integrated so sweeps emit DSR/PBO by default. `parity` was recorded here as
+  *not coming*, on the grounds that `compare` takes a `RunManifest` and a
+  `RunOutput` and neither had a serialised form. That was the honest answer and
+  it named the wrong thing as impossible: the **file format** was what was
+  missing, `oq_parity::wire` is it, and the subcommand followed in an
+  afternoon. `backtest` and `sweep` remain absent for a reason that is a
+  property of the design rather than the schedule — a strategy is compiled
+  Rust, so no argument can name one and the subcommand could only ever be a
+  worse `cargo run --example`. `oq` names both when asked, rather than
+  reporting an unknown command.
 - **Adoption readiness (G11):** quickstart documentation, at least two example
   strategies, sample dataset with golden tests, and a verified cold-start run
   by someone outside the core team.

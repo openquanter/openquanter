@@ -13,6 +13,7 @@
 | [路线图](ROADMAP.zh-CN.md) · [English](ROADMAP.md) | M0–M5 与 2.0 各里程碑、启动触发条件与验收门、发布节奏、风险清单 |
 | [实施方案](IMPLEMENTATION.zh-CN.md) · [English](IMPLEMENTATION.md) | 架构、设计决策、crate 划分、分阶段任务计划、测试策略、性能预算 |
 | [Tick 格式规范](TICK-FORMAT.zh-CN.md) · [English](TICK-FORMAT.md) | 回测读取的磁盘格式：布局、只追加字段规则、完整性与身份的区分。**§4 起是提案中的 v3**；`oq-data` 实现的是 v2 |
+| [run 文件格式](RUN-FORMAT.zh-CN.md) · [English](RUN-FORMAT.md) | **一次运行产出了什么、又是在什么身份下产出的,放在同一个文件里**——为什么清单必须在文件内部,以及为什么被截断的基准是被拒绝而不是被比较 |
 | [带仓切换](CUTOVER.zh-CN.md) · [English](CUTOVER.md) | **不平仓把实盘策略从一套系统迁到另一套**：单系统不变量、暴露区间、以及“中止”到底是什么——骨架，未经演练，并且明确说明哪些还缺 |
 | [保证金保真度](MARGIN-FIDELITY.zh-CN.md) · [English](MARGIN-FIDELITY.md) | **没有保证金模型的回测错得有多离谱**、为什么答案是跨窗口尾部而不是均值、以及哪些数字在改变窗口配比后依然成立 |
 | [执行契约](EXECUTION.zh-CN.md) · [English](EXECUTION.md) | 与交易所无关的下单契约：三态结果、客户端订单号、以及"答案丢失"的代价 |
