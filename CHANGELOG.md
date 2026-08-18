@@ -28,6 +28,57 @@ The first version-stamped state of the workspace. Nothing has been
 tagged or published to crates.io yet, so everything below is "since the
 repository started" rather than since a previous release.
 
+### Semantics and event schema
+
+Recorded here because the rules above require it, and they were not
+followed at the time — each of these changed behaviour and landed
+without an entry. Reconstructed after the fact, which is worse than
+writing it down and better than leaving it out.
+
+- **`Contract::notional` and `Contract::unrealized` saturate rather than
+  wrap.** *Changes results.* Both computed in `i128` and converted with
+  `as i64`, which truncates: a notional past the range came back
+  negative, put the position in the first tier, produced a maintenance
+  requirement of zero, and made it unliquidatable. Found by a generated
+  input under `FR-MARGIN-7`. **Behavioural delta:** any run whose price
+  times quantity times tick value exceeded `i64::MAX` now has a
+  maintenance requirement where it previously had none, and may liquidate
+  where it previously could not. Runs inside the range are unchanged, and
+  every golden in the repository was inside it — none needed
+  regenerating.
+- **`Event::VenueFill` (kind 8) added to the event schema.** A fill the
+  venue decided, as opposed to one the matcher produced. Additive:
+  journals written before it contain no such record, so replay of an
+  existing journal is unchanged. A journal written *with* it cannot be
+  read by an earlier build, which is what the per-kind length check
+  exists to make loud rather than silent.
+- **`State::matching` added, defaulting to `Matching::Simulated`.** Under
+  `Venue` the matcher holds resting orders and never fills one; fills
+  arrive as `VenueFill`. The default is today's behaviour, so no existing
+  run changes.
+- **`RejectReason::NotVenueMatched` added.** A venue fill arriving at a
+  simulated kernel is refused rather than applied.
+- **`oq_gateway::OrderUpdate` gains `side` and `maker`.** The venue was
+  sending both and the parser discarded them. `maker` decides the fee,
+  which on some venues is the difference between a rebate and a charge.
+  Absent means taker.
+- **`binance::classify` is now total over responses**, handling 2xx by
+  delegating to `ack_from`. Its contract surface was a pair where OKX's
+  was one function, so no single conformance suite could drive both.
+  `place` is unaffected — it never hands a 2xx to that function.
+- **`RunResult::margin_usage` replaces nothing and adds a field**;
+  `RunConfig::track_margin` defaults to off, so no existing run changes
+  or pays for it.
+
+### Documentation
+
+- The `sweep_100` benchmark ran on `MarketShape::trending(600_000)`,
+  whose drift compounds per observation: the price ended at exactly
+  `i64::MAX`. **Every statistic that gate has printed was arithmetic on a
+  saturated price**, including the PBO of 0.4975 quoted in its own
+  output. It runs on a calm market now and asserts the market it got. No
+  documentation quoted those figures, so nothing else needed changing.
+
 ### Engine
 
 - `oq-types` — domain types, `i64` fixed-point arithmetic, typestate
