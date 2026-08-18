@@ -410,7 +410,7 @@ dynamic dispatch, but that it made the whole graph mutable at runtime.
 | Columnar data | `arrow-rs` + `parquet-rs` | Zero-copy interchange with the Python analysis ecosystem |
 | Numerics | `i64` fixed point on the hot path; decimal at ledger boundaries | Exact money arithmetic without float error; float never touches money |
 | Inference | ONNX runtime and compiled decision trees | Chosen per model class by measured latency, not by framework preference |
-| Testing | `criterion` (adopted); `proptest` and a purpose-built fault simulator (planned) | Benchmarks today; generated-input invariants and whole-system fuzzing are intended and not yet built |
+| Testing | `criterion`, `proptest`, and a purpose-built fault simulator — all adopted | Benchmarks; generated-input invariants over the matching and margin properties `FR-MATCH-7` and `FR-MARGIN-7` name, which found a wrapping conversion that gave a large enough position no maintenance requirement at all; and `oq-sim`'s corpus driving the live books, which found a redelivered fill doubling a position. `proptest` is a dev-dependency in both crates, so the per-crate budgets are unchanged |
 | Venue adapters | Written per venue against a thin contract | Universal abstraction layers hide exactly the venue-specific semantics that cause incidents |
 
 ---
@@ -436,7 +436,7 @@ dynamic dispatch, but that it made the whole graph mutable at runtime.
 | `oq-cli` | `backtest` / `sweep` / `live` / `replay` / `parity` / `data` | M2 |
 | `oq-sim` | Randomized whole-system fault simulation and scenario corpus | M1 onward |
 | `oq-risk` | RiskGate: limits, kill switch, reconciliation | M3 |
-| `oq-gateway` | Venue adapters, conformance suite, reconciliation protocol, order-ID attribution | M3 ★ |
+| `oq-gateway` | Venue adapters, **execution conformance suite** (`conformance::check` drives an adapter through the placement contract using payloads it supplies), reconciliation protocol, order-ID attribution | M3 ★ |
 | `oq-live` | Process assembly, snapshot recovery, graceful restart | M3 |
 | `oq-features` | Point-in-time feature layer, online/offline consistency metrics | M2 skeleton / M5 |
 | `oq-infer` | ONNX and compiled-tree inference, prediction parity gate | M5 |
@@ -621,7 +621,7 @@ Four layers, each answering a different question.
 | Layer | Question | Mechanism |
 |---|---|---|
 | **Unit** | Does this function do what it says? | Standard `cargo test`, fast, per-crate |
-| **Property** | Are the invariants preserved under arbitrary inputs? | Quantity conservation, price-time priority, no crossed book, non-negative margin, monotonic liquidation price. **Hand-written cases today**; `proptest` is the intended generator and is not yet a dependency |
+| **Property** | Are the invariants preserved under arbitrary inputs? | Quantity conservation, price-time priority, no crossed book, non-negative margin, monotonic liquidation price — **all checked by `proptest` over generated inputs**. The first run found two things: a notional that wrapped, giving a large enough position no maintenance requirement at all; and a property written **too strongly** — a position posted with less margin than its own requirement genuinely does have a liquidation price above its entry, because it is on the wrong side of the line the instant it opens. That one was the assertion being wrong and the code being right; the property now carries the qualifier and the case it carved out is asserted as a property of its own |
 | **Golden** | Did observable behavior change? | Sample data replayed, full output compared; baselines carry the identity triple (D13) and regenerate only with recorded human confirmation |
 | **Parity** | Do two implementations or two modes agree? | `oq-parity` trade-by-trade diff with attribution; used for ports, refactors, throughput mode, and Python/Rust inference. A stale baseline is reported as stale, never as a difference |
 | **Simulation** | Does the whole system survive hostile conditions? | `oq-sim` randomized fault injection, every failure reproducible from `(seed, commit)` |
