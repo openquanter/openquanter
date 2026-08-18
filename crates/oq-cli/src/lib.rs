@@ -25,6 +25,29 @@
 //! launches, and the budget check pins that at zero. What it adds is a
 //! list, a lookup, and an error message that names what is missing.
 
+/// Three commands the plan asked for that are deliberately absent, and
+/// why. Kept in the source rather than only in the roadmap, because this
+/// is where someone looks after typing `oq backtest` and getting nothing.
+///
+/// - **`backtest` and `sweep`.** A strategy is compiled Rust. Running an
+///   arbitrary one from a command line needs a plugin or scripting
+///   boundary that does not exist, and running only the bundled ones
+///   would be `cargo run --example hello` with fewer options — which the
+///   quickstart already says. The subcommands would be a worse spelling
+///   of something that works.
+/// - **`parity`.** Comparing two runs needs both runs in a file, and a
+///   run's output has no serialised format yet. Inventing one here would
+///   fix the format at the command line rather than where the
+///   attribution work will need it.
+pub const ABSENT: &[(&str, &str)] = &[
+    (
+        "backtest",
+        "a strategy is compiled Rust; use `cargo run --example`",
+    ),
+    ("sweep", "same reason as backtest"),
+    ("parity", "a run's output has no file format yet"),
+];
+
 /// The tools `oq` knows about, with what each is for.
 ///
 /// Ordered as a reader meets them: capture something, check it, convert
@@ -53,6 +76,10 @@ pub const TOOLS: &[(&str, &str)] = &[
         "convert an archive into the tick format a backtest reads",
     ),
     (
+        "data",
+        "characterise a tick file before a backtest trusts it",
+    ),
+    (
         "recon",
         "read a live account and say whether it matches expectations",
     ),
@@ -61,6 +88,10 @@ pub const TOOLS: &[(&str, &str)] = &[
         "prove the order path works, against a testnet",
     ),
     ("trade", "run a strategy against a venue"),
+    (
+        "replay",
+        "read back what a live run decided, from its journal",
+    ),
 ];
 
 /// The binary implementing `name`, if it is one of ours.
@@ -83,7 +114,8 @@ pub fn crate_for(name: &str) -> Option<&'static str> {
         "capture" | "book-check" | "trade-check" | "merge" | "resequence" => "oq-l2feed",
         "ingest" => "oq-ingest",
         "recon" | "order-check" => "oq-gateway",
-        "trade" => "oq-live",
+        "data" => "oq-data",
+        "trade" | "replay" => "oq-live",
         _ => return None,
     })
 }
@@ -135,5 +167,42 @@ mod tests {
                 "{name}: a description that repeats the name says nothing"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod absent_tests {
+    use super::*;
+
+    #[test]
+    fn an_absent_command_is_named_rather_than_merely_missing() {
+        // Someone typing `oq backtest` read a plan that mentions it. "No
+        // such tool" sends them looking for a typo; naming it and saying
+        // why sends them to the thing that works.
+        for (name, why) in ABSENT {
+            assert!(
+                binary_for(name).is_none(),
+                "{name} is both present and absent"
+            );
+            assert!(why.len() > 15, "{name}: {why:?} does not explain anything");
+        }
+    }
+
+    #[test]
+    fn nothing_is_both_shipped_and_absent() {
+        let shipped: std::collections::HashSet<_> = TOOLS.iter().map(|(n, _)| *n).collect();
+        for (name, _) in ABSENT {
+            assert!(!shipped.contains(name), "{name} is in both lists");
+        }
+    }
+
+    #[test]
+    fn the_new_tools_name_their_crates_too() {
+        for name in ["data", "replay"] {
+            assert!(crate_for(name).is_some(), "{name} has no crate");
+            assert!(binary_for(name).is_some(), "{name} has no binary");
+        }
+        assert_eq!(crate_for("data"), Some("oq-data"));
+        assert_eq!(crate_for("replay"), Some("oq-live"));
     }
 }
