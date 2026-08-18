@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn the_first_read_reports_nothing() {
         let mut w = Watcher::new();
-        let changes = w.observe(&snap(vec![leg("LONG", 0.016, 63_735.2)], vec![], 5_000.0));
+        let changes = w.observe(&snap(vec![leg("LONG", 0.400, 30_000.0)], vec![], 5_000.0));
         assert!(changes.is_empty());
         assert_eq!(w.tally.reads, 1);
     }
@@ -358,12 +358,12 @@ mod tests {
     #[test]
     fn a_cover_filling_shows_as_a_resize_and_names_the_moved_anchor() {
         let mut w = Watcher::new();
-        w.observe(&snap(vec![leg("LONG", 0.016, 63_735.2)], vec![], 5_000.0));
-        let changes = w.observe(&snap(vec![leg("LONG", 0.048, 62_000.0)], vec![], 5_000.0));
+        w.observe(&snap(vec![leg("LONG", 0.400, 30_000.0)], vec![], 5_000.0));
+        let changes = w.observe(&snap(vec![leg("LONG", 1.200, 62_000.0)], vec![], 5_000.0));
 
         assert_eq!(changes.len(), 1);
         let text = changes[0].describe();
-        assert!(text.contains("0.016 -> 0.048"), "{text}");
+        assert!(text.contains("0.4 -> 1.2"), "{text}");
         assert!(
             text.contains("entry"),
             "the anchor moved and the line says so: {text}"
@@ -375,11 +375,11 @@ mod tests {
     #[test]
     fn a_position_appearing_and_disappearing_are_distinct_changes() {
         let mut w = Watcher::new();
-        w.observe(&snap(vec![leg("LONG", 0.016, 63_735.2)], vec![], 5_000.0));
+        w.observe(&snap(vec![leg("LONG", 0.400, 30_000.0)], vec![], 5_000.0));
 
         let opened = w.observe(&snap(
             vec![
-                leg("LONG", 0.016, 63_735.2),
+                leg("LONG", 0.400, 30_000.0),
                 leg("SHORT", -0.002, 62_808.82),
             ],
             vec![],
@@ -387,7 +387,7 @@ mod tests {
         ));
         assert!(matches!(opened[0], Change::PositionOpened { .. }));
 
-        let closed = w.observe(&snap(vec![leg("LONG", 0.016, 63_735.2)], vec![], 5_000.0));
+        let closed = w.observe(&snap(vec![leg("LONG", 0.400, 30_000.0)], vec![], 5_000.0));
         assert!(matches!(closed[0], Change::PositionClosed { .. }));
     }
 
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn quiet_reads_and_failed_reads_are_counted_separately() {
         let mut w = Watcher::new();
-        let s = snap(vec![leg("LONG", 0.016, 63_735.2)], vec![], 5_000.0);
+        let s = snap(vec![leg("LONG", 0.400, 30_000.0)], vec![], 5_000.0);
         w.observe(&s);
         w.observe(&s);
         w.incomplete();
