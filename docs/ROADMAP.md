@@ -45,9 +45,9 @@ commitments.
 |---|---|---|---|
 | **M0** | Foundations: repository, capture, statistics | 3–6 pw | Mostly landed |
 | **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
-| **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | Committed |
+| **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | **Mostly built; G3, G7's parity half and G11 are blocked on inputs this project cannot reach** |
 | **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Half built, entry triggers unmet** |
-| **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered |
+| **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered (a first L1 exists, uncalibrated) |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
 | **2.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
 
@@ -318,11 +318,15 @@ not in the matching kernel.
   structured metrics, alert integration hooks.
 - **Attribution of the live/backtest gap.** Both the entry trigger and the exit
   gate above require every divergence to be *attributed rather than tolerated*,
-  and nothing currently produces that attribution — the requirement names a
-  standard without naming an instrument. The instrument decomposes the gap into
-  slippage, queue position, funding against model, latency, and fee tier, and
-  reports what will not decompose as an **unexplained residual**. Its
-  prerequisite is that the live process journals its decisions, which today it
+  and for a long time nothing produced that attribution — the requirement named
+  a standard without naming an instrument. **The instrument now exists**:
+  `oq_parity::attribution` decomposes the gap into slippage, queue position,
+  funding against model, latency, and fee tier, and reports what will not
+  decompose as an **unexplained residual**. The gap comes from two independent
+  sources — the venue's realized P&L and the kernel's — and the components are
+  computed separately, so the residual is *subtracted rather than assembled*; a
+  test deliberately mis-computes a component and asserts the error lands in it.
+  Its prerequisite is that the live process journals its decisions, which it
   does now — `oq-live` depends on `oq-journal` and writes in `record.rs`. The
   second is now met at the kernel: `oq-live` depends on `oq-core` and
   `oq-margin`; `oq_live::shadow` runs the same `Kernel` a backtest runs beside
