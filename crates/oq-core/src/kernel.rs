@@ -54,6 +54,27 @@ pub enum Output {
 }
 
 /// Why a submission was refused.
+/// Who decides which orders trade.
+///
+/// This is the whole of what separates a backtest from a live run, and
+/// naming it is what makes `IMPLEMENTATION` §1's claim — that the two
+/// differ only in the event producer — true rather than aspirational.
+/// The accounting, the margin, the funding and the state are one
+/// implementation; only the source of fills changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Matching {
+    /// The matcher decides, from the price path. A backtest.
+    #[default]
+    Simulated,
+    /// The venue decides, and says so with [`Event::VenueFill`].
+    ///
+    /// The matcher still holds resting orders — so the working set and
+    /// the position are right — but never fills one. A kernel that both
+    /// matched and accepted venue fills would book every trade twice,
+    /// and the second copy would look exactly like the first.
+    Venue,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
     /// Quantity was not positive.
@@ -62,6 +83,13 @@ pub enum RejectReason {
     DuplicateId,
     /// The account has no collateral.
     NoMargin,
+    /// A venue fill arrived at a kernel that is doing its own matching.
+    ///
+    /// Refused rather than applied: a simulated run produces its own
+    /// fills, so one from outside is a second matcher and taking it
+    /// would double the position silently — in the one mode where
+    /// nobody is watching for that.
+    NotVenueMatched,
 }
 
 /// What the venue charges per fill.
@@ -154,6 +182,13 @@ pub struct State {
     /// silently assumes. It exists so that assumption can be run as the
     /// control arm of an experiment rather than left implicit.
     pub enforce_liquidation: bool,
+    /// Who decides which orders trade.
+    ///
+    /// [`Matching::Simulated`] by default, so every existing run is
+    /// unchanged: a state that acquired venue matching without being
+    /// asked would be a backtest silently waiting for fills that never
+    /// arrive.
+    pub matching: Matching,
 }
 
 impl State {
@@ -181,6 +216,7 @@ impl State {
             fees: Cash::ZERO,
             fee_schedule: Fees::none(),
             enforce_liquidation: true,
+            matching: Matching::Simulated,
         }
     }
 
@@ -550,13 +586,68 @@ impl Kernel {
                 self.state.now = at;
                 self.state.balance = self.state.balance.add(Cash(amount));
             }
+            Event::VenueFill(fill) => self.on_venue_fill(&fill),
         }
         &self.outputs
+    }
+
+    /// Book a fill the venue decided.
+    ///
+    /// The accounting is the matcher's, to the letter — the same fee
+    /// charge, the same position update, the same `Output::Filled`. That
+    /// is the point: a live run and a backtest keep their books with one
+    /// implementation, and only the source of fills differs.
+    ///
+    /// Two things happen here that the matched path does not need.
+    ///
+    /// The order is withdrawn from the matching engine. Under
+    /// [`Matching::Venue`] the matcher never fills, so this is not about
+    /// double-filling now — it is about replay. A journal carrying both
+    /// a `Submit` and the venue's fill, replayed by a build whose mode
+    /// was not set, would rest the order and match it too, and the
+    /// second copy would be indistinguishable from the first.
+    ///
+    /// And a fill under [`Matching::Simulated`] is refused rather than
+    /// applied. A simulated run produces its own fills; one arriving
+    /// from outside is a second matcher, and taking it would silently
+    /// double a position in the one mode where nobody is looking for
+    /// that.
+    fn on_venue_fill(&mut self, fill: &Fill) {
+        if self.state.matching != Matching::Venue {
+            self.outputs.push(Output::Rejected {
+                id: fill.order,
+                reason: RejectReason::NotVenueMatched,
+            });
+            return;
+        }
+        self.state.now = fill.stamp.exch;
+        // Withdrawn before the books move, so a panic between the two
+        // cannot leave an order that has already paid.
+        self.state.engine.cancel(fill.order);
+        self.working.retain(|w| *w != fill.order);
+
+        let fee = self.state.fee_schedule.charge(self.state.contract, fill);
+        self.state.fees = self.state.fees.add(fee);
+        self.state.balance = self.state.balance.sub(fee);
+        self.state.apply_fill(fill);
+        self.outputs.push(Output::Filled(*fill));
+        // The venue's fill can be what makes the account liquidatable,
+        // and waiting for the next tick to notice would report the
+        // liquidation at the wrong price.
+        self.check_liquidation(fill.price);
     }
 
     fn on_tick(&mut self, tick: &Tick) {
         self.state.now = tick.stamp.exch;
         self.state.mark = tick.last;
+        if self.state.matching == Matching::Venue {
+            // The venue is matching. The mark, the clock, the funding
+            // and the liquidation check all still follow the price —
+            // only the decision about which orders trade belongs
+            // elsewhere.
+            self.check_liquidation(tick.last);
+            return;
+        }
 
         // Copy out before touching state: the engine's buffer is
         // reused, and applying a fill mutates the state the next fill
