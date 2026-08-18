@@ -334,6 +334,19 @@ pub struct OrderUpdate {
     ///
     /// The deduplication key: a stream that reconnects can redeliver,
     /// and a fill counted twice is a position that never existed.
+    /// `"BUY"` or `"SELL"`, in the venue's own spelling.
+    ///
+    /// Read rather than inferred. Without it a fill can only be booked
+    /// by looking up what this process asked for, which works for its
+    /// own orders and not at all for anything else on the account — and
+    /// "we sent a buy" is a different fact from "the venue filled a
+    /// buy".
+    pub side: String,
+    /// Whether this fill made liquidity.
+    ///
+    /// Decides the fee, which is the difference between a rebate and a
+    /// charge on some venues — an order of magnitude, not a rounding.
+    pub maker: bool,
     pub trade_id: Option<i64>,
     /// Venue event time, milliseconds.
     pub event_ms: i64,

@@ -207,6 +207,8 @@ mod tests {
             last_qty: "0.001".into(),
             cumulative_qty: "0.001".into(),
             last_price: "60000".into(),
+            side: "BUY".into(),
+            maker: false,
             trade_id,
             event_ms: 0,
         }
@@ -309,6 +311,8 @@ mod ownership {
             last_qty: "0.001".into(),
             cumulative_qty: "0.001".into(),
             last_price: "60000".into(),
+            side: "BUY".into(),
+            maker: false,
             trade_id,
             event_ms: 0,
         }

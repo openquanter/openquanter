@@ -951,6 +951,11 @@ pub fn parse_user_event(payload: &str) -> Option<UserEvent> {
                 last_qty: field_str(inner, "l").unwrap_or_else(|| "0".into()),
                 cumulative_qty: field_str(inner, "z").unwrap_or_else(|| "0".into()),
                 last_price: field_str(inner, "L").unwrap_or_else(|| "0".into()),
+                side: field_str(inner, "S").unwrap_or_default(),
+                // Absent means taker: the venue sets it only when the
+                // fill made liquidity, and defaulting the other way
+                // would credit a maker rebate to an order that paid.
+                maker: field_bool(inner, "m").unwrap_or(false),
                 // Absent, or -1 when the event is not a fill. Both mean
                 // the same thing and both must map to None, or a
                 // deduplication table acquires an entry for "-1" that
@@ -985,6 +990,38 @@ mod user_stream {
                 assert_eq!(u.trade_id, Some(481_923), "the deduplication key");
                 assert_eq!(u.event_ms, 1_786_891_783_639);
             }
+            other => panic!("expected an order update, got {other:?}"),
+        }
+    }
+
+    /// The side is read from the venue rather than inferred from what
+    /// this process asked for. The two are different facts, and only
+    /// one of them is what happened.
+    #[test]
+    fn a_fill_says_which_way_it_went() {
+        match parse_user_event(FILL) {
+            Some(UserEvent::Order(u)) => assert_eq!(u.side, "BUY"),
+            other => panic!("expected an order update, got {other:?}"),
+        }
+    }
+
+    /// Maker or taker decides the fee, and on some venues that is the
+    /// difference between a rebate and a charge — an order of
+    /// magnitude, not a rounding. The venue sets the flag only when the
+    /// fill made liquidity, so absent must read as taker: defaulting the
+    /// other way would credit a rebate to an order that paid.
+    #[test]
+    fn absent_means_taker_rather_than_maker() {
+        match parse_user_event(FILL) {
+            Some(UserEvent::Order(u)) => {
+                assert!(!u.maker, "this payload has no `m`, so it took liquidity");
+            }
+            other => panic!("expected an order update, got {other:?}"),
+        }
+
+        let made = FILL.replace(r#""t":481923"#, r#""m":true,"t":481923"#);
+        match parse_user_event(&made) {
+            Some(UserEvent::Order(u)) => assert!(u.maker),
             other => panic!("expected an order update, got {other:?}"),
         }
     }

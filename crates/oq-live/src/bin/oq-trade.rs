@@ -272,6 +272,23 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The venue's own number. Books opened at a configured balance would
+    // report an equity curve about a different account.
+    let starting_balance = match venue.account() {
+        Ok(a) => {
+            println!(
+                "balance          {:.2} (wallet, from the venue)",
+                a.wallet_balance
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            Cash((a.wallet_balance * oq_types::CASH_SCALE as f64) as i64)
+        }
+        Err(e) => {
+            eprintln!("balance          FAILED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let resting: Vec<String> = match venue.open_orders(&symbol) {
         Ok(o) => o.into_iter().map(|o| o.client_order_id).collect(),
         Err(e) => {
@@ -350,6 +367,42 @@ fn main() -> ExitCode {
         }
     };
     println!("startup          the venue agrees with what this process expects");
+
+    // The strategy's own books, kept by the kernel a backtest uses.
+    //
+    // Until this existed the Context below was built from literal zeros,
+    // so every strategy that decides by reading `ctx.position` — which is
+    // all of them — saw a constant. A strategy that opens when flat
+    // opened again on every observation.
+    let mut books = oq_live::books::Books::new(
+        oq_types::InstrumentId::new(1),
+        oq_margin::Contract::new(10_000),
+        oq_margin::TierTable::example_btcusdt(),
+        // The venue's number, not a configured one. Books opened at a
+        // balance nobody read would report an account that is not this.
+        starting_balance,
+    );
+    for p in &positions {
+        let amount = p.amount;
+        if amount != 0.0 {
+            #[allow(clippy::cast_possible_truncation)]
+            let lots = oq_types::QtyLots(
+                (amount.abs() * 10f64.powi(i32::from(instrument.qty_scale))) as i64,
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            let entry = oq_types::PriceTicks(
+                (p.entry_price * 10f64.powi(i32::from(instrument.price_scale))) as i64,
+            );
+            let side = if amount > 0.0 { Side::Buy } else { Side::Sell };
+            books.adopt(side, lots, entry, Nanos(now_ns()));
+            println!(
+                "adopted          {} {} lots at {}",
+                if amount > 0.0 { "long" } else { "short" },
+                lots.0,
+                entry.0
+            );
+        }
+    }
 
     // Before anything is recorded, read what the last run left. An order
     // this process wrote and never heard about may be resting right now,
@@ -516,15 +569,15 @@ fn main() -> ExitCode {
                     if let Some(tick) = closed {
                         ticks += 1;
                         trader.record_tick(&tick);
-                        let ctx = Context {
-                            tick,
-                            position: QtyLots(0),
-                            entry: PriceTicks(0),
-                            short_position: QtyLots(0),
-                            short_entry: PriceTicks(0),
-                            equity: Cash(0),
-                            working: trader.working() as usize,
-                        };
+                        for output in books.on_tick(&tick) {
+                            // Under venue matching the kernel does not
+                            // fill, so anything here is the account
+                            // going past its maintenance requirement —
+                            // which is worth a line rather than a
+                            // silence.
+                            println!("books            {output:?}");
+                        }
+                        let ctx = books.context(tick);
                         for outcome in trader.on_tick(&ctx, now) {
                             match &outcome {
                                 Outcome::Sent { .. } => sent += 1,
@@ -548,6 +601,13 @@ fn main() -> ExitCode {
                     u.client_id, u.status, u.cumulative_qty, u.last_price
                 );
                 trader.apply(&u);
+                if let Some(fill) = fill_of(&u, &instrument) {
+                    for output in books.on_venue_fill(&fill) {
+                        println!("books            {output:?}");
+                    }
+                } else if matches!(u.status.as_str(), "CANCELED" | "EXPIRED") {
+                    books.on_closed();
+                }
                 if matches!(u.status.as_str(), "FILLED" | "CANCELED" | "EXPIRED") {
                     trader.forget(&u.client_id);
                 }
@@ -772,4 +832,66 @@ fn decimal_field(body: &str, key: &str, scale: u8) -> Option<i64> {
     }
     digits.push_str(&frac);
     digits.parse().ok()
+}
+
+/// The fill inside an order update, when there is one.
+///
+/// `None` for an update that reports no new quantity — an
+/// acknowledgement, a cancellation, an expiry. This is the one place in
+/// the live loop where double-counting is easy: the venue sends an
+/// update per state change, several of them carry a cumulative
+/// quantity, and booking that cumulative number more than once would
+/// build a position out of one trade.
+///
+/// So the quantity taken is `last_qty`, the amount *this* update filled,
+/// and an update whose `last_qty` is zero is not a fill however
+/// promising its status looks.
+fn fill_of(u: &oq_gateway::OrderUpdate, instrument: &Instrument) -> Option<oq_types::Fill> {
+    let scaled = |text: &str, scale: u8| -> Option<i64> {
+        let (int, frac) = text.split_once('.').unwrap_or((text, ""));
+        let mut digits = String::from(int.trim_start_matches('+'));
+        let frac: String = frac.chars().take(usize::from(scale)).collect();
+        digits.push_str(&frac);
+        for _ in frac.len()..usize::from(scale) {
+            digits.push('0');
+        }
+        digits.parse::<i64>().ok()
+    };
+
+    let qty = scaled(&u.last_qty, instrument.qty_scale)?;
+    if qty <= 0 {
+        return None;
+    }
+    let price = scaled(&u.last_price, instrument.price_scale)?;
+    if price <= 0 {
+        // A fill with no price is a report this build cannot book, and
+        // booking it at zero would price the position at nothing.
+        return None;
+    }
+
+    Some(oq_types::Fill {
+        stamp: oq_types::Stamp::new(now_ns(), now_ns()),
+        instrument: oq_types::InstrumentId::new(1),
+        order: OrderId(0),
+        trade: oq_types::TradeId(0),
+        side: if u.side.eq_ignore_ascii_case("BUY") {
+            Side::Buy
+        } else {
+            Side::Sell
+        },
+        // The venue tells us what it filled, not whether this process
+        // considered it an opening trade. Reduce-only would say so and
+        // this build does not read it, so the safe reading is that it
+        // opens — a close mistaken for an open overstates the position,
+        // which the reconciler then catches, while the reverse would
+        // quietly cancel a position that is still there.
+        offset: oq_types::Offset::Open,
+        price: oq_types::PriceTicks(price),
+        qty: QtyLots(qty),
+        liquidity: if u.maker {
+            oq_types::Liquidity::Maker
+        } else {
+            oq_types::Liquidity::Taker
+        },
+    })
 }

@@ -39,6 +39,7 @@
 #![forbid(unsafe_code)]
 
 pub mod book;
+pub mod books;
 pub mod feed;
 pub mod latency;
 pub mod record;
