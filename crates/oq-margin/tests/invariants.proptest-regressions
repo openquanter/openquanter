@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b3dff43cd195d224ea498166fd5832d903291cef487251aa667fd612e11cfc52 # shrinks to t = TierTable { tiers: [MarginTier { max_notional: Cash(100000000), rate: Ratio(218000), amount: Cash(0) }, MarginTier { max_notional: Cash(200000000), rate: Ratio(651000), amount: Cash(0) }, MarginTier { max_notional: Cash(300000000), rate: Ratio(1084000), amount: Cash(0) }, MarginTier { max_notional: Cash(400000000), rate: Ratio(1517000), amount: Cash(0) }] }, entry = 391761, n = 75070, size = 806570, margin = 1
+cc 2eaef5694bbd66e3cb227dc30aa1c8f3022797257430f07b447bc141c49a22c7 # shrinks to t = TierTable { tiers: [MarginTier { max_notional: Cash(100000000), rate: Ratio(1000), amount: Cash(0) }, MarginTier { max_notional: Cash(200000000), rate: Ratio(2000), amount: Cash(0) }, MarginTier { max_notional: Cash(300000000), rate: Ratio(3000), amount: Cash(0) }, MarginTier { max_notional: Cash(400000000), rate: Ratio(4000), amount: Cash(0) }] }, p = PriceTicks(41151001), a = 108516, extra = 140367, size = 900563

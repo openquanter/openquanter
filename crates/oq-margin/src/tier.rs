@@ -66,18 +66,46 @@ impl Contract {
     #[must_use]
     pub const fn notional(&self, price: PriceTicks, qty: QtyLots) -> Cash {
         let v = price.0 as i128 * qty.0.saturating_abs() as i128 * self.tick_cash as i128;
-        Cash(v as i64)
+        // Saturating, not truncating. `as i64` on an i128 **wraps**, and a
+        // notional that wrapped came back negative — which put the
+        // position in the first tier, produced a maintenance requirement
+        // of zero, and made it unliquidatable. A position too large to
+        // express is the one that most needs a margin requirement, and
+        // the wrong direction to fail is the one that says it needs
+        // none. Found by a generated input; the hand-written cases all
+        // used sizes that fit.
+        Cash(saturate(v))
     }
 
     /// Signed profit of a position marked from `entry` to `mark`.
     #[must_use]
     pub const fn unrealized(&self, entry: PriceTicks, mark: PriceTicks, qty: QtyLots) -> Cash {
         let delta = mark.0 as i128 - entry.0 as i128;
-        Cash((delta * qty.0 as i128 * self.tick_cash as i128) as i64)
+        // Saturating for the same reason as `notional`, and worse if it
+        // were not: an unrealized profit that wrapped to a loss is an
+        // equity figure that is wrong in the direction that triggers a
+        // liquidation nobody owed.
+        Cash(saturate(delta * qty.0 as i128 * self.tick_cash as i128))
     }
 }
 
 /// One maintenance-margin bracket.
+/// An `i128` as an `i64`, clamped rather than wrapped.
+///
+/// `as` truncates the high bits, so a value one past the range comes
+/// back as a large negative — which is not "too big", it is a different
+/// number with a different sign, and every comparison downstream reads
+/// it as small.
+const fn saturate(v: i128) -> i64 {
+    if v > i64::MAX as i128 {
+        i64::MAX
+    } else if v < i64::MIN as i128 {
+        i64::MIN
+    } else {
+        v as i64
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarginTier {
     /// Upper bound of the bracket, by notional. The last bracket uses

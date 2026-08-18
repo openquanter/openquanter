@@ -143,7 +143,8 @@ input this project cannot reach, the second has not been written.
 | Backtest | Run scheduling, funding, accounting, exports | Built |
 | Parity | Trade-by-trade diff, difference attribution, identity triple | Built |
 | Parity | **Run file format** (a baseline can be archived) | Built |
-| Testing | **Property tests** for engine and margin invariants | **Not built** (no `proptest`; invariants are covered by hand-written cases — FR-MATCH-7, FR-MARGIN-7) |
+| Testing | **Property tests** for margin invariants (FR-MARGIN-7) | Built — and the first run found a real defect, below |
+| Testing | **Property tests** for matching invariants (FR-MATCH-7) | **Not built** — quantity conservation, price-time priority, no crossed book, no negative fills |
 | Release | First public preview tag | Built |
 
 ### M2 — Python tier, fidelity reporting, research workflow

@@ -12,3 +12,10 @@ oq-types.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Generated inputs, for the invariants FR-MARGIN-7 names. A
+# dev-dependency: nothing that depends on this crate inherits it, and the
+# budget this workspace defends is what a *consumer* pulls in — the same
+# reasoning that puts `criterion` behind `cargo bench` in oq-examples.
+proptest = { version = "1", default-features = false, features = ["std"] }
