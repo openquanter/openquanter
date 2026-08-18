@@ -240,3 +240,229 @@ mod tests {
         assert!(err.contains("variance"), "{err}");
     }
 }
+
+/// Thresholds a sweep's statistics must clear to be packaged.
+///
+/// `FR-RESEARCH-3` asks that results past an overfitting threshold be
+/// marked, and in strict mode refused for deployment packaging. Marking
+/// alone is what every tool already does: it prints a number and leaves
+/// acting on it to somebody who has already decided the strategy works.
+/// The refusal is the part that changes behaviour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thresholds {
+    /// Largest acceptable probability of backtest overfitting.
+    ///
+    /// A sweep whose best configuration is a coin flip out of sample has
+    /// a PBO near 0.5, so anything approaching it is a search that found
+    /// its own noise.
+    pub max_pbo: f64,
+    /// Smallest acceptable deflated Sharpe ratio.
+    ///
+    /// The deflated ratio is a probability that the result survives the
+    /// number of trials that produced it. Below a half, the search is
+    /// more likely to have manufactured the winner than found it.
+    pub min_deflated_sharpe: f64,
+}
+
+impl Default for Thresholds {
+    /// Not derived from anything, and stated as such.
+    ///
+    /// A PBO of 0.5 is a coin flip, so 0.35 leaves room to be wrong
+    /// about the estimate itself; a deflated Sharpe of 0.95 is the
+    /// conventional confidence level. Both are conventions rather than
+    /// findings, and both are fields precisely so a caller who disagrees
+    /// changes a number rather than removing the check.
+    fn default() -> Self {
+        Self {
+            max_pbo: 0.35,
+            min_deflated_sharpe: 0.95,
+        }
+    }
+}
+
+/// Why a sweep must not be packaged for deployment.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Refusal {
+    /// The probability of overfitting is too high.
+    Overfit {
+        /// What the sweep measured.
+        pbo: f64,
+        /// What it had to be at most.
+        limit: f64,
+    },
+    /// The deflated Sharpe ratio is too low.
+    Deflated {
+        /// What the sweep measured.
+        value: f64,
+        /// What it had to be at least.
+        limit: f64,
+    },
+    /// A statistic could not be computed at all.
+    ///
+    /// Refused rather than waved through. A sweep too short to score is
+    /// not a sweep that scored well, and the one place that distinction
+    /// must hold is the gate that decides whether it gets deployed.
+    Unscored {
+        /// Which statistic.
+        statistic: &'static str,
+        /// Why it could not be computed.
+        why: String,
+    },
+}
+
+impl core::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Overfit { pbo, limit } => write!(
+                f,
+                "probability of backtest overfitting is {pbo:.3}, above the limit of \
+                 {limit:.3}: this search is likelier to have found its own noise than an edge"
+            ),
+            Self::Deflated { value, limit } => write!(
+                f,
+                "deflated Sharpe ratio is {value:.3}, below the limit of {limit:.3}: \
+                 the result does not survive the number of trials that produced it"
+            ),
+            Self::Unscored { statistic, why } => write!(
+                f,
+                "{statistic} could not be computed ({why}); a sweep that could not be \
+                 scored is not a sweep that scored well"
+            ),
+        }
+    }
+}
+
+impl SweepReport {
+    /// Every reason this sweep must not be packaged for deployment.
+    ///
+    /// Empty means it clears the thresholds. Returning all of them
+    /// rather than the first: a result that fails on both statistics is
+    /// a different situation from one that fails on either, and fixing
+    /// the first only to be told about the second wastes the run it
+    /// takes to find out.
+    #[must_use]
+    pub fn refusals(&self, thresholds: Thresholds) -> Vec<Refusal> {
+        let mut out = Vec::new();
+        match &self.pbo {
+            Ok(p) if *p > thresholds.max_pbo => out.push(Refusal::Overfit {
+                pbo: *p,
+                limit: thresholds.max_pbo,
+            }),
+            Ok(_) => {}
+            Err(why) => out.push(Refusal::Unscored {
+                statistic: "probability of backtest overfitting",
+                why: why.clone(),
+            }),
+        }
+        match &self.deflated_sharpe {
+            Ok(d) if *d < thresholds.min_deflated_sharpe => out.push(Refusal::Deflated {
+                value: *d,
+                limit: thresholds.min_deflated_sharpe,
+            }),
+            Ok(_) => {}
+            Err(why) => out.push(Refusal::Unscored {
+                statistic: "deflated Sharpe ratio",
+                why: why.clone(),
+            }),
+        }
+        out
+    }
+
+    /// Whether this sweep may be packaged for deployment.
+    #[must_use]
+    pub fn deployable(&self, thresholds: Thresholds) -> bool {
+        self.refusals(thresholds).is_empty()
+    }
+}
+
+#[cfg(test)]
+mod strict_mode {
+    use super::*;
+
+    fn report(pbo: Result<f64, String>, dsr: Result<f64, String>) -> SweepReport {
+        SweepReport {
+            results: Vec::new(),
+            equity_every: 1,
+            deflated_sharpe: dsr,
+            pbo,
+            unscorable: Vec::new(),
+        }
+    }
+
+    /// A sweep that clears both thresholds is deployable, or the gate
+    /// would refuse everything and be removed within a week.
+    #[test]
+    fn a_sweep_that_clears_both_thresholds_is_deployable() {
+        let r = report(Ok(0.10), Ok(0.99));
+        assert_eq!(r.refusals(Thresholds::default()), Vec::new());
+        assert!(r.deployable(Thresholds::default()));
+    }
+
+    /// **The point of the mode.** Marking a number and leaving it there
+    /// is what every tool already does; the refusal is the part that
+    /// changes what happens next.
+    #[test]
+    fn an_overfit_sweep_is_refused_and_the_reason_carries_the_numbers() {
+        let r = report(Ok(0.48), Ok(0.99));
+        let refusals = r.refusals(Thresholds::default());
+        assert_eq!(refusals.len(), 1);
+        assert!(matches!(refusals[0], Refusal::Overfit { .. }));
+        assert!(!r.deployable(Thresholds::default()));
+
+        let text = refusals[0].to_string();
+        assert!(text.contains("0.480") && text.contains("0.350"), "{text}");
+        assert!(text.contains("own noise"), "{text}");
+    }
+
+    /// A statistic that could not be computed is refused rather than
+    /// waved through. A sweep too short to score is not a sweep that
+    /// scored well, and the gate that decides deployment is the one
+    /// place that distinction has to hold.
+    #[test]
+    fn an_unscored_sweep_is_refused_rather_than_passed() {
+        let r = report(Err("too few configurations".into()), Ok(0.99));
+        let refusals = r.refusals(Thresholds::default());
+        assert_eq!(refusals.len(), 1);
+        assert!(matches!(refusals[0], Refusal::Unscored { .. }));
+        assert!(!r.deployable(Thresholds::default()));
+        assert!(
+            refusals[0]
+                .to_string()
+                .contains("not a sweep that scored well"),
+            "{}",
+            refusals[0]
+        );
+    }
+
+    /// Both failures are reported. Fixing the first only to be told
+    /// about the second wastes the run it takes to find out, and a sweep
+    /// is not a cheap thing to repeat.
+    #[test]
+    fn a_sweep_that_fails_on_both_says_so_on_both() {
+        let r = report(Ok(0.60), Ok(0.20));
+        assert_eq!(r.refusals(Thresholds::default()).len(), 2);
+    }
+
+    /// The thresholds are fields so a caller who disagrees changes a
+    /// number rather than removing the check — which is the thing that
+    /// actually happens to a gate somebody cannot configure.
+    #[test]
+    fn a_caller_who_disagrees_changes_the_number_not_the_check() {
+        let r = report(Ok(0.48), Ok(0.99));
+        assert!(!r.deployable(Thresholds::default()));
+        assert!(r.deployable(Thresholds {
+            max_pbo: 0.50,
+            ..Thresholds::default()
+        }));
+    }
+
+    /// Exactly at the limit passes. A boundary that refused its own
+    /// stated threshold would make the number in the documentation wrong
+    /// by one representable step.
+    #[test]
+    fn the_limit_itself_is_acceptable() {
+        let t = Thresholds::default();
+        let r = report(Ok(t.max_pbo), Ok(t.min_deflated_sharpe));
+        assert!(r.deployable(t), "{:?}", r.refusals(t));
+    }
+}
