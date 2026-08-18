@@ -44,6 +44,7 @@
 #![forbid(unsafe_code)]
 
 pub mod binance;
+pub mod conformance;
 pub mod creds;
 pub mod exec;
 pub(crate) mod json;

@@ -176,7 +176,7 @@ input this project cannot reach, the second has not been written.
 | Gateway | Reference perpetuals adapter (market data, orders, user stream) | Built; the whole loop has run against a testnet |
 | Gateway | Reconciliation as a first-class object (lost, duplicate, out-of-order) | Built |
 | Gateway | A second venue (OKX) | Built; **public half verified against the real venue, signed half unverified** |
-| Gateway | **Conformance suite for execution adapters** | **Not built** (the market-data one exists in `oq-l2feed`; FR-VENUE-2) |
+| Gateway | **Conformance suite for execution adapters** | Built — both shipped adapters driven through it, and three deliberately-wrong adapters caught by it |
 | Gateway | **Broker/referral prefix scheme** | **Not built** (FR-VENUE-4; `--id-prefix` is ownership, not attribution) |
 | Risk | RiskGate: pre-trade checks, kill switch, startup reconciliation | Built |
 | Risk | **Limit changes journalled as auditable events** | **Not built** (FR-RISK-5) |

@@ -464,7 +464,25 @@ fn now_ms() -> i64 {
 /// exhaustively against recorded bodies. Getting it wrong is not a
 /// visible failure: a refusal read as unknown causes a pointless query,
 /// and an unknown read as a refusal causes a duplicate order.
-fn classify(status: u16, body: &str, client_id: &str) -> Placed {
+/// What the venue's answer meant.
+///
+/// Public because it is this adapter's half of the placement contract,
+/// and `conformance::check` drives it. A suite that could only be run
+/// from inside the crate would not be one a third-party adapter could
+/// use, which is most of what a conformance suite is for.
+pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
+    // A 2xx is the venue's acceptance, and reading it here rather than
+    // only in `place` is what makes this function total over responses.
+    // It was not, and the conformance suite is what said so: this
+    // adapter's contract-facing pair was `ack_from` on success and
+    // `classify` on failure, while OKX's was one function. Two adapters
+    // with differently-shaped contract surfaces cannot both be driven
+    // through one suite, which made "any adapter can be checked" untrue
+    // before it was ever tested. `place` is unaffected — it never hands
+    // a 2xx to this function.
+    if (200..300).contains(&status) {
+        return ack_from(body, client_id);
+    }
     // 5xx is the venue failing to answer, not answering "no". The
     // request may well have been processed before it fell over.
     if (500..600).contains(&status) {
@@ -530,6 +548,25 @@ fn ack_from(body: &str, client_id: &str) -> Placed {
 ///
 /// A market order is not checked: its notional depends on where it
 /// fills, and refusing on a guess would refuse orders the venue accepts.
+/// Read a status query's body, without the request that fetched it.
+///
+/// `None` means the venue says it has no such order — code `-2013`,
+/// which after an unresolved placement is the answer that says the
+/// order never landed and may be sent again. Separated from
+/// `Execution::order_status` so a conformance suite can drive it
+/// without a socket: the classification is the part that can be wrong,
+/// and the request is the part that needs credentials.
+#[must_use]
+pub fn order_from_query(body: &str, client_id: &str) -> Option<OrderAck> {
+    if field_i64(body, "code") == Some(-2013) {
+        return None;
+    }
+    match ack_from(body, client_id) {
+        Placed::Accepted(ack) => Some(ack),
+        _ => None,
+    }
+}
+
 fn below_floor(order: &NewOrder, instrument: &Instrument) -> Option<Reject> {
     if instrument.min_notional.0 <= 0 {
         return None;
