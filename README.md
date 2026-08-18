@@ -223,10 +223,44 @@ Pre-alpha, and specific about it. **Built and tested today:**
   carrying the order it approved, so a check cannot validate one order
   while a different one is sent. Limits nobody set refuse everything.
 
-**Designed but not built:** fidelity tiers L1 and L2 (only L0 exists), the
-Python strategy tier, a sweep runner, and everything under *AI-native*
-above. The pillars section describes where this is going; this section
-describes where it is.
+- **Sweeps** — a hundred configurations with a deflated Sharpe ratio and a
+  probability of backtest overfitting, in seconds rather than the half hour
+  budgeted for them, and the statistics are computed whether or not anyone
+  asked: a sweep that reports only its best configuration is the instrument
+  that produces overfitted strategies.
+- **A Python strategy tier** — a strategy with no framework in it, run by
+  the Rust engine, in two modes. Compatibility mode calls it once per tick.
+  Throughput mode calls it once per batch and mirrors the account onto the
+  strategy object, which runs up to seven times faster. Batching is not
+  free, and the binding measures the cost rather than asserting it is
+  small: a decision made after seeing a tick cannot be placed before that
+  tick was seen, so batched decisions are late. On the example strategy a
+  batch of 8 buys 2.8x for 1.3% of its edge and a batch of 512 buys 6.9x
+  and takes the edge away. `batch=1` is exactly compatibility mode, and a
+  test asserts the two runs are identical rather than the documentation
+  asserting it.
+- **A point-in-time feature layer** — one definition, and the offline path
+  derived from it by folding rather than written a second time, because two
+  implementations of one feature is how a model gets served inputs unlike
+  the ones it was fitted on. Where somebody writes the second one anyway,
+  a consistency metric says where the two part company, tested against the
+  four ways it actually happens.
+- **Margin fidelity** — what a backtest with no margin model is worth,
+  reported as a cross-window tail rather than a mean, because the error is
+  zero almost everywhere and total in a few windows. At the median the two
+  arms agree; at the fifth percentile the account lost 97.71% and the
+  margin-free run reported 2.84%. The windows that ruined the account are
+  in the margin-free arm's *right* tail: it does not merely understate
+  them, it files them under success. Methodology in
+  [docs/MARGIN-FIDELITY.md](docs/MARGIN-FIDELITY.md).
+- **Columnar export** — the tick stream as Parquet, both timestamps kept as
+  separate columns and every price an integer, so a research workflow reads it in
+  pandas without a custom reader. Behind a feature flag, because the tree is
+  ninety crates and a backtest must not pay for it.
+
+**Designed but not built:** fidelity tiers L1 and L2 (only L0 exists) and
+everything under *AI-native* above. The pillars section describes where this
+is going; this section describes where it is.
 
 **On live trading specifically,** because the pieces above make it easy to
 overstate. The whole loop has run against a real venue's testnet.
