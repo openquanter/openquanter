@@ -355,7 +355,7 @@ outside user, and an outside user is one of M3's four entry conditions and
 the only one that cannot be bought with engineering time. Full bindings
 follow. Nothing about the small surface forecloses the large one.
 
-### D16 — No MainEngine: assembly lives in types, not in a registry
+### D17 — No MainEngine: assembly lives in types, not in a registry
 
 Anyone arriving from the 1.x lineage looks first for a `MainEngine` — a central
 object holding gateways, apps, the event engine, the database and the OMS, with
