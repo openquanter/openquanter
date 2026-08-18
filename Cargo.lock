@@ -720,6 +720,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oq-features"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "oq-engine",
+ "oq-strategy",
+ "oq-types",
+]
+
+[[package]]
 name = "oq-gateway"
 version = "2.0.0-alpha.1"
 dependencies = [

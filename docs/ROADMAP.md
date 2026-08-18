@@ -195,7 +195,9 @@ depends on the invariants established here.
   valuable deliverable of the entire plan: it quantifies how optimistic
   margin-free backtesting actually is.
 - `oq-data`: dual-timestamp Arrow/Parquet layer, bitemporal reference data,
-  strict as-of join utilities; `oq-features` skeleton.
+  strict as-of join utilities; `oq-features` skeleton — one definition, two
+  execution paths derived from it rather than written twice, and a
+  consistency metric tested against the four classic ways they drift apart.
 - `oq-cli`: `data` and `replay` subcommands, shipped; `oq-stats` integrated so
   sweeps emit DSR/PBO by default. `backtest`, `sweep`, and `parity` were
   planned here and are **not** being written, for reasons that are properties

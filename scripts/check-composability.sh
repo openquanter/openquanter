@@ -53,6 +53,10 @@ BUDGETS=(
   # and is enforced by that exclusion rather than by intention.
   "oq-py:20"
   "oq-stats:0"
+  # The point-in-time feature layer. Zero, because a feature definition
+  # is inherited by both the research path and the live one, and a
+  # dependency here is a dependency in production.
+  "oq-features:0"
   # The strategy contract. Zero, and it has to stay zero for a reason
   # the other zeros do not share: this is the crate a user writes
   # against. Anything that lands here is inherited by every strategy
