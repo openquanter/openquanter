@@ -12,7 +12,12 @@ name = "oq_py"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+oq-backtest.workspace = true
+oq-engine.workspace = true
+oq-margin.workspace = true
 oq-stats.workspace = true
+oq-strategy.workspace = true
+oq-types.workspace = true
 # `extension-module` is deliberately NOT a default feature. With it on, the
 # library does not link libpython — correct for a wheel, and it makes a
 # plain `cargo build` fail to link on macOS. maturin turns it on (see

@@ -27,6 +27,8 @@
 //! part, and collapsing them into `ValueError("bad input")` would throw
 //! away the half a user acts on.
 
+pub mod tier;
+
 pub mod pure {
     //! The substance, with no FFI in it.
     //!
@@ -220,6 +222,7 @@ fn openquanter(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deflated_sharpe_ratio, m)?)?;
     m.add_function(wrap_pyfunction!(probability_of_backtest_overfitting, m)?)?;
     m.add_function(wrap_pyfunction!(minimum_track_record_length, m)?)?;
+    crate::tier::register(m)?;
     Ok(())
 }
 

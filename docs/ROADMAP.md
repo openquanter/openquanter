@@ -188,6 +188,12 @@ depends on the invariants established here.
 
 - `oq-py`: compatibility mode formalized; throughput mode designed and
   implemented (subscription granularity, batched callbacks, mirrored state).
+  Batching is not free and the cost is not hidden: a strategy called every
+  `n` ticks cannot act on ticks 1..n-1 of a batch, so its decisions are late
+  by up to `n - 1` ticks. `batch=1` is exactly compatibility mode and a test
+  asserts the two are identical; for `n > 1` the divergence is **measured**
+  by `compare_modes` rather than assumed small. On the example crossover it
+  costs 18% of the strategy's edge at `n = 64` and destroys it at `n = 512`.
 - **Margin fidelity reporting (G5).** Recompute historical stress windows with
   and without the margin overlay and publish the methodology behind the
   **tail-divergence report**, published as
