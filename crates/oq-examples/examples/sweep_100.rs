@@ -18,6 +18,7 @@
 
 use std::time::Instant;
 
+use oq_backtest::sweep::Thresholds;
 use oq_backtest::{Candidate, Context, Intent, MarginMode, RunConfig, Strategy, sweep};
 use oq_examples::{MarketShape, series};
 use oq_margin::{Contract, TierTable};
@@ -106,7 +107,25 @@ impl Strategy for Cross {
 }
 
 fn main() {
-    let ticks = series(MarketShape::trending(TICKS), 7);
+    // Calm, not trending. `MarketShape::trending` applies its drift per
+    // observation, so over 600,000 of them the price is exponential: it
+    // ends at i64::MAX, and every statistic computed over it is about a
+    // market where a contract costs more than the number system can
+    // express. The first version of this gate used it, and the numbers
+    // it reported — a PBO of 0.4975 — were arithmetic on a saturated
+    // price. A benchmark whose market is nonsense measures the engine's
+    // speed correctly and its statistics not at all.
+    let ticks = series(MarketShape::calm(TICKS), 7);
+
+    // Asserted rather than assumed, because the failure above was
+    // silent: the run completed, printed plausible figures, and nothing
+    // said the market had run off the end of the type.
+    let last = ticks.last().map_or(0, |t| t.last.0);
+    assert!(
+        last > 0 && last < i64::MAX / 1_000_000,
+        "the generated market reached {last}, which leaves no room for a notional; \
+         the statistics below would be about a market that cannot exist"
+    );
 
     // A 10 x 10 grid, skipping the degenerate fast >= slow half by
     // offsetting rather than by filtering, so the count is exactly 100
@@ -206,7 +225,28 @@ fn main() {
         println!("FAIL: the gate requires both statistics, and one is unavailable");
         ok = false;
     }
+    // FR-RESEARCH-3: the statistics are computed and then *acted on*.
+    // Marking a number and leaving it there is what every tool already
+    // does — the refusal is the part that changes what happens next.
+    println!();
+    let thresholds = Thresholds::default();
+    let refusals = report.refusals(thresholds);
+    if refusals.is_empty() {
+        println!("  strict mode      would package this sweep");
+    } else {
+        println!("  strict mode      would REFUSE to package this sweep:");
+        for r in &refusals {
+            println!("    - {r}");
+        }
+        println!();
+        println!("  That is the intended outcome here, not a failure of the gate. This");
+        println!("  grid is a hundred variants of one strategy with no edge between");
+        println!("  them, so a search over it should not produce something deployable.");
+        println!("  A strict mode that passed this would be decoration.");
+    }
+
     if ok {
+        println!();
         println!("G4 met: {CONFIGS} configurations with both statistics in {elapsed:.2} s");
     } else {
         std::process::exit(1);
