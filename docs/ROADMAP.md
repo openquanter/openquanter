@@ -307,9 +307,16 @@ not in the matching kernel.
   reports what will not decompose as an **unexplained residual**. Its
   prerequisite is that the live process journals its decisions, which today it
   does now — `oq-live` depends on `oq-journal` and writes in `record.rs`. The
-  second is not met: `oq-live` still depends on neither `oq-core` nor
-  `oq-margin`, so there is a record to replay and nothing to replay it into.
-  Closing that is the first task of this milestone, not the last.
+  second is now partly met: `oq-live` depends on `oq-core` and `oq-margin`,
+  and `oq_live::shadow` runs the same `Kernel` a backtest runs beside the
+  live session, fed the same events. It places nothing; its product is the
+  list of places it and the venue disagree, in four named kinds — the model
+  filled and the venue did not, the venue filled and the model did not, both
+  filled at different prices, both filled for different quantities — plus a
+  position comparison, which is the one that compounds. That is the
+  instrument entry trigger 2 requires and nothing produced. What remains is
+  the other half: the live process does not yet *drive* itself from the
+  kernel, so the shadow observes rather than decides.
 - `oq-sim` at full strength: the entire scenario catalogue plus gateway fuzzing
   (disconnects, reordering, duplication, partial fills).
 - **Position-carrying cutover playbook**, rehearsed end-to-end. The playbook
