@@ -13,7 +13,7 @@
 
 use std::process::ExitCode;
 
-use oq_cli::{TOOLS, binary_for, crate_for};
+use oq_cli::{ABSENT, TOOLS, binary_for, crate_for};
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -31,6 +31,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if let Some((_, why)) = ABSENT.iter().find(|(n, _)| *n == sub) {
+        // Named rather than merely missing. Someone typing this read a
+        // plan that mentions it, and "no such tool" would send them
+        // looking for a typo.
+        eprintln!("oq: there is no {sub} subcommand, on purpose: {why}");
+        return ExitCode::FAILURE;
+    }
     let Some(binary) = binary_for(&sub) else {
         eprintln!("oq: no such tool: {sub}");
         eprintln!();
@@ -85,6 +92,11 @@ fn list() {
     println!();
     println!("Everything after the tool name is passed to it unchanged, so");
     println!("`oq capture --help` is `oq-capture --help`.");
+    println!();
+    println!("Some commands a plan mentions are deliberately absent:");
+    for (name, why) in ABSENT {
+        println!("    {name:<13} {why}");
+    }
     println!();
     println!("The tools ship inside the crates that need them, not as separate");
     println!("packages: oq-l2feed, oq-ingest, oq-gateway, oq-live.");
