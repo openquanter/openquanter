@@ -19,6 +19,7 @@ pub mod deviation;
 pub mod fidelity;
 pub mod run;
 pub mod sweep;
+pub mod validity;
 
 pub use deviation::{DeviationReport, Verdict};
 pub use fidelity::{
@@ -28,8 +29,9 @@ pub use fidelity::{
 /// resolving for code written before it moved out.
 pub use oq_strategy as strategy;
 pub use oq_strategy::{Context, Intent, Strategy};
-pub use run::{Liquidation, MarginMode, RunConfig, RunResult, run, tick_at};
+pub use run::{Liquidation, MarginMode, MarginUsage, RunConfig, RunResult, run, tick_at};
 pub use sweep::{Candidate, SweepReport, returns, sweep};
+pub use validity::{Assumptions, FidelityReport, Participation, report as fidelity_report};
 
 /// Re-exported because [`RunConfig::with_fees`] takes it. Configuring a
 /// run should not require naming a second crate.
