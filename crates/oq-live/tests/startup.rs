@@ -285,18 +285,18 @@ fn the_gate_is_shown_the_position_the_venue_confirmed() {
     // which makes it decoration. The number the venue reported has to
     // reach the check.
     //
-    // 0.016 of a contract quoted to three decimal places is 16 lots.
+    // 0.400 of a contract quoted to three decimal places is 16 lots.
     // The cap here is 10, so an order that would take the account
     // further out must be refused for the position rather than
     // permitted because the gate thought the account was flat.
     let mut s = session(
         Recording::accepting(),
-        &[held("BTCUSDT", "BOTH", 0.016)],
+        &[held("BTCUSDT", "BOTH", 0.400)],
         &[],
         &[Position {
             symbol: "BTCUSDT".into(),
             side: "BOTH".into(),
-            amount: 0.016,
+            amount: 0.400,
         }],
     )
     .expect("declared, so it starts");
@@ -321,12 +321,12 @@ fn the_gate_is_shown_the_position_the_venue_confirmed() {
             position_side: PositionSide::OneWay,
             id_prefix: "live".into(),
         },
-        &[held("BTCUSDT", "BOTH", 0.016)],
+        &[held("BTCUSDT", "BOTH", 0.400)],
         &[],
         &[Position {
             symbol: "BTCUSDT".into(),
             side: "BOTH".into(),
-            amount: 0.016,
+            amount: 0.400,
         }],
     )
     .expect("declared");
