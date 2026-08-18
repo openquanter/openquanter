@@ -107,6 +107,119 @@ itself the first task of the milestone rather than the last.
 milestone has an entry condition stated below and will not be started before
 that condition is met.
 
+
+## Scope, item by item
+
+Broken down from theme to feature. **"Built" means the thing exists in the
+repository with tests, not that the milestone's exit gate has passed** — the
+gates are a separate matter and live in each milestone's own section.
+**"Blocked" and "not built" are different facts**: the first is waiting on an
+input this project cannot reach, the second has not been written.
+
+### M0 — Foundations
+
+| Theme | Item | Status |
+|---|---|---|
+| Repository | Workspace, Apache-2.0, DCO, public CI | Built |
+| Repository | crates.io name reservations | Built (21 crates, nothing published) |
+| Capture | Incremental depth, BBO, trades, mark price, liquidations | Built, running continuously |
+| Capture | Dual timestamps, gap markers, recorded clock offset | Built |
+| Capture | Archival and verification (`oq-merge`, `oq-resequence`) | Built |
+| Statistics | DSR, PBO/CSCV, trial registry | Built |
+| Simulation | Scenario catalogue (7 entries, with reproductions) | Built |
+| Release | PyPI `openquanter` alpha | Published `2.0.0a1`, four-platform wheels |
+
+### M1 — Deterministic core
+
+| Theme | Item | Status |
+|---|---|---|
+| Types | `oq-types` fixed point, typestate order and position machines | Built |
+| Journal | mmap append log, snapshots, replay, torn-tail tolerance | Built |
+| Core | Sequencer, deterministic kernel, injected clock | Built |
+| Core | **Sharding by instrument** | **Not built** (`shard` appears nowhere; FR-CORE-6) |
+| Matching | L0 tick replay, frozen as the regression anchor | Built |
+| Margin | Tiered maintenance margin, liquidation pricing, funding | Built |
+| Margin | Bitemporal rule schedules | Built |
+| Backtest | Run scheduling, funding, accounting, exports | Built |
+| Parity | Trade-by-trade diff, difference attribution, identity triple | Built |
+| Parity | **Run file format** (a baseline can be archived) | Built |
+| Testing | **Property tests** for engine and margin invariants | **Not built** (no `proptest`; invariants are covered by hand-written cases — FR-MATCH-7, FR-MARGIN-7) |
+| Release | First public preview tag | Built |
+
+### M2 — Python tier, fidelity reporting, research workflow
+
+| Theme | Item | Status |
+|---|---|---|
+| Python | Compatibility mode (per-tick callbacks) | Built |
+| Python | Throughput mode (batched callbacks, mirrored state) | Built, with its cost measured (up to ~7×, accuracy cost quoted per batch) |
+| Python | Four-platform abi3 wheels in CI | Built |
+| Margin fidelity | Cross-window tail divergence instrument | Built |
+| Margin fidelity | **Methodology published** (G5) | Built (`MARGIN-FIDELITY.md`) |
+| Data | Dual timestamps, strict as-of joins, bitemporal reference data | Built |
+| Data | Arrow/Parquet columnar layer | Built (optional feature; default build stays at zero dependencies) |
+| Features | `oq-features` skeleton (one definition, two paths, consistency metric) | Built |
+| CLI | `data`, `replay`, `parity` subcommands | Built |
+| CLI | `backtest`, `sweep` subcommands | **Deliberately absent** (a strategy is compiled Rust) |
+| Research | Sweeps emit DSR/PBO by default | Built |
+| Research | **Strict mode refusing over-threshold results** | **Not built** (FR-RESEARCH-3) |
+| Fidelity | Fidelity report and participation-rate flag | Built |
+| Adoption | Quickstart, seven example strategies, goldens | Built |
+| Gate | **G3 throughput ≥8× the interpreted baseline** | **Blocked** — needs a multi-year window and a same-machine predecessor run; the data is on production hosts and the capture is days old |
+| Gate | **G7 re-passing parity after conversion** | **Half blocked** — the mode half is met and tested; the parity half shares G3's blocker |
+| Gate | **G11 external cold start ≤ 30 minutes** | **Blocked** — needs a person who has not seen this repository |
+
+### M3 — Live trading
+
+| Theme | Item | Status |
+|---|---|---|
+| Gateway | Reference perpetuals adapter (market data, orders, user stream) | Built; the whole loop has run against a testnet |
+| Gateway | Reconciliation as a first-class object (lost, duplicate, out-of-order) | Built |
+| Gateway | A second venue (OKX) | Built; **public half verified against the real venue, signed half unverified** |
+| Gateway | **Conformance suite for execution adapters** | **Not built** (the market-data one exists in `oq-l2feed`; FR-VENUE-2) |
+| Gateway | **Broker/referral prefix scheme** | **Not built** (FR-VENUE-4; `--id-prefix` is ownership, not attribution) |
+| Risk | RiskGate: pre-trade checks, kill switch, startup reconciliation | Built |
+| Risk | **Limit changes journalled as auditable events** | **Not built** (FR-RISK-5) |
+| Live | Process assembly, snapshot recovery | Built |
+| Live | **Books kept by the kernel** (one implementation for live and backtest) | Built |
+| Live | Graceful restart, one process per account | Partial (recovery exists; orchestration does not) |
+| Attribution | **Gap decomposed by cause, with an unexplained residual** | Built |
+| Attribution | Shadow → evidence → report, end to end | Built |
+| Observability | Latency histograms | Built |
+| Observability | **Structured metrics, alert hooks** | **Not built** |
+| Simulation | Gateway fuzzing (disconnects, reordering, duplication, partial fills) | Built |
+| Cutover | Position-carrying playbook | **Written, never rehearsed**; its §6 lists what is missing before one can be |
+| Cutover | Account record/compare tooling (a rehearsal precondition) | Built |
+| Entry trigger | 1. Core released ≥ 6 months, no open P0/P1 | **Not met** |
+| Entry trigger | 2. Shadow run with every divergence attributed | **Not met** (the instrument is ready; no long run yet) |
+| Entry trigger | 3. Two successful testnet cutover rehearsals | **Not met** |
+| Entry trigger | 4. At least one real third-party user | **Not met** |
+
+### M4 — HFT fidelity
+
+| Theme | Item | Status |
+|---|---|---|
+| L1 | Queue position (conservative model) | Built |
+| L1 | Entry and response latency | Built |
+| L1 | Square-root taker impact | Built |
+| L1 | Participation-rate alerting | Built (shipped with M2's fidelity report) |
+| L1 | **Probabilistic queue model** | Not built — by the stated order, only after calibration |
+| L1 | **Latency as distributions rather than constants** | Not built |
+| L1 | **Feed latency** | Deliberately not in the engine — it belongs to the event producer |
+| L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
+| L2 | Book reconstruction, snapshot reconciliation, gap handling | **Not built** |
+| Validation | Stylized-facts test set | **Not built** |
+| Validation | L0 / L0+margin / L1 comparative report | Partial (the `tiers` example covers L0 against L1) |
+
+### M5 — AI extensions
+
+| Theme | Item | Status |
+|---|---|---|
+| Inference | `oq-infer` ONNX and compiled trees | **Not built** |
+| Inference | Prediction parity gate | **Not built** |
+| Environments | `oq-env` gym-style vectorized environments | **Not built** |
+| Features | `oq-features` production point-in-time layer with drift monitoring | Skeleton built; production layer not |
+| Sandbox | `oq-lab` | **Not built** |
+
 ---
 
 ## M0 — Foundations
