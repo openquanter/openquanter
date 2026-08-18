@@ -44,6 +44,7 @@ pub mod feed;
 pub mod latency;
 pub mod record;
 pub mod recovery;
+pub mod run;
 pub mod session;
 pub mod shadow;
 pub mod supervisor;
