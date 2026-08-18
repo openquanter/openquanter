@@ -16,10 +16,13 @@ do** and **how we will know it does it**. The sequencing lives in
 
 ## 1. Positioning
 
-**One sentence.** OpenQuanter is a deterministic, AI-native quantitative
-trading framework: a single Rust event core drives both backtesting and live
-trading, execution and margin fidelity are independently selectable, and
-machine learning is a first-class citizen rather than a bolt-on.
+**One sentence.** OpenQuanter exists so that **every cent between a backtest
+and the live run can be accounted for** — P&L you cannot explain is not P&L. To
+that end it is a deterministic, AI-native quantitative trading framework: a
+single Rust event core drives both backtesting and live trading, execution and
+margin fidelity are independently selectable, and machine learning is a
+first-class citizen rather than a bolt-on. **Those are the means; the first
+sentence is the end** — why that end, in [Why OpenQuanter exists](WHY.md).
 
 **Where it sits.** The framework space already has strong entries — a
 multi-asset Rust/Python engine with a mature message-bus architecture, a
@@ -174,7 +177,25 @@ the rest honestly.
 | FR-AI-4 | RL environments are gated on L1 fidelity: training against a low-fidelity simulator teaches models to exploit simulator artifacts. | Extended |
 | FR-AI-5 | LLM-driven research runs in a sandbox with a typed read-only tool API and a full audit log. LLM output is a *proposal*; hard limits always live in the engine. | Experimental |
 
-### 3.10 Operations and tooling — `FR-OPS`
+### 3.10 Live gap attribution — `FR-ATTRIB`
+
+This section is the requirement form of the purpose in §1. It was absent from
+this document — the README's first screen, the design pillars and roadmap M3
+all state it, and **the one document that defines acceptance did not**, which
+made it a capability with no gate.
+
+| ID | Requirement | Tier |
+|---|---|---|
+| FR-ATTRIB-1 | Every decision a live run makes, and its outcome, is journalled in a form sufficient to drive a deterministic replay. | Core |
+| FR-ATTRIB-2 | A live run can be replayed through **the same kernel** the backtest uses, producing what would have happened given the same events. | Core |
+| FR-ATTRIB-3 | The difference between the live result and the replayed result is decomposed **by cause**: slippage, queue position, funding against model, latency, fee tier, and events absent from the backtest model (partial fills, rejections, venue outages). | Core |
+| FR-ATTRIB-4 | Whatever will not decompose is reported as an **unexplained residual**, in currency and as a share of P&L. **The residual must never be silently absorbed into a named cause.** | Core |
+| FR-ATTRIB-5 | An attribution report is bound to a `RunManifest` (code, data, configuration), so that a third party can reproduce it on the same inputs. | Core |
+| FR-ATTRIB-6 | Failure to attribute — missing data, replay not possible — is reported as a failure and **must not degrade into a report showing a zero residual**. | Core |
+
+---
+
+### 3.11 Operations and tooling — `FR-OPS`
 
 | ID | Requirement | Tier |
 |---|---|---|
@@ -231,6 +252,7 @@ one use among several rather than something the framework promises.
 | **G9** | Inference | Single-row GBDT inference ≤ 10 µs in-process; Python/Rust prediction parity gate passes | Inference benchmark + parity test |
 | **G10** | RL environments | Vectorized batch environments with full seed propagation and reproducible training runs | Training throughput benchmark + reproduction test |
 | **G11** | Adoption readiness | Cold start to first backtest ≤ 30 minutes; public CI green; semantic versioning from 2.0 | External-user cold-start trial |
+| **G12** | Live gap attribution | A live run replays through the same kernel; the gap decomposes by cause; **the unexplained residual is reported alongside the bound `RunManifest`**. **Threshold deliberately unset** — it is fixed by the first real measurement rather than guessed now | Live journal replay + attribution report |
 
 ---
 
