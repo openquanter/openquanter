@@ -79,7 +79,7 @@ take-profits, and reduce-only exits stay live.
 Take the venue's own view, not either system's:
 
 ```text
-oq-recon --symbol <SYMBOL> --expect-position <LOTS> --expect-orders <N>
+oq-recon <SYMBOL> --record cutover-$(date +%Y%m%dT%H%M).txt
 ```
 
 Record: net position per leg, average entry per leg, every resting order
@@ -87,8 +87,8 @@ with its client id, account equity, and the timestamp. This record is
 what the whole cutover is checked against, and it comes from the venue
 because both systems are about to disagree with each other.
 
-- **Done when:** the record exists and `oq-recon` reports agreement with
-  the old system.
+- **Done when:** the file exists and its contents match what the old
+  system believes it holds.
 - **Abort:** unfreeze. Nothing has moved.
 
 ### Step 3 — Withdraw the old system's resting orders
@@ -139,8 +139,9 @@ was not told about, which is the correct default and the wrong one here.
 - **Abort:** stop the new system, restart the old one with
   `--adopt-existing`. The position has not changed; only which process
   is watching it has.
-- **Check before proceeding:** the new system's view must equal the step
-  2 record *exactly*. A difference in average entry is not cosmetic — it
+- **Check before proceeding:** `oq-recon <SYMBOL> --against <the step 2
+  file>` must exit zero. The new system's view must equal the record
+  *exactly*. A difference in average entry is not cosmetic — it
   is the number every subsequent P&L and every stop distance is computed
   from.
 
@@ -200,10 +201,15 @@ were ready.
 - **No freeze command.** Step 1 assumes the old system can be told to
   stop opening while continuing to manage. Whether it can, and how, is a
   property of that system and is not recorded here.
-- **No adoption verification tool.** Step 5 says the new system's view
-  must equal the step 2 record exactly. Today that is an operator
-  reading two outputs side by side. It should be one command that exits
-  non-zero, and it is not.
+- ~~**No adoption verification tool.**~~ Closed. `oq-recon --record FILE`
+  writes the account at step 2 and `oq-recon --against FILE` compares a
+  later reading, exiting non-zero on any difference — a leg that moved, an
+  average entry that moved, an order that appeared or vanished. The
+  timestamp is deliberately not compared, because the second reading is
+  later by construction. What is still missing is the same tool pointed at
+  the *new system's* view rather than the venue's: today step 5 compares
+  the venue against the record, which catches the position changing but not
+  the new system misreading it.
 - **No timing data.** Every "keep it short" here is unquantified. The
   first rehearsal's main product is how long the exposed interval
   actually is.

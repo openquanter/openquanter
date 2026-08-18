@@ -31,6 +31,7 @@
 
 use std::time::Duration;
 
+use oq_gateway::record::Record;
 use oq_gateway::{
     Binance, Credentials, Expectation, ExpectedLeg, Part, SnapshotBuilder, Tolerance, Watcher,
     reconcile,
@@ -42,13 +43,19 @@ fn main() -> std::process::ExitCode {
         eprintln!(
             "usage: oq-recon <SYMBOL> [--expect-long QTY@PRICE] [--expect-short QTY@PRICE]\n\
              \x20                      [--order CLIENT_ID]... [--interval SECS] [--testnet]\n\
-             \x20      oq-recon <SYMBOL> --watch [--interval SECS] [--testnet]\n\n\
+             \x20      oq-recon <SYMBOL> --watch [--interval SECS] [--testnet]\n\
+             \x20      oq-recon <SYMBOL> --record FILE      [--testnet]\n\
+             \x20      oq-recon <SYMBOL> --against FILE     [--testnet]\n\n\
              Reads the account. Places nothing.\n\n\
              Default is a gate: it compares against the expectation you give and \n\
              exits non-zero on a position that does not match.\n\
              --watch observes instead, reporting what changes between reads and \n\
              never exiting on a difference — a gate that stops at the first one \n\
              sees a single event and then nothing.\n\n\
+             --record writes the account to a file; --against reads one back \n\
+             and exits non-zero on any difference. That pair is the cutover \n\
+             procedure's steps 2 and 5, which were otherwise an operator \n\
+             comparing two terminal outputs by eye with the position naked.\n\n\
              Exits 0 matched, 1 diverged, 2 bad arguments, 3 could not read \n\
              the account. 3 is not 0: not checking is not the same as passing."
         );
@@ -58,6 +65,10 @@ fn main() -> std::process::ExitCode {
     let symbol = args[0].to_uppercase();
     let mut expected = Expectation::default();
     let mut interval: Option<u64> = None;
+    // Where to write the account as it is now.
+    let mut record_to: Option<String> = None;
+    // A record to compare this reading against.
+    let mut against: Option<String> = None;
     let mut watching = false;
     let mut base = Binance::MAINNET;
 
@@ -93,6 +104,22 @@ fn main() -> std::process::ExitCode {
                 expected.working_orders.push(id.clone());
                 i += 1;
             }
+            "--record" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("--record needs a path to write to");
+                    return std::process::ExitCode::from(2);
+                };
+                record_to = Some(v.clone());
+                i += 1;
+            }
+            "--against" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("--against needs a path to read");
+                    return std::process::ExitCode::from(2);
+                };
+                against = Some(v.clone());
+                i += 1;
+            }
             "--interval" => {
                 let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) else {
                     eprintln!("--interval needs a number of seconds");
@@ -107,6 +134,13 @@ fn main() -> std::process::ExitCode {
             }
         }
         i += 1;
+    }
+
+    if record_to.is_some() && against.is_some() {
+        // Writing and comparing in one run would compare a record
+        // against itself, which passes always and proves nothing.
+        eprintln!("--record and --against are separate steps; run one, then the other");
+        return std::process::ExitCode::from(2);
     }
 
     let creds = match Credentials::from_env() {
@@ -191,6 +225,60 @@ fn main() -> std::process::ExitCode {
                 }
             }
             Ok(snapshot) => {
+                // Recording and comparing come first, and both exit: a
+                // cutover step is a single question with a single
+                // answer, and a tool that then went on to watch would
+                // leave an operator waiting at the one point in the
+                // procedure where the position is naked.
+                if let Some(path) = &record_to {
+                    let record = Record::of(&snapshot);
+                    return match std::fs::write(path, record.render()) {
+                        Ok(()) => {
+                            println!("{}", describe(&snapshot));
+                            println!("recorded to {path}");
+                            std::process::ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            // 3, not 1. The account was read fine; the
+                            // record is what does not exist, and a
+                            // cutover must not proceed on the strength
+                            // of a record nobody wrote.
+                            eprintln!("could not write {path}: {e}");
+                            std::process::ExitCode::from(3)
+                        }
+                    };
+                }
+                if let Some(path) = &against {
+                    let text = match std::fs::read_to_string(path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("could not read {path}: {e}");
+                            return std::process::ExitCode::from(3);
+                        }
+                    };
+                    let recorded = match Record::parse(&text) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("{path} is not a record: {e}");
+                            return std::process::ExitCode::from(3);
+                        }
+                    };
+                    let now = Record::of(&snapshot);
+                    let differences = recorded.differences(&now);
+                    println!("{}", describe(&snapshot));
+                    if differences.is_empty() {
+                        println!(
+                            "matches {path}, recorded {} ms ago",
+                            now.read_at_ms.saturating_sub(recorded.read_at_ms)
+                        );
+                        return std::process::ExitCode::SUCCESS;
+                    }
+                    println!("{} difference(s) from {path}:", differences.len());
+                    for d in &differences {
+                        println!("  - {d}");
+                    }
+                    return std::process::ExitCode::from(1);
+                }
                 if watching {
                     let first = watcher.tally.reads == 0;
                     let changes = watcher.observe(&snapshot);
