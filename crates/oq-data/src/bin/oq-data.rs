@@ -21,6 +21,12 @@ oq-data — characterise a tick file before trusting it
 
 USAGE:
     oq-data <FILE.oqtk>
+    oq-data <FILE.oqtk> --parquet <OUT.parquet>
+
+The export keeps both timestamps as separate columns and every price as
+an integer in its native tick unit. It is only available when this build
+was made with `--features parquet`, because the columnar stack is about
+ninety crates and a backtest must not pay for it.
 ";
 
 fn main() -> ExitCode {
@@ -31,6 +37,16 @@ fn main() -> ExitCode {
     if path == "--help" || path == "-h" {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
+    }
+
+    let args: Vec<String> = std::env::args().collect();
+    let export = args
+        .iter()
+        .position(|a| a == "--parquet")
+        .and_then(|i| args.get(i + 1).cloned());
+    if args.iter().any(|a| a == "--parquet") && export.is_none() {
+        eprintln!("oq-data: --parquet needs an output path");
+        return ExitCode::FAILURE;
     }
 
     let (header, ticks) = match oq_data::ticks::read_file(std::path::Path::new(&path)) {
@@ -126,6 +142,12 @@ fn main() -> ExitCode {
     if header.count as usize != ticks.len() {
         problems.push("the header's count disagrees with the records".to_string());
     }
+    if let Some(out) = export
+        && !write_parquet(&path, header.instrument, ticks, &out)
+    {
+        return ExitCode::FAILURE;
+    }
+
     if problems.is_empty() {
         println!("verdict          nothing here contradicts itself");
         ExitCode::SUCCESS
@@ -139,4 +161,49 @@ fn main() -> ExitCode {
         println!("printing: the run would produce numbers either way.");
         ExitCode::FAILURE
     }
+}
+
+/// Export the ticks as Parquet, reporting what it cost.
+///
+/// The size comparison is printed rather than assumed: a columnar
+/// export that turns out to be larger than the native file is a fact the
+/// person running it should have before they build a pipeline on it.
+#[cfg(feature = "parquet")]
+fn write_parquet(src: &str, instrument: u64, ticks: Vec<oq_engine::Tick>, out: &str) -> bool {
+    let n = ticks.len();
+    let stream = match oq_data::TickStream::new(instrument, ticks) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("oq-data: {src}: {e:?}");
+            return false;
+        }
+    };
+    if let Err(e) = oq_data::columnar::write_parquet(&stream, out) {
+        eprintln!("oq-data: {out}: {e}");
+        return false;
+    }
+    let size = |p: &str| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let (before, after) = (size(src), size(out));
+    println!();
+    println!("parquet          {out}");
+    println!(
+        "                 {n} rows, {after} bytes vs {before} native ({:.0}%)",
+        if before == 0 {
+            0.0
+        } else {
+            after as f64 * 100.0 / before as f64
+        }
+    );
+    true
+}
+
+/// Without the feature there is no exporter, and saying so beats an
+/// unrecognised flag: the flag is real, this build just cannot serve it.
+#[cfg(not(feature = "parquet"))]
+fn write_parquet(_src: &str, _instrument: u64, _ticks: Vec<oq_engine::Tick>, _out: &str) -> bool {
+    eprintln!(
+        "oq-data: this build has no Parquet support; rebuild with \
+         `cargo build -p oq-data --features parquet`"
+    );
+    false
 }

@@ -141,3 +141,36 @@ manifest 记录来源 `.oqcap` 文件、导入器版本与 commit、记录数与
   不属于每个文件的每条记录。
 - **不压缩。** 引擎要热读它；压缩是拿扫描速度换磁盘，而磁盘是两者中更便宜的。
   要压就压采集归档——量在那边。
+
+## 7. 列式导出
+
+`oq-data` 可以把同一批 tick 写成 Parquet，位于可选的 `parquet` feature 之后。
+这就是 §6 里那句"要交换格式就导出 Parquet"的兑现。
+
+```text
+cargo run -p oq-data --features parquet --bin oq-data -- ticks.oqtk --parquet out.parquet
+```
+
+八个 `Int64` 列——`exch_ts`、`local_ts`、`last`、`high`、`low`、`bid`、`ask`、
+`volume`——zstd 压缩，合约 id 与 schema 版本写在文件的 key-value 元数据里，键为
+`openquanter.instrument` 与 `openquanter.tick_schema`。
+
+三个值得说明的决定，因为每一个都有一个显而易见的错误答案：
+
+- **两个时戳都要，都不可选。** 两者之差就是 feed 延迟。只保留其中一个的导出，
+  会让读者无法区分"feed 慢"和"行情慢"，而且这种损失是无声的。
+- **整数，而不是缩放后的浮点。** 浮点列读起来更顺眼，但它是错的；scale 属于合约，
+  不属于价格。文件精确往返，并有测试把每一列钉在 `Int64` 上。
+- **feature 之所以可选，是因为依赖树约 90 个 crate**，比工作区其余部分加起来还多。
+  `oq-data` 的默认构建仍然是零第三方依赖，CI 把 feature 构建单独作为一项检查。
+
+在 7.3 小时实采的 BTC 永续数据上——262,365 个 tick——导出为 4.06 MB，原生格式
+16.79 MB，即 24%，并且不需要自定义 reader 就能在 pandas 里读：
+
+```python
+df = pd.read_parquet("out.parquet")
+latency_ms = (df.local_ts - df.exch_ts) / 1e6   # 中位 89.8，p99 102.1
+```
+
+校验和不跨格式携带。Parquet 有自己的页级完整性校验，而对我们已不再掌控的字节做出
+断言是一个守不住的承诺；`read_parquet` 会重建 `TickStream`，由它重新计算校验和。
