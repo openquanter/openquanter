@@ -78,6 +78,26 @@ a lie. They are separate numbers because they answer separate questions:
 the crate version says what API you are compiling against, and the
 format version says what a file on disk contains.
 
+## Where releases go
+
+| Artifact | Registry | State |
+|---|---|---|
+| `openquanter` (Python) | [PyPI](https://pypi.org/project/openquanter/) | Published, `2.0.0a1` |
+| `oq-*` (Rust) | crates.io | Names reserved, nothing published |
+
+The Python package leads, and the Rust crates trail on purpose. A binding
+has a small, deliberately-chosen surface — the statistics and the strategy
+tier — and its users are people evaluating whether this is worth their time.
+A crate exposes every public type in the workspace, and the workspace's
+types are still moving. Publishing them now would pin people to a version
+about to change under them, and a version yanked from crates.io is still a
+version somebody built against.
+
+Note that a PyPI version cannot be re-uploaded either. `2.0.0a1` is
+permanent, which is why the metadata that ships with it — the description,
+the README, the classifiers — is checked before the upload rather than
+corrected after.
+
 ## Changing the version
 
 Edit `[workspace.package].version` and the versions in
