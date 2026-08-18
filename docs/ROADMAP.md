@@ -361,10 +361,18 @@ not in the matching kernel.
 
 **Scope.**
 
-- **L1**: queue-position modeling (conservative model first; probabilistic
-  model enabled only after calibration against recorded fills), three-segment
-  latency with distributions rather than constants, square-root impact penalty,
-  participation-rate alerting.
+- **L1**: **a first version exists** — `oq_engine::l1` models queue position,
+  entry and response latency, and a square-root taker impact penalty, and
+  participation-rate alerting shipped with the fidelity report at M2. What
+  remains is the calibration this milestone is actually about: the model takes
+  a `Policy` of assumptions, because the tick format carries neither book depth
+  nor this deployment's real latency, and turning those assumptions into
+  measurements needs the recorded fills the entry trigger asks for. Three
+  further pieces are not built: a probabilistic queue model (the shipped one is
+  the conservative one, which is the stated order), latency as *distributions*
+  rather than constants, and **feed** latency — which is a property of the event
+  producer rather than the matcher, so it belongs to the host loop and putting
+  it in the engine as well would delay the same event twice.
 - **L2**: order book reconstruction from incremental depth, matching against
   the reconstructed book, snapshot reconciliation and gap handling.
 - Stylized-facts test set in CI (fat tails, volatility clustering, order flow
@@ -449,7 +457,7 @@ confirmation recorded in the pull request.
 | The execution seam has one implementation and no second | Medium | Was: no seam at all. `Execution` now exists and `oq-gateway` implements it for one venue, so the layers above no longer name a venue — but the claim that a second one is an implementation rather than a rewrite is exactly as unproven as it was for market data before OKX landed. The market data side now has a conformance suite both its adapters pass — driven by samples each adapter supplies, so it tests the contract rather than one venue's bytes, and it caught a wrongly stated convention on its first run. The order side has no equivalent, because its contract's interesting terms need a venue to exercise. The way to close this is still a second venue, not more design |
 | The instrument model is split in two, and neither half is in the core | High | `oq-margin::Contract` holds the economics — `tick_cash` is the contract multiplier, so a 300x index future is already expressible — and `oq-l2feed::Instrument` holds the quoting precision. They never meet, and `oq-types` names an instrument only as `InstrumentId(u32)`, so nothing below the two hosts knows what a contract is. Harder than either half: `Cash` carries no currency dimension, so a book settling in more than one currency cannot be expressed at all, which is what equities and FX require. Unify identity, precision and economics in the core and settle the currency question before the Python surface freezes |
 | `Strategy` is defined in the backtest host | Medium-high | Live execution would either depend on `oq-backtest` or need a second strategy trait, and G7 — the same strategy unchanged in both modes — cannot hold either way. Move the trait below both hosts before external code implements it |
-| L0 is the frozen regression anchor and has no matching seam | Medium | `oq-engine` has one matching path and no trait, so L1 and L2 require refactoring the anchor they are measured against. Introduce the seam with L0 as its first and only implementation, so the anchor's behaviour is unchanged by construction |
+| ~~L0 is the frozen regression anchor and has no matching seam~~ | Closed | Resolved for L1 without the refactor this entry proposed. `L1Engine` **owns** an `L0Engine` and never modifies it — orders are held outside it until they are entitled to be in it, and its fills are adjusted after it produces them. So L0 needed no seam, no trait and no change at all, and a test asserts a transparent L1 policy reproduces L0's fills exactly. L2 may still need the seam; L1 established that wrapping is enough to try first |
 
 
 The last four entries are not hypotheses. They are present-tense structural
