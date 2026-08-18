@@ -641,3 +641,263 @@ mod tests {
         }
     }
 }
+
+/// A limit change, as an auditable fact.
+///
+/// `FR-RISK-5` says risk limits are configuration, versioned and
+/// journalled — a limit change is an auditable event. Until this type
+/// they were a struct somebody constructed at startup and nothing
+/// recorded, so the question "what were the limits when that order went
+/// out" had no answer after the process exited.
+///
+/// The answer matters most in exactly the situation where it is hardest
+/// to reconstruct: an incident review, weeks later, where the operator
+/// remembers raising a cap and cannot say when or by how much.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitChange {
+    /// Which limit moved.
+    pub field: &'static str,
+    /// What it was, as text.
+    ///
+    /// Text rather than a number because the limits are not all the same
+    /// type, and an audit record that could only hold the ones that
+    /// happen to be integers would be an audit record with holes where
+    /// the ratios were.
+    pub from: String,
+    /// What it became.
+    pub to: String,
+    /// Version the limits reached with this change.
+    pub version: u32,
+    /// When, on the caller's clock.
+    pub at: Nanos,
+}
+
+impl core::fmt::Display for LimitChange {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "v{}: {} {} -> {} at {}",
+            self.version, self.field, self.from, self.to, self.at.0
+        )
+    }
+}
+
+/// Limits, with the history of how they got here.
+///
+/// A version number and a log. The version is what a journal entry or a
+/// report cites; the log is what an incident review reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedLimits {
+    current: Limits,
+    version: u32,
+    history: Vec<LimitChange>,
+}
+
+impl VersionedLimits {
+    /// Open at version 1, with no history.
+    ///
+    /// Version 1 rather than 0, so "the limits were never changed" and
+    /// "the limits are unset" cannot be confused in a record that only
+    /// carries the number.
+    #[must_use]
+    pub const fn new(limits: Limits) -> Self {
+        Self {
+            current: limits,
+            version: 1,
+            history: Vec::new(),
+        }
+    }
+
+    /// The limits in force.
+    #[must_use]
+    pub const fn limits(&self) -> &Limits {
+        &self.current
+    }
+
+    /// The version in force.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Every change, oldest first.
+    #[must_use]
+    pub fn history(&self) -> &[LimitChange] {
+        &self.history
+    }
+
+    /// Replace the limits, recording every field that moved.
+    ///
+    /// Returns the changes, so a caller can journal them. Empty when
+    /// nothing moved — and in that case the version does **not**
+    /// advance: a version that ticked on a no-op would make two records
+    /// citing different versions describe identical limits, and an audit
+    /// trail whose numbers do not mean anything is worse than none.
+    pub fn set(&mut self, next: Limits, at: Nanos) -> Vec<LimitChange> {
+        let mut changes = Vec::new();
+        let version = self.version + 1;
+        let mut note = |field: &'static str, from: String, to: String| {
+            if from != to {
+                changes.push(LimitChange {
+                    field,
+                    from,
+                    to,
+                    version,
+                    at,
+                });
+            }
+        };
+
+        let a = &self.current;
+        note(
+            "max_order_qty",
+            a.max_order_qty.0.to_string(),
+            next.max_order_qty.0.to_string(),
+        );
+        note(
+            "max_position_qty",
+            a.max_position_qty.0.to_string(),
+            next.max_position_qty.0.to_string(),
+        );
+        note(
+            "max_order_notional",
+            a.max_order_notional.0.to_string(),
+            next.max_order_notional.0.to_string(),
+        );
+        note(
+            "price_band",
+            a.price_band.0.to_string(),
+            next.price_band.0.to_string(),
+        );
+        note(
+            "max_working",
+            a.max_working.to_string(),
+            next.max_working.to_string(),
+        );
+        note(
+            "max_rate",
+            a.max_rate.to_string(),
+            next.max_rate.to_string(),
+        );
+        note(
+            "rate_window",
+            a.rate_window.0.to_string(),
+            next.rate_window.0.to_string(),
+        );
+
+        if !changes.is_empty() {
+            self.current = next;
+            self.version = version;
+            self.history.extend(changes.iter().cloned());
+        }
+        changes
+    }
+}
+
+#[cfg(test)]
+mod versioning {
+    use super::*;
+
+    fn limits() -> Limits {
+        Limits {
+            max_order_qty: QtyLots(1),
+            max_position_qty: QtyLots(2),
+            max_order_notional: Cash(1_000),
+            price_band: Ratio(300_000),
+            max_working: 4,
+            max_rate: 10,
+            rate_window: Nanos(60_000_000_000),
+        }
+    }
+
+    /// The question this exists to answer: what were the limits when
+    /// that order went out. Before, it had no answer once the process
+    /// exited.
+    #[test]
+    fn a_change_records_what_moved_and_from_what() {
+        let mut v = VersionedLimits::new(limits());
+        assert_eq!(v.version(), 1);
+
+        let changes = v.set(
+            Limits {
+                max_position_qty: QtyLots(50),
+                ..limits()
+            },
+            Nanos(7),
+        );
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "max_position_qty");
+        assert_eq!(
+            (changes[0].from.as_str(), changes[0].to.as_str()),
+            ("2", "50")
+        );
+        assert_eq!(changes[0].version, 2);
+        assert_eq!(v.version(), 2);
+        assert_eq!(v.limits().max_position_qty, QtyLots(50));
+    }
+
+    /// A no-op does not advance the version. Two records citing
+    /// different versions must describe different limits, or the number
+    /// they cite means nothing.
+    #[test]
+    fn setting_the_same_limits_changes_nothing() {
+        let mut v = VersionedLimits::new(limits());
+        assert!(v.set(limits(), Nanos(7)).is_empty());
+        assert_eq!(v.version(), 1);
+        assert!(v.history().is_empty());
+    }
+
+    /// Several fields moving at once is one version and several
+    /// changes. Collapsing them into a single "limits changed" entry
+    /// would lose which cap was raised, which is the whole question an
+    /// incident review is asking.
+    #[test]
+    fn several_fields_moving_at_once_are_recorded_separately() {
+        let mut v = VersionedLimits::new(limits());
+        let changes = v.set(
+            Limits {
+                max_order_qty: QtyLots(9),
+                max_rate: 99,
+                ..limits()
+            },
+            Nanos(7),
+        );
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().all(|c| c.version == 2));
+        assert_eq!(v.version(), 2, "one change of limits, one version");
+    }
+
+    /// The history accumulates rather than being replaced, because an
+    /// incident review reads the sequence and a cap raised twice is a
+    /// different story from a cap raised once.
+    #[test]
+    fn the_history_accumulates() {
+        let mut v = VersionedLimits::new(limits());
+        v.set(
+            Limits {
+                max_order_qty: QtyLots(2),
+                ..limits()
+            },
+            Nanos(1),
+        );
+        v.set(
+            Limits {
+                max_order_qty: QtyLots(3),
+                ..limits()
+            },
+            Nanos(2),
+        );
+        assert_eq!(v.history().len(), 2);
+        assert_eq!(v.version(), 3);
+        assert_eq!(v.history()[0].to, "2");
+        assert_eq!(v.history()[1].from, "2");
+    }
+
+    /// Version 1 at construction, so "never changed" and "unset" cannot
+    /// be confused by a record carrying only the number.
+    #[test]
+    fn limits_start_at_version_one() {
+        assert_eq!(VersionedLimits::new(limits()).version(), 1);
+    }
+}
