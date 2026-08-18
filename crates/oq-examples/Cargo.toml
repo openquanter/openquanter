@@ -10,6 +10,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+oq-data.workspace = true
 oq-backtest.workspace = true
 oq-engine.workspace = true
 oq-margin.workspace = true
