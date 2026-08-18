@@ -194,6 +194,12 @@ depends on the invariants established here.
   asserts the two are identical; for `n > 1` the divergence is **measured**
   by `compare_modes` rather than assumed small. On the example crossover it
   costs 18% of the strategy's edge at `n = 64` and destroys it at `n = 512`.
+  What it buys is measured too, because a price quoted without goods is not a
+  trade: over 200,000 ticks with a strategy that does nothing, throughput mode
+  runs at up to about 7x compatibility mode. A batch of 8 buys 2.8x for 1.3%
+  of the edge, 64 buys 5.8x for 18%, 512 buys 6.9x and takes the edge away.
+  Which is acceptable is a property of the strategy, so the binding measures
+  rather than chooses.
 - **Margin fidelity reporting (G5).** Recompute historical stress windows with
   and without the margin overlay and publish the methodology behind the
   **tail-divergence report**, published as

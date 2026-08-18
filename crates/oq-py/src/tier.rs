@@ -31,6 +31,29 @@
 //! difference in production — is the failure this whole project is
 //! organised against.
 //!
+//! # The other half of the trade
+//!
+//! Reporting what batching costs without reporting what it buys would be
+//! quoting a price with no goods attached. Over 200,000 ticks with a
+//! strategy that does nothing — so the measurement is the boundary and
+//! not the strategy — throughput mode runs at up to about **7x**
+//! compatibility mode, saturating near a batch of 4,096:
+//!
+//! ```text
+//! batch=1      1.50 M ticks/s   1.00x
+//! batch=8      4.23 M ticks/s   2.82x
+//! batch=64     8.65 M ticks/s   5.78x
+//! batch=512   10.26 M ticks/s   6.85x
+//! batch=4096  10.70 M ticks/s   7.15x
+//! ```
+//!
+//! Put beside the accuracy cost on the example crossover, the trade is
+//! legible rather than a matter of taste: a batch of 8 buys 2.8x for
+//! 1.3% of the strategy's edge; a batch of 64 buys 5.8x for 18% of it;
+//! a batch of 512 buys 6.9x and takes the whole edge away. Which of
+//! those is acceptable is a property of the strategy, so the binding
+//! measures rather than chooses.
+//!
 //! # What a strategy looks like
 //!
 //! ```python

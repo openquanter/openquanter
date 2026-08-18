@@ -12,6 +12,7 @@ tested from the far side of it.
 
 import math
 import sys
+import time
 
 import openquanter as oq
 
@@ -134,6 +135,37 @@ def main():
         costs[-1] > profit,
         f"cost={costs[-1]} profit={profit}",
     )
+
+    # --- what batching buys ------------------------------------------
+    # The cost above is only half the trade. A binding that measured the
+    # accuracy cost of throughput mode and not its speed would be
+    # reporting the price without the goods.
+    class Noop:
+        """Does nothing, so this measures the boundary, not a strategy."""
+
+        name = "noop"
+
+        def on_tick(self, ctx):
+            return None
+
+        def on_batch(self, batch):
+            return None
+
+    speeds = []
+    for n in (1, 8, 64, 512):
+        t0 = time.perf_counter()
+        oq.run_backtest(Noop(), series, balance, batch=n)
+        dt = time.perf_counter() - t0
+        speeds.append(len(series) / dt)
+        print(f"        batch={n:<4} {len(series) / dt / 1e6:>6.2f} M ticks/s"
+              f"   {speeds[-1] / speeds[0]:>5.2f}x")
+    # Not a threshold: shared machines vary by several times and a tight
+    # number would fail on noise. What must hold is the direction, and
+    # that batching buys something rather than nothing.
+    check("batching is faster than per-tick", speeds[-1] > speeds[0] * 2,
+          f"{speeds[-1] / speeds[0]:.2f}x")
+    check("more batching is not slower", speeds == sorted(speeds),
+          f"{[round(s / 1e6, 2) for s in speeds]}")
 
     # --- refusals ----------------------------------------------------
     try:
