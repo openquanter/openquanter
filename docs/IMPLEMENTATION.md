@@ -355,6 +355,50 @@ outside user, and an outside user is one of M3's four entry conditions and
 the only one that cannot be bought with engineering time. Full bindings
 follow. Nothing about the small surface forecloses the large one.
 
+### D16 — No MainEngine: assembly lives in types, not in a registry
+
+Anyone arriving from the 1.x lineage looks first for a `MainEngine` — a central
+object holding gateways, apps, the event engine, the database and the OMS, with
+the parts reaching each other at runtime through `get_gateway(name)` and
+`add_app(obj)`. There is none here, and the absence is a decision rather than an
+omission.
+
+**Assembly lives in `oq-live`**, whose job is stated differently: the gate
+decides whether an order may be sent, the gateway knows how to send it, the
+stream says what happened, and **none of them know about each other**; this
+crate is where they meet, and the meeting is the point. `Session` is **the only
+path that can send an order** — correct ordering is not something the caller
+remembers, it is the absence of another route.
+
+Four differences in shape. The first three are ordinary Rust practice:
+
+| | MainEngine | Here |
+|---|---|---|
+| Composition | runtime registration, `add_gateway(obj)` | compile-time generics, `Session<E: Execution>` |
+| Ownership | one object holds everything, `&mut` from all sides | components own their parts; messages move ownership |
+| Communication | a shared event-bus object | channels; nobody owns "the engine" |
+| The wiring diagram | implicit in registration order | it is the code in `main`, and every connection is readable |
+
+The first two are not stylistic in Rust: a hub that every subsystem needs `&mut`
+on pushes you into `Rc<RefCell<_>>` or `Arc<Mutex<_>>`, **trading compile-time
+errors for runtime panics and deadlocks**.
+
+**The fourth is the one that matters here.** A hub anything can reach into and
+mutate is exactly where "who changed this state" stops having an answer — and
+the kernel's entire premise is that state moves only by event
+([D1](#d1--pure-deterministic-state-machine-core)). The moment a component
+can call the hub and change state directly, that change is not journalled, the
+replay disagrees, and the
+[attribution](REQUIREMENTS.md#310-live-gap-attribution--fr-attrib) chain is
+broken. **A MainEngine and "every cent accounted for" are structurally in
+conflict.** That is not a preference.
+
+**Dynamic dispatch is still used where it belongs**: which venue to connect to
+is a configuration question answered at runtime, and `Box<dyn Execution>` is the
+right tool. **Which one is a runtime question; what the graph looks like is a
+compile-time one** — the problem with a MainEngine was never that it used
+dynamic dispatch, but that it made the whole graph mutable at runtime.
+
 ## 3. Technology choices
 
 | Area | Choice | Rationale |
