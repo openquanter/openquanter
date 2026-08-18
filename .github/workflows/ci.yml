@@ -89,6 +89,19 @@ jobs:
       - name: Dependency budgets and standalone builds
         run: scripts/check-composability.sh
 
+  doc-facts:
+    name: Documentation facts match the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # These blocks are generated, not written. The claims they replaced
+      # went stale twice in one day — once overselling unbuilt work, once
+      # hiding shipped work — and both times a person reading the code
+      # found it rather than a check.
+      - name: Compare the generated blocks against Cargo.toml
+        run: scripts/doc-facts.sh --check
+
   throughput:
     name: Engine throughput floor
     runs-on: ubuntu-latest
