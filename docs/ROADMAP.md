@@ -177,16 +177,16 @@ input this project cannot reach, the second has not been written.
 | Gateway | Reconciliation as a first-class object (lost, duplicate, out-of-order) | Built |
 | Gateway | A second venue (OKX) | Built; **public half verified against the real venue, signed half unverified** |
 | Gateway | **Conformance suite for execution adapters** | Built — both shipped adapters driven through it, and three deliberately-wrong adapters caught by it |
-| Gateway | **Broker/referral prefix scheme** | **Not built** (FR-VENUE-4; `--id-prefix` is ownership, not attribution) |
+| Gateway | **Broker/referral prefix scheme** | Built — `broker::IdScheme` composes ids carrying a venue-issued code, kept separate from the ownership prefix because they answer different questions |
 | Risk | RiskGate: pre-trade checks, kill switch, startup reconciliation | Built |
-| Risk | **Limit changes journalled as auditable events** | **Not built** (FR-RISK-5) |
+| Risk | **Limit changes journalled as auditable events** | Built — `VersionedLimits` records which field moved and from what; a no-op does not advance the version |
 | Live | Process assembly, snapshot recovery | Built |
 | Live | **Books kept by the kernel** (one implementation for live and backtest) | Built |
 | Live | Graceful restart, one process per account | Partial (recovery exists; orchestration does not) |
 | Attribution | **Gap decomposed by cause, with an unexplained residual** | Built |
 | Attribution | Shadow → evidence → report, end to end | Built |
 | Observability | Latency histograms | Built |
-| Observability | **Structured metrics, alert hooks** | **Not built** |
+| Observability | **Structured metrics, alert hooks** | Built — a snapshot rendered in the line-oriented form collectors read, and alerts as *judgements* rather than notifications: nothing here sends |
 | Simulation | Gateway fuzzing (disconnects, reordering, duplication, partial fills) | Built |
 | Cutover | Position-carrying playbook | **Written, never rehearsed**; its §6 lists what is missing before one can be |
 | Cutover | Account record/compare tooling (a rehearsal precondition) | Built |
@@ -209,7 +209,7 @@ input this project cannot reach, the second has not been written.
 | L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
 | L2 | Book reconstruction, snapshot reconciliation, gap handling | **Not built** |
 | Validation | Stylized-facts test set | **Not built** |
-| Validation | L0 / L0+margin / L1 comparative report | Partial (the `tiers` example covers L0 against L1) |
+| Validation | L0 / L0+margin / L1 comparative report | Built — `tiers` covers all three, and shows the rungs are **not** ordered by pessimism |
 
 ### M5 — AI extensions
 
