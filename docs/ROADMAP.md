@@ -144,7 +144,7 @@ input this project cannot reach, the second has not been written.
 | Parity | Trade-by-trade diff, difference attribution, identity triple | Built |
 | Parity | **Run file format** (a baseline can be archived) | Built |
 | Testing | **Property tests** for margin invariants (FR-MARGIN-7) | Built — and the first run found a real defect, below |
-| Testing | **Property tests** for matching invariants (FR-MATCH-7) | **Not built** — quantity conservation, price-time priority, no crossed book, no negative fills |
+| Testing | **Property tests** for matching invariants (FR-MATCH-7) | Built — quantity conservation, price-time priority, no crossed book, no negative fills, plus determinism over generated scripts |
 | Release | First public preview tag | Built |
 
 ### M2 — Python tier, fidelity reporting, research workflow
@@ -162,7 +162,7 @@ input this project cannot reach, the second has not been written.
 | CLI | `data`, `replay`, `parity` subcommands | Built |
 | CLI | `backtest`, `sweep` subcommands | **Deliberately absent** (a strategy is compiled Rust) |
 | Research | Sweeps emit DSR/PBO by default | Built |
-| Research | **Strict mode refusing over-threshold results** | **Not built** (FR-RESEARCH-3) |
+| Research | **Strict mode refusing over-threshold results** | Built — `SweepReport::refusals` names every reason, and an unscored sweep is refused rather than waved through |
 | Fidelity | Fidelity report and participation-rate flag | Built |
 | Adoption | Quickstart, seven example strategies, goldens | Built |
 | Gate | **G3 throughput ≥8× the interpreted baseline** | **Blocked** — needs a multi-year window and a same-machine predecessor run; the data is on production hosts and the capture is days old |
