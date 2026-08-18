@@ -26,6 +26,7 @@
 use oq_engine::Tick;
 use oq_types::Stamp;
 
+pub mod classics;
 pub mod ladder;
 pub use ladder::MartingaleLadder;
 
