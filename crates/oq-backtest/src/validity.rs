@@ -69,34 +69,80 @@ impl Participation {
     }
 }
 
-/// What the run assumed about the things L0 does not model.
+/// What the run assumed about the things its tier does not measure.
 ///
 /// Carried as text because they are assumptions rather than
 /// measurements, and because the report has to say *something* under
 /// each heading — an empty column reads as a zero, and a zero here is a
 /// claim nobody made deliberately.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assumptions {
+    /// The tier that produced the run.
+    ///
+    /// Part of the assumptions rather than beside them, because the tier
+    /// *is* an assumption — `oq-engine`'s ladder says a market-making
+    /// P&L measured at L0 is not a pessimistic estimate but a different
+    /// quantity with the same units, and a report that named the wrong
+    /// tier would be the exact confusion it warns about.
+    pub tier: String,
     /// What the matcher assumed about latency.
-    pub latency: &'static str,
+    pub latency: String,
     /// What it assumed about market impact.
-    pub impact: &'static str,
+    pub impact: String,
+    /// What it assumed about queue position, when the tier has one.
+    pub queue: Option<String>,
 }
 
 impl Assumptions {
-    /// L0's assumptions, which are that neither exists.
-    pub const L0: Self = Self {
-        latency: "none modelled: an order matches against the observation \
-                  that triggered it, with no delay",
-        impact: "none modelled: fills do not move the price, at any size",
-    };
+    /// L0's assumptions, which are that none of the three exist.
+    #[must_use]
+    pub fn l0() -> Self {
+        Self {
+            tier: "L0".to_string(),
+            latency: "none modelled: an order matches against the observation \
+                      that triggered it, with no delay"
+                .to_string(),
+            impact: "none modelled: fills do not move the price, at any size".to_string(),
+            queue: None,
+        }
+    }
+
+    /// The assumptions an L1 policy actually holds.
+    ///
+    /// Taken from the policy rather than described here, so a report
+    /// cannot drift from the engine that produced it — the failure this
+    /// exists to prevent is a run at one tier reporting another's
+    /// assumptions, and two sources for the same sentence is how that
+    /// happens.
+    #[must_use]
+    pub fn of_l1(policy: &oq_engine::Policy) -> Self {
+        if policy.models_nothing() {
+            // Not L1's assumptions, because it is not making any. Naming
+            // it L1 would put a higher tier on a lower-fidelity answer.
+            let mut base = Self::l0();
+            base.tier = "L1 (transparent: equivalent to L0)".to_string();
+            return base;
+        }
+        Self {
+            tier: "L1".to_string(),
+            latency: format!(
+                "entry {} ns, response {} ns — assumed, not measured. Feed latency is \
+                 not modelled here: it belongs to the event producer.",
+                policy.latency.entry.0, policy.latency.response.0
+            ),
+            impact: format!(
+                "square-root penalty, coefficient {}.{:02} — assumed, not calibrated",
+                policy.impact.coefficient / 100,
+                policy.impact.coefficient % 100
+            ),
+            queue: Some(policy.describe()),
+        }
+    }
 }
 
 /// The fidelity report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FidelityReport {
-    /// The tier the run used.
-    pub tier: &'static str,
     /// Share of market volume taken.
     pub participation: Participation,
     /// The threshold the flag is set against.
@@ -137,7 +183,7 @@ impl FidelityReport {
     pub fn render(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::new();
-        let _ = writeln!(out, "fidelity report   tier {}", self.tier);
+        let _ = writeln!(out, "fidelity report   tier {}", self.assumptions.tier);
 
         match self.participation {
             Participation::Measured {
@@ -188,6 +234,9 @@ impl FidelityReport {
             }
         }
 
+        if let Some(queue) = &self.assumptions.queue {
+            let _ = writeln!(out, "  queue           {queue}");
+        }
         let _ = writeln!(out, "  latency         {}", self.assumptions.latency);
         let _ = writeln!(out, "  impact          {}", self.assumptions.impact);
 
@@ -245,12 +294,29 @@ pub const DEFAULT_THRESHOLD: f64 = 0.01;
 /// documentation for why the average is not.
 #[must_use]
 pub fn report(result: &RunResult, ticks: &[Tick], window: usize, threshold: f64) -> FidelityReport {
+    report_at(result, ticks, window, threshold, Assumptions::l0())
+}
+
+/// The fidelity report for a run at a named tier.
+///
+/// Takes the assumptions rather than deriving them, because the engine
+/// that produced the run is the only thing that knows which tier it was
+/// running under — and a report that guessed would be `oq-engine`'s own
+/// warning made real: a market-making P&L measured at L0 is not a
+/// pessimistic estimate, it is a different quantity with the same units.
+#[must_use]
+pub fn report_at(
+    result: &RunResult,
+    ticks: &[Tick],
+    window: usize,
+    threshold: f64,
+    assumptions: Assumptions,
+) -> FidelityReport {
     FidelityReport {
-        tier: "L0",
         participation: participation(&result.fills, ticks, window),
         threshold,
         taker_maker: split(&result.fills),
-        assumptions: Assumptions::L0,
+        assumptions,
         margin_usage: result.margin_usage,
         liquidations: result.liquidations.len(),
     }
@@ -549,5 +615,97 @@ mod tests {
             report(&r, &flat, 5, 0.01).participation,
             Participation::Unmeasurable(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    use oq_engine::{Impact, Latency, Policy, QueueAhead};
+    use oq_types::Nanos;
+
+    fn nothing() -> RunResult {
+        RunResult {
+            strategy: "t".into(),
+            fills: Vec::new(),
+            liquidations: Vec::new(),
+            ticks: 0,
+            final_equity: Cash(0),
+            realized: Cash(0),
+            funding_paid: Cash(0),
+            fees_paid: Cash(0),
+            min_equity: Cash(0),
+            equity_curve: Vec::new(),
+            max_adverse_ticks: 0,
+            margin_usage: MarginUsage::NotTracked,
+        }
+    }
+
+    fn rendered(assumptions: Assumptions) -> String {
+        report_at(&nothing(), &[], 10, 0.01, assumptions).render()
+    }
+
+    /// The confusion `oq-engine`'s ladder warns about, made impossible
+    /// to produce by accident: an L1 run must not report L0's
+    /// assumptions, because a P&L measured at one tier is a different
+    /// quantity from the same P&L measured at another.
+    #[test]
+    fn an_l1_run_does_not_report_l0s_assumptions() {
+        let policy = Policy {
+            queue: QueueAhead::Fixed(oq_types::QtyLots(250)),
+            latency: Latency {
+                entry: Nanos(3_000_000),
+                response: Nanos(9_000_000),
+            },
+            impact: Impact { coefficient: 175 },
+        };
+        let text = rendered(Assumptions::of_l1(&policy));
+
+        assert!(text.contains("tier L1"), "{text}");
+        assert!(
+            !text.contains("none modelled"),
+            "L0's sentences must not appear: {text}"
+        );
+        assert!(text.contains("250 lots"), "{text}");
+        assert!(
+            text.contains("3000000") && text.contains("9000000"),
+            "{text}"
+        );
+        assert!(text.contains("1.75"), "{text}");
+    }
+
+    /// A transparent L1 policy is L0's answer, and calling it L1 would
+    /// put a higher tier's name on a lower tier's fidelity.
+    #[test]
+    fn a_transparent_l1_policy_is_reported_as_equivalent_to_l0() {
+        let text = rendered(Assumptions::of_l1(&Policy::TRANSPARENT));
+        assert!(text.contains("equivalent to L0"), "{text}");
+        assert!(
+            text.contains("none modelled"),
+            "and it carries L0's sentences: {text}"
+        );
+    }
+
+    /// L1's own words, not a second description that can drift from
+    /// them. Two sources for one sentence is how a report ends up
+    /// describing an engine that is no longer there.
+    #[test]
+    fn the_queue_line_comes_from_the_policy_itself() {
+        let policy = Policy {
+            queue: QueueAhead::VolumeMultiple(275),
+            ..Policy::TRANSPARENT
+        };
+        let a = Assumptions::of_l1(&policy);
+        assert_eq!(a.queue.as_deref(), Some(policy.describe().as_str()));
+    }
+
+    /// An L0 run has no queue line at all, rather than one saying there
+    /// is no queue — the tier does not have the concept, and a heading
+    /// that appears with "none" under it implies the tier considered it.
+    #[test]
+    fn an_l0_run_has_no_queue_heading() {
+        let text = rendered(Assumptions::l0());
+        assert!(text.contains("tier L0"), "{text}");
+        assert!(!text.contains("queue  "), "{text}");
     }
 }
