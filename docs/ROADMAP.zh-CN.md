@@ -146,8 +146,13 @@ M3 仍未建的部分,所以"一半"是个数字而不是感觉:`oq-live` 的快
   交付物：它量化了无保证金回测究竟乐观了多少。
 - `oq-data`：双时戳 Arrow/Parquet 层、双时间参考数据、严格 as-of join 工具；
   `oq-features` 骨架。
-- `oq-cli`：`backtest`、`sweep`、`replay`、`parity`、`data` 子命令；集成
-  `oq-stats` 使扫描默认输出 DSR/PBO。
+- `oq-cli`：已交付 `data` 与 `replay` 子命令；集成 `oq-stats` 使扫描默认输出
+  DSR/PBO。原计划的 `backtest`、`sweep`、`parity` **不会**再写，原因来自设计本身
+  而非进度：策略是编译进二进制的 Rust 代码，没有任何参数能指名一个策略，子命令
+  只会是一个更差的 `cargo run --example`；而 `oq-parity` 的 `compare` 需要
+  `RunManifest` 与 `RunOutput`，两者都没有序列化格式，`parity` 子命令得先发明
+  这个文件格式——真正缺的是格式，不是包装，缺口按格式来跟踪。`oq` 在被问到这三个
+  命令时会说明原因，而不是报“未知命令”。
 - **采用就绪度（G11）：** 快速上手文档、至少两个示例策略、带 golden 测试的样例
   数据集，以及一次由核心团队之外的人完成的冷启动验证。
 
