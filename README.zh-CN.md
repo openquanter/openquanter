@@ -229,6 +229,23 @@ Pre-alpha，并且把话说清楚。**今天已建成并有测试覆盖的**：
 就能跑起一次回测。各里程碑解锁什么能力、由什么触发，见[路线图](docs/ROADMAP.zh-CN.md)；
 `2.0.0-alpha` 承诺了什么，见[版本规则](docs/VERSIONING.zh-CN.md)。
 
+## 安装
+
+Python 绑定已发布到 PyPI，alpha 版：
+
+```bash
+pip install --pre openquanter
+```
+
+提供 Linux（x86-64 与 aarch64）、macOS（Apple 芯片）、Windows（x86-64）的
+wheel。它们是 `abi3` 的，因此一个 wheel 覆盖 3.9 及以后的所有解释器，安装时
+不需要 Rust 工具链。它能做什么，[包页面上有说明](https://pypi.org/project/openquanter/)：
+过拟合统计量，以及一个由 Rust 引擎驱动的 Python 策略。
+
+Rust crate 尚未发布。等 API 不再变动时会发；在那之前 `cargo add` 会把人钉在一个
+即将在他们脚下改变的版本上，而一个从 crates.io 撤下的版本，仍然是有人据以构建过
+的版本。
+
 ## 构建
 
 ```bash
