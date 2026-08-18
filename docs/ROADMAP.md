@@ -132,6 +132,22 @@ minimum project scaffolding for external contribution.
   lost cancels, synthetic zero-price fills, stale user streams, reconnect
   storms, feed gaps. These become the seed corpus for `oq-sim`.
 
+- **Fidelity report (FR-MATCH-3, FR-MATCH-4).** `oq_backtest::validity`
+  reports participation rate, maker/taker split, the tier's latency and
+  impact assumptions, and — when a run asks for it — peak margin usage and
+  closest approach to liquidation, flagging a run whose peak participation
+  says it replayed a market it would have moved.
+
+  Two honest limits. It is a **call**, not a field: `report(&result, &ticks,
+  …)` needs the tick series and a streamed run has already consumed it, so
+  "every backtest emits a fidelity report" is satisfied by it being one line
+  with no configuration rather than by it being automatic — a weaker
+  guarantee, and stated as one. And margin tracking is **opt-in** because
+  measuring it costs about a fifth of the engine's throughput and cannot be
+  sampled: the figure wanted is an extreme, and a closest approach that
+  missed the closest approach is worse than none. A run that did not ask
+  reports `NotTracked`, never zero.
+
 **Exit gate.**
 
 - Capture running continuously with a measured gap rate and documented

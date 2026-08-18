@@ -48,6 +48,13 @@ pub struct RunConfig {
     /// interval makes the frequency part of the result rather than an
     /// accident of the data's density.
     pub equity_every: usize,
+    /// Whether to measure how close the account came to liquidation.
+    ///
+    /// Off by default. It costs about a fifth of the engine's
+    /// throughput, and it cannot be sampled the way the equity curve is
+    /// — the number wanted is an extreme, and a closest approach that
+    /// missed the closest approach is worse than none.
+    pub track_margin: bool,
     pub instrument: InstrumentId,
     pub contract: Contract,
     pub table: TierTable,
@@ -81,6 +88,7 @@ impl RunConfig {
             // Off by default: a run that nobody asked for a curve from
             // should not pay for one, and a sweep asks.
             equity_every: 0,
+            track_margin: false,
             instrument,
             contract,
             table,
@@ -90,6 +98,14 @@ impl RunConfig {
             fees: oq_core::Fees::none(),
             position_mode: oq_core::PositionMode::OneWay,
         }
+    }
+
+    /// Measure how close the account came to its maintenance
+    /// requirement, for the fidelity report.
+    #[must_use]
+    pub const fn tracking_margin(mut self) -> Self {
+        self.track_margin = true;
+        self
     }
 
     /// Sample equity every `n` ticks. Zero turns it off.
@@ -147,9 +163,40 @@ pub struct RunResult {
     /// ticks. Reported in ticks rather than money because that is the
     /// unit a position sizing decision is made in.
     pub max_adverse_ticks: i64,
+    /// How close the account came to its maintenance requirement.
+    pub margin_usage: MarginUsage,
 }
 
 /// One liquidation event, kept for the report.
+/// How much margin a run used, or why that is not known.
+///
+/// Three states rather than a pair of numbers, because "nobody
+/// measured", "there was never a position to measure" and "the closest
+/// approach was zero" are three different facts and the last one means
+/// the account stood exactly on the liquidation line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginUsage {
+    /// The run did not track it. See [`RunConfig::tracking_margin`].
+    ///
+    /// Not tracked by default: measuring it costs about a fifth of the
+    /// engine's throughput, and a run nobody wants the number from
+    /// should not pay for it — the same reason the equity curve is
+    /// opt-in.
+    NotTracked,
+    /// Tracked, and no position was ever open.
+    NoPosition,
+    /// Tracked, with a position.
+    Tracked {
+        /// The largest maintenance requirement the account carried.
+        peak_maintenance: Cash,
+        /// The smallest gap between equity and that requirement.
+        ///
+        /// Zero means the account stood exactly on the line; negative
+        /// means it was past it, which is what a liquidation is.
+        min_headroom: Cash,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Liquidation {
     pub at: Nanos,
@@ -212,6 +259,9 @@ where
     let mut liquidations = Vec::new();
     let mut intents = Vec::new();
     let mut min_equity = config.starting_balance;
+    let mut peak_maintenance = Cash::ZERO;
+    let mut min_headroom: Option<Cash> = None;
+    let track_margin = config.track_margin;
     // Seeded with the opening balance so the first sampled interval has a
     // return, rather than the curve starting at the first sample and
     // silently discarding it.
@@ -288,6 +338,19 @@ where
         }
         if summary.equity < min_equity {
             min_equity = summary.equity;
+        }
+        // Only while a position is open. Flat means no requirement, and
+        // the branch below already tests for it — so the common case of
+        // a strategy that is out of the market pays nothing for this.
+        if track_margin && (!summary.qty.is_zero() || !summary.short_qty.is_zero()) {
+            let maintenance = kernel.state().maintenance(summary.mark);
+            if maintenance.0 > peak_maintenance.0 {
+                peak_maintenance = maintenance;
+            }
+            let headroom = Cash(summary.equity.0 - maintenance.0);
+            if min_headroom.is_none_or(|m| headroom.0 < m.0) {
+                min_headroom = Some(headroom);
+            }
         }
         if !summary.qty.is_zero() && summary.entry.0 > 0 {
             let adverse = if summary.qty.0 > 0 {
@@ -379,6 +442,16 @@ where
         funding_paid: summary.funding,
         fees_paid: summary.fees,
         min_equity,
+        margin_usage: if !track_margin {
+            MarginUsage::NotTracked
+        } else if let Some(min_headroom) = min_headroom {
+            MarginUsage::Tracked {
+                peak_maintenance,
+                min_headroom,
+            }
+        } else {
+            MarginUsage::NoPosition
+        },
         equity_curve,
         max_adverse_ticks: max_adverse,
     }

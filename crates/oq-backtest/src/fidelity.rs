@@ -484,6 +484,7 @@ mod tests {
             min_equity: Cash(curve.iter().copied().min().unwrap_or(0)),
             equity_curve: curve.iter().map(|&c| Cash(c)).collect(),
             max_adverse_ticks: 0,
+            margin_usage: crate::run::MarginUsage::NotTracked,
         };
         for _ in 0..liquidations {
             r.liquidations.push(crate::run::Liquidation {
