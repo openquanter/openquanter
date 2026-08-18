@@ -714,6 +714,7 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "criterion",
  "oq-backtest",
+ "oq-data",
  "oq-engine",
  "oq-margin",
  "oq-types",
