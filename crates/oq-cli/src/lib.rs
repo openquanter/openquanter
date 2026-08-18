@@ -45,7 +45,6 @@ pub const ABSENT: &[(&str, &str)] = &[
         "a strategy is compiled Rust; use `cargo run --example`",
     ),
     ("sweep", "same reason as backtest"),
-    ("parity", "a run's output has no file format yet"),
 ];
 
 /// The tools `oq` knows about, with what each is for.
@@ -78,6 +77,10 @@ pub const TOOLS: &[(&str, &str)] = &[
     (
         "data",
         "characterise a tick file before a backtest trusts it",
+    ),
+    (
+        "parity",
+        "compare a run against a baseline, and say when the baseline expired",
     ),
     (
         "recon",
@@ -113,6 +116,7 @@ pub fn crate_for(name: &str) -> Option<&'static str> {
     Some(match name {
         "capture" | "book-check" | "trade-check" | "merge" | "resequence" => "oq-l2feed",
         "ingest" => "oq-ingest",
+        "parity" => "oq-parity",
         "recon" | "order-check" => "oq-gateway",
         "data" => "oq-data",
         "trade" | "replay" => "oq-live",

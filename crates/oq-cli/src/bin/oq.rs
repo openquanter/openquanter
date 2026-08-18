@@ -99,5 +99,5 @@ fn list() {
     }
     println!();
     println!("The tools ship inside the crates that need them, not as separate");
-    println!("packages: oq-l2feed, oq-ingest, oq-gateway, oq-live.");
+    println!("packages: oq-l2feed, oq-ingest, oq-gateway, oq-live, oq-parity.");
 }

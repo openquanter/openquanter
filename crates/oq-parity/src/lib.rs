@@ -19,6 +19,7 @@
 pub mod diff;
 pub mod manifest;
 pub mod record;
+pub mod wire;
 
 pub use diff::{Difference, FieldDifference, ParityReport, compare};
 pub use manifest::{BaselineStatus, IdentityElement, RunManifest};
