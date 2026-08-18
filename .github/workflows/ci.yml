@@ -50,6 +50,18 @@ jobs:
           cargo clippy -p oq-py --all-targets -- -D warnings
           cargo test -p oq-py
 
+      # The Rust side can prove a callback fires. It cannot prove that a
+      # strategy someone would write runs unmodified, that batch=1 really
+      # is compatibility mode, or that the argument names mean what they
+      # say. Those are properties of the boundary, so they are checked
+      # from the far side of it.
+      - name: The Python tier, from Python
+        run: |
+          pip install --quiet maturin
+          maturin build --release --manifest-path crates/oq-py/Cargo.toml --out dist
+          pip install --quiet --force-reinstall dist/*.whl
+          python crates/oq-py/tests/tier.py
+
   hygiene:
     name: No secrets or deployment details
     runs-on: ubuntu-latest
