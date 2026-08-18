@@ -30,6 +30,11 @@ about them first or discover them yourself.**
 
 ## What the wall looks like
 
+> **The dangerous error is the one that looks right.**
+
+What the six below share is not their severity. It is that **none of them
+raises an error.**
+
 ### 1. Failure is silent
 
 This is the expensive kind, because it does not behave like a bug.
@@ -377,6 +382,11 @@ That is not a reasonable standard. No other engineering field — chips, bridges
 drugs — accepts "I tested it, trust me" as a deliverable. They deliver
 **reproducible measurements and a known error bar**.
 
+> **A number without an error bar is an opinion, not a measurement.**
+
+The unexplained residual is, in the end, the error bar that trading results have
+never been given.
+
 Quantitative trading should be stricter, not looser, because its failures are
 immediate, monetary, and irreversible.
 
@@ -393,6 +403,26 @@ pinned engine behaviour, no journal of decisions. That gap is not closed by
 engineering effort. **It is a discipline cost payable only from the first day.**
 
 This project is still small enough to pay it.
+
+### None of this is ours
+
+The three lines in this document — **P&L you cannot explain is not P&L**, **the
+dangerous error is the one that looks right**, **a number without an error bar
+is an opinion** — are one principle applied to trading. The principle is
+Feynman's, from the 1974 Caltech commencement address:
+
+> **"The first principle is that you must not fool yourself — and you are the
+> easiest person to fool."**
+>
+> — Richard Feynman, *Cargo Cult Science*
+
+He was talking about science, but the subject of that talk — a complete ritual,
+everything apparently in order, and no result — describes backtesting with
+uncomfortable precision.
+
+**Naming the source is worth more than pretending to originality.** We have not
+found a new principle. We are trying to carry an old one all the way through, in
+a field unusually good at fooling you and unusually quick to charge for it.
 
 ---
 
