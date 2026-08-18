@@ -55,10 +55,19 @@ OPTIONS:
     --window-ms <MS>       Tick width [default: 1000]
     --minutes <N>          Stop after this long [default: 5]
     --max-qty <LOTS>       Largest single order [default: 1]
+                           One lot is below the minimum notional on most
+                           contracts, so the gate refuses every order at the
+                           default. That is the gate working and the default
+                           being wrong for the venue — raise it to whatever
+                           `oq-order-check` reports as the smallest allowed.
     --max-position <LOTS>  Largest position [default: 1]
     --max-notional <USDT>  Largest order notional [default: 200]
     --band-bps <BPS>       How far a limit may sit from the mark [default: 3000]
-    --id-prefix <TEXT>     Client order id prefix [default: oq]
+    --id-prefix <TEXT>     Ownership prefix: is this order mine [default: oq]
+    --broker-code <CODE>   Venue-issued broker or referral code, when you have
+                           one. Not the same thing as --id-prefix: that says
+                           which orders are this process's, this says who gets
+                           paid for the flow. Alphanumeric.
     --journal <PATH>       Where to record decisions [default: oq-trade.oqj]
     --no-journal           Trade without recording. Nothing can be replayed
     --adopt-existing       Start beside a position the venue already holds
@@ -110,6 +119,24 @@ struct Probe {
     /// them. Measured: 0.001 of one contract was worth about three units
     /// of quote against a floor of twenty.
     instrument: Instrument,
+    /// Whether the venue has confirmed the order this cycle exists.
+    ///
+    /// Separate from `placed`, and the distinction is the whole reason
+    /// the placement contract has three outcomes rather than two.
+    /// `placed` means *this strategy asked*; this means *the venue said
+    /// yes*. An earlier version had only the first and treated it as the
+    /// second, so a refused order was still believed to be resting and
+    /// the probe went on to cancel one that never existed:
+    ///
+    /// ```text
+    /// refused        OrderId(1): OrderTooLarge { qty: 11, limit: 1 }
+    /// unknown order  OrderId(1) — not in this run's map
+    /// ```
+    ///
+    /// A real strategy written that way believes it holds exposure it
+    /// does not have. This one is a teaching example, which made it
+    /// worse: it was demonstrating the mistake it exists to warn about.
+    confirmed: bool,
 }
 
 impl Strategy for Probe {
@@ -133,7 +160,10 @@ impl Strategy for Probe {
             self.next_id += 1;
         }
         if !self.placed {
+            // Asked, not placed. The venue has not answered, and until
+            // it does this strategy knows only that it sent something.
             self.placed = true;
+            self.confirmed = false;
             let price = self.instrument.snap_price_down(PriceTicks(
                 reference.0 - reference.0 * self.away_bps / 10_000,
             ));
@@ -146,12 +176,62 @@ impl Strategy for Probe {
                     .snap_qty_up(smallest_allowed(&self.instrument, price)),
                 offset: Offset::Open,
             });
-        } else if !self.cancelled && self.ticks.saturating_sub(self.cancelled_at) > 5 {
+        } else if self.confirmed
+            && !self.cancelled
+            && self.ticks.saturating_sub(self.cancelled_at) > 5
+        {
+            // Only an order the venue confirmed can be withdrawn.
+            // Cancelling one that was refused asks the venue about an id
+            // it has never seen, and the answer — "unknown order" — is
+            // indistinguishable from a cancel that raced a fill.
             self.cancelled = true;
             self.cancelled_at = self.ticks;
             out.push(Intent::Cancel(OrderId(self.next_id)));
+        } else if self.placed
+            && !self.confirmed
+            && self.ticks.saturating_sub(self.cancelled_at) > 20
+        {
+            // Asked long ago and never confirmed. Start a new cycle
+            // rather than waiting forever — and say so, because a probe
+            // that silently retried would report cycles it never
+            // completed.
+            println!(
+                "probe            order {} was never confirmed; new cycle",
+                self.next_id
+            );
+            self.placed = false;
+            self.cancelled = false;
+            self.next_id += 1;
+            self.cancelled_at = self.ticks;
         }
     }
+
+    fn on_fill(&mut self, _f: &oq_types::Fill, _c: &Context, _o: &mut Vec<Intent>) {
+        // A fill is the strongest possible confirmation the order
+        // existed.
+        self.confirmed = true;
+    }
+
+    fn on_placed(&mut self, id: OrderId, accepted: bool) {
+        if id != OrderId(self.next_id) {
+            // An answer about an earlier cycle's order. Ignored rather
+            // than applied to the current one, which is the mistake the
+            // flag existed to make impossible.
+            return;
+        }
+        if accepted {
+            self.confirmed = true;
+        } else {
+            // Refused. There is nothing at the venue, so the next cycle
+            // starts rather than a cancel being sent for an id it has
+            // never seen.
+            self.placed = false;
+            self.confirmed = false;
+            self.next_id += 1;
+            self.cancelled_at = self.ticks;
+        }
+    }
+
     fn name(&self) -> &str {
         "probe"
     }
@@ -190,7 +270,12 @@ fn main() -> ExitCode {
     let symbol = value("--symbol").unwrap_or_else(|| "BTCUSDT".to_string());
     let strategy_name = value("--strategy").unwrap_or_else(|| "observe".to_string());
 
+    // A venue-issued code, when the operator has one. Separate flag
+    // from --id-prefix because they answer different questions; see
+    // oq_gateway::broker.
+    let broker_code = value("--broker-code");
     let cfg = RunConfig {
+        broker_code,
         symbol,
         strategy_name: strategy_name.clone(),
         endpoint,
@@ -219,6 +304,7 @@ fn main() -> ExitCode {
         "observe" => run(|_| Observe { ticks: 0 }, &cfg),
         "probe" => run(
             |instrument| Probe {
+                confirmed: false,
                 placed: false,
                 cancelled: false,
                 ticks: 0,
@@ -232,7 +318,12 @@ fn main() -> ExitCode {
             &cfg,
         ),
         other => {
-            eprintln!("oq-trade: unknown strategy {other:?}; known: observe, probe");
+            eprintln!(
+                "oq-trade: unknown strategy {other:?}; known: observe, probe. A real \
+                 strategy runs through `oq_live::run` — see \
+                 `cargo run -p oq-live --example grid_live`, which is a live binary \
+                 of about thirty lines."
+            );
             ExitCode::FAILURE
         }
     }

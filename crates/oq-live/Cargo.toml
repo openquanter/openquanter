@@ -21,6 +21,11 @@ oq-strategy.workspace = true
 oq-types.workspace = true
 
 [dev-dependencies]
+# The teaching strategies, for `examples/grid_live.rs`. A **dev**
+# dependency and not a real one: `oq-examples` is `publish = false`, so a
+# published crate cannot depend on it — and nothing that links `oq-live`
+# should inherit a catalogue of teaching material either.
+oq-examples = { path = "../oq-examples" }
 oq-sim.workspace = true
 
 [lints]
