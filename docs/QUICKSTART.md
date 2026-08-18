@@ -241,3 +241,25 @@ Every example is expected to lose money, and none is a strategy to run.
 They demonstrate properties of the framework. A project whose central
 claim is that backtests flatter you would be a poor place to show off a
 pretty equity curve.
+
+## Strategies you already know
+
+```bash
+cargo run --release -p oq-examples --example classics
+```
+
+Six classics — RSI reversion, MACD, Bollinger bands, Donchian breakout,
+grid, Dual Thrust — with their published parameters, untuned.
+
+**None of them is a recommendation.** Every one is decades old and traded
+by enough people that whatever edge it had is not waiting in a public
+repository. They are here so the framework can be learned by recognising
+something, rather than by learning two things at once.
+
+The example does not print an equity curve and stop. It runs each one
+with liquidation modelled and without, and prints both — because a curve
+that never gets liquidated is a curve about an account no venue offers.
+Unlevered the two columns agree for all six, which is itself the finding:
+**a margin model is invisible until leverage is real.** Levered, the grid
+ends at 4.06 with the venue having closed the account twice, and the
+margin-free arm reports −513.74 for a position it kept holding.
