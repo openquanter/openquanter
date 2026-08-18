@@ -233,10 +233,40 @@ depends on the invariants established here.
   it is defined against, and a same-machine run of the predecessor to compare
   with.
 - **G5** margin fidelity verified; tail-divergence methodology published.
+  **Met.** [MARGIN-FIDELITY.md](MARGIN-FIDELITY.md), with the instrument in
+  `oq_backtest::fidelity` and the study in `examples/margin_fidelity`.
 - **G7** — a strategy runs unchanged in compatibility mode and, after
-  throughput-mode conversion, re-passes parity.
-- **G11** initial verification: external cold start ≤ 30 minutes.
+  throughput-mode conversion, re-passes parity. **Half met.** The mode half
+  is done and tested: a strategy with no framework in it runs in
+  compatibility mode, converting it to throughput mode is a change to one
+  method, and `compare_modes` asserts `batch=1` produces an identical run
+  rather than the documentation asserting it. Re-passing *parity* means
+  against a predecessor baseline, which is the same blocker as G3.
+- **G11** initial verification: external cold start ≤ 30 minutes. **Three of
+  four.** Quickstart, five example strategies, and goldens over a
+  regenerable market all exist. The fourth is a cold start by someone
+  outside the core team, which is not an engineering task and cannot be
+  self-certified — it needs a person who has not seen this repository.
 - **Beta release** with documented, if still unstable, APIs.
+
+**What blocks the two open gates, precisely.** Both G3 and G7's parity half
+need a same-machine run of the closed-source predecessor over a multi-year
+window. Neither is engineering effort:
+
+- The predecessor's fifteen-day parity baseline lives on the two production
+  hosts, which are running live trading and are not to be touched. The
+  229/229 result recorded earlier in this project's history is therefore
+  **historical**: it was real, and nothing currently reproduces it.
+- The capture this project has made for itself is thirty-four hours, not
+  multi-year. A throughput ratio measured over thirty-four hours would not
+  be the number G3 names, and quoting it as though it were would be worse
+  than having no number.
+
+What *is* measured, and reported under its own name rather than G3's: the
+Python tier's throughput mode runs at up to about 7x its compatibility mode
+over 200,000 ticks. That is a different comparison — one binding against
+another, not this engine against an interpreted one — and it is recorded
+above as what it is.
 
 ---
 
