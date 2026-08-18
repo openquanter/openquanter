@@ -320,8 +320,14 @@ mod ownership {
         // a different system arrived on this stream and was counted here,
         // and the count feeds the risk gate's cap — so somebody else's
         // orders were consuming this process's limit.
+        //
+        // The id below is synthetic. The one actually observed carried a
+        // venue broker-referral prefix, which identifies whoever placed
+        // the order — a deployment detail, and §8's boundary policy keeps
+        // those out of this repository. The test needs a prefix that is
+        // not ours; it does not need a real one.
         let mut b = Book::owning("oq123");
-        assert!(!b.apply(&update("x-cLbi5uMH260623195701001261", "NEW", None)));
+        assert!(!b.apply(&update("x-brokerref-4471", "NEW", None)));
         assert_eq!(b.working(), 0, "not ours, not counted");
         assert_eq!(b.foreign(), 1, "counted as foreign rather than ignored");
     }

@@ -16,6 +16,7 @@
 //!    hash). If data or configuration moved, the report says so and
 //!    concludes nothing about behavior. See [`manifest`].
 
+pub mod attribution;
 pub mod diff;
 pub mod manifest;
 pub mod record;
