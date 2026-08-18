@@ -348,7 +348,18 @@ not in the matching kernel.
   in `Venue` mode, it observes one beside itself. The kernel is ready for it;
   the process is not.
 - `oq-sim` at full strength: the entire scenario catalogue plus gateway fuzzing
-  (disconnects, reordering, duplication, partial fills).
+  (disconnects, reordering, duplication, partial fills). **The gateway half
+  exists** — `oq-live`'s `gateway_fuzz` drives the live books through every
+  scenario in the catalogue, asserting invariants rather than outputs: a trade
+  booked twice moves the account once, reordering reports does not change where
+  it ends up, a dropped report leaves a disagreement the reconciler names, and
+  nothing the venue can send makes the books invent a fill.
+
+  Its first run found one. The books had no deduplication — the order tracker
+  had it and the kernel-backed books added later did not, which is the gap that
+  opens when one concern is implemented in two places at two times. A
+  redelivered fill doubled the position, and a reconnecting stream repeating
+  itself is routine rather than exotic.
 - **Position-carrying cutover playbook**, rehearsed end-to-end. The playbook
   itself is written — [CUTOVER.md](CUTOVER.md) — and is explicit that it is a
   skeleton: every step is specified and every command in it exists, and none
