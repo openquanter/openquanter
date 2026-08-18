@@ -258,7 +258,8 @@ Pre-alpha, and specific about it. **Built and tested today:**
   pandas without a custom reader. Behind a feature flag, because the tree is
   ninety crates and a backtest must not pay for it.
 
-**Designed but not built:** fidelity tiers L1 and L2 (only L0 exists) and
+**Designed but not built:** fidelity tier L2 (L0 and L1 are implemented; L1
+wraps L0 rather than replacing it, so L0 stays frozen by construction) and
 everything under *AI-native* above. The pillars section describes where this
 is going; this section describes where it is.
 
@@ -289,21 +290,26 @@ one order far from the market and withdraws it.
 **The assembly now exists**: `oq-live` composes market data, the strategy,
 the risk gate and the order path into one process.
 
-**The first half of the attribution chain is connected.** The live
-process now depends on `oq-journal` and writes through `record.rs`, so
-there is a record to replay.
+**All three parts of the attribution chain exist. They are not yet
+joined.**
 
-**The second half is not.** `oq-live` still depends on neither `oq-core`
-nor `oq-margin`: what it shares with the backtest is the strategy and the
-matching types (`oq-strategy` → `oq-engine`), **not the kernel, the
-ledger or the margin model**. So there is now something to replay and
-nothing to replay it into, and a live run still cannot be diffed fill by
-fill against what the kernel would have done.
+- **The record** — the live process depends on `oq-journal` and writes
+  through `record.rs`.
+- **The kernel** — `oq-live` now depends on `oq-core` and `oq-margin`,
+  not merely on the strategy and matching types. **Replaying into the
+  kernel is structurally possible.**
+- **The instrument** — `oq-parity`'s attribution module decomposes the
+  gap by cause, reports what will not decompose as an unexplained
+  residual, and marks a cause it cannot compute as unavailable rather
+  than as zero.
+
+**What is missing is the wiring between them.** `oq-parity` depends on
+neither `oq-journal` nor `oq-core`, and its example is fed constructed
+data; **nothing takes a real live recording through the kernel and hands
+both sides to the attribution.**
 
 So "every cent accounted for" still accounts for **none of them** — but
-the gap is one link rather than two. `oq-core` has `sequencer::replay()`
-and it is tested. **What is missing is the wire between it and the live
-process.**
+what is missing is assembly rather than parts.
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, not the L2 fidelity
