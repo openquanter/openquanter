@@ -187,3 +187,163 @@ fn the_generated_market_is_stable_across_runs_and_machines() {
         "the low of the crash"
     );
 }
+
+/// A two-average crossover, held here rather than imported so these
+/// numbers do not move when a teaching example is reworded.
+///
+/// The strategies pinned above hold one position for a whole run or add
+/// to a losing one. Neither exercises realized profit over many round
+/// trips, which is the accounting most strategies actually depend on.
+struct Cross {
+    fast: usize,
+    slow: usize,
+    hist: Vec<f64>,
+    long: bool,
+    next_id: u64,
+}
+
+impl Cross {
+    const fn new() -> Self {
+        Self {
+            fast: 20,
+            slow: 100,
+            hist: Vec::new(),
+            long: false,
+            next_id: 0,
+        }
+    }
+}
+
+impl Strategy for Cross {
+    fn name(&self) -> &str {
+        "golden-cross"
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+        self.hist.push(ctx.tick.last.0 as f64);
+        if self.hist.len() < self.slow {
+            return;
+        }
+        if self.hist.len() > self.slow * 2 {
+            self.hist.drain(..self.slow);
+        }
+        let mean =
+            |n: usize| -> f64 { self.hist[self.hist.len() - n..].iter().sum::<f64>() / n as f64 };
+        let want = mean(self.fast) > mean(self.slow);
+        if want == self.long {
+            return;
+        }
+        self.long = want;
+        self.next_id += 1;
+        out.push(Intent::Market {
+            id: OrderId::new(self.next_id),
+            side: if want { Side::Buy } else { Side::Sell },
+            qty: QtyLots(1),
+            offset: if ctx.position.0 == 0 {
+                oq_types::Offset::Open
+            } else {
+                oq_types::Offset::Close
+            },
+        });
+    }
+}
+
+#[test]
+fn a_crossover_over_a_trending_market_produces_exactly_these_numbers() {
+    let ticks = series(MarketShape::trending(4_000), 42);
+
+    // The market first, because if the generator moved, every number
+    // below moved with it and one failure is easier to read than four.
+    assert_eq!(ticks.len(), 4_000);
+    assert_eq!(ticks[0].last.0, 6_001_106);
+    assert_eq!(ticks[3_999].last.0, 7_606_004);
+    assert_eq!(
+        ticks.iter().map(|t| t.last.0).sum::<i64>(),
+        27_068_389_777,
+        "the whole path, not only its endpoints"
+    );
+
+    let result = run(
+        &config(10_000).with_margin(MarginMode::Enforced),
+        &mut Cross::new(),
+        &ticks,
+    );
+
+    assert_eq!(result.ticks, 4_000);
+    assert_eq!(result.fills.len(), 11, "fills");
+    assert_eq!(result.liquidations.len(), 0, "liquidations");
+    assert_eq!(result.final_equity, Cash(1_015_299_940_000), "final equity");
+    assert_eq!(result.realized, Cash(15_270_260_000), "realized");
+    assert_eq!(result.min_equity, Cash(999_930_460_000), "lowest equity");
+    assert_eq!(
+        result.fills.iter().map(|f| f.price.0).sum::<i64>(),
+        72_861_962,
+        "the fill prices themselves, not only how many there were"
+    );
+}
+
+#[test]
+fn the_same_run_twice_is_the_same_run() {
+    // The generator's stability is pinned above; this is the engine's.
+    // Every golden in this file assumes it and none of them check it.
+    let ticks = series(MarketShape::calm(2_000), 7);
+    let cfg = config(10_000).with_margin(MarginMode::Enforced);
+    let a = run(&cfg, &mut Cross::new(), &ticks);
+    let b = run(&cfg, &mut Cross::new(), &ticks);
+
+    assert_eq!(a.final_equity, b.final_equity);
+    assert_eq!(a.realized, b.realized);
+    assert_eq!(
+        a.fills.iter().map(|f| f.price.0).collect::<Vec<_>>(),
+        b.fills.iter().map(|f| f.price.0).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_generated_market_survives_the_tick_format() {
+    // A golden taken in memory says nothing about one taken from a file
+    // unless the file gives back what went into it.
+    let ticks = series(MarketShape::calm(1_000), 3);
+    let stream = oq_data::TickStream::new(1, ticks.clone()).expect("valid stream");
+    let back = oq_data::TickStream::from_bytes(&stream.encode()).expect("decode");
+    assert_eq!(back.ticks(), ticks.as_slice());
+}
+
+/// Print every pinned number, so updating a golden is a measurement
+/// rather than a guess.
+///
+/// ```text
+/// cargo test -p oq-examples --test golden -- --ignored --nocapture
+/// ```
+///
+/// Ignored by default because it asserts nothing. It exists because the
+/// first draft of the tests above had four of its numbers written from
+/// memory and three of them were wrong — a golden guessed at guards
+/// nothing and costs an afternoon.
+#[test]
+#[ignore = "prints the goldens rather than checking them"]
+fn print_goldens() {
+    let t = series(MarketShape::trending(4_000), 42);
+    println!(
+        "market  first {}  last {}  sum {}",
+        t[0].last.0,
+        t[3_999].last.0,
+        t.iter().map(|x| x.last.0).sum::<i64>()
+    );
+
+    let r = run(
+        &config(10_000).with_margin(MarginMode::Enforced),
+        &mut Cross::new(),
+        &t,
+    );
+    println!(
+        "cross   fills {}  liq {}  final {}  realized {}  min {}  price_sum {}",
+        r.fills.len(),
+        r.liquidations.len(),
+        r.final_equity.0,
+        r.realized.0,
+        r.min_equity.0,
+        r.fills.iter().map(|f| f.price.0).sum::<i64>()
+    );
+}
