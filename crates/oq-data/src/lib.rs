@@ -28,6 +28,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "parquet")]
+pub mod columnar;
+
 pub mod asof;
 pub mod bitemporal;
 pub mod ticks;

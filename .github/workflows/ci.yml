@@ -23,6 +23,13 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
+      # The columnar export is behind a feature, so the default job never
+      # compiles it. Untested optional code is the kind that rots
+      # silently: it builds for whoever wrote it and for nobody after.
+      - name: Test the optional columnar export
+        run: |
+          cargo clippy -p oq-data --features parquet --all-targets -- -D warnings
+          cargo test -p oq-data --features parquet
 
   bindings:
     name: Python bindings build and pass

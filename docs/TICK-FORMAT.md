@@ -169,3 +169,45 @@ as a mysterious behavioural difference.
 - **Not compressed.** The engine reads it hot; compression trades scan
   speed for disk, and disk is the cheaper of the two. Compress the
   capture archive instead — that is where the volume is.
+
+## 7. The columnar export
+
+`oq-data` writes the same ticks as Parquet, behind the optional
+`parquet` feature. This is the "export Parquet for that" of §6, made
+real.
+
+```text
+cargo run -p oq-data --features parquet --bin oq-data -- ticks.oqtk --parquet out.parquet
+```
+
+Eight `Int64` columns — `exch_ts`, `local_ts`, `last`, `high`, `low`,
+`bid`, `ask`, `volume` — zstd-compressed, with the instrument id and a
+schema version in the file's key-value metadata under
+`openquanter.instrument` and `openquanter.tick_schema`.
+
+Three decisions worth stating, because each has an obvious wrong answer:
+
+- **Both timestamps, neither optional.** Their difference is feed
+  latency. An export that keeps one leaves a reader unable to tell a slow
+  feed from a slow market, and the loss is silent.
+- **Integers, not scaled floats.** A float column reads more nicely and
+  is wrong; the scale belongs to the instrument, not to the price. Files
+  round-trip exactly, and a test holds every column to `Int64`.
+- **The feature is optional because the tree is ~90 crates**, more than
+  the rest of the workspace combined. `oq-data`'s default build still
+  carries zero third-party dependencies, and CI checks that separately
+  from the feature build.
+
+On 7.3 hours of captured BTC perpetual data — 262,365 ticks — the export
+is 4.06 MB against 16.79 MB native, or 24%, and reads in pandas without a
+custom reader:
+
+```python
+df = pd.read_parquet("out.parquet")
+latency_ms = (df.local_ts - df.exch_ts) / 1e6   # median 89.8, p99 102.1
+```
+
+The checksum is not carried across. Parquet has page-level integrity of
+its own, and asserting ours over bytes we no longer control would be a
+claim we cannot keep; `read_parquet` rebuilds a `TickStream`, which
+recomputes it.
