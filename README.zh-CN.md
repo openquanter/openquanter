@@ -210,6 +210,35 @@ Pre-alpha，并且把话说清楚。**今天已建成并有测试覆盖的**：
 
 **组装已经有了**:`oq-live` 把行情、策略、风控闸门和下单通路接成一个进程。
 
+下面这一段是**从 `Cargo.toml` 生成的**，不是手写的。这一节的依赖类断言在一天里
+过期了两次、两个方向各一次，而两次都是靠人读代码发现的——所以它们不再被书写。
+
+<!-- begin generated: workspace facts (scripts/doc-facts.sh) -->
+
+```text
+crates (21)
+  oq-backtest oq-cli oq-core oq-data oq-engine oq-examples
+  oq-features oq-gateway oq-hash oq-ingest oq-journal oq-l2feed
+  oq-live oq-margin oq-parity oq-py oq-risk oq-sim oq-stats
+  oq-strategy oq-types
+
+the live path
+  oq-live
+    oq-core oq-engine oq-gateway oq-ingest oq-journal oq-l2feed
+    oq-margin oq-parity oq-risk oq-strategy oq-types
+  oq-backtest
+    oq-core oq-engine oq-margin oq-stats oq-strategy oq-types
+
+shared by both
+  oq-core oq-engine oq-margin oq-strategy oq-types
+live only
+  oq-gateway oq-ingest oq-journal oq-l2feed oq-parity oq-risk
+backtest only
+  oq-stats
+```
+
+<!-- end generated -->
+
 **归因链的三块都有了,但还没串成一条通路。**
 
 - **记录**——实盘进程依赖 `oq-journal`,在 `record.rs` 里真的写。

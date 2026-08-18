@@ -290,6 +290,36 @@ one order far from the market and withdraws it.
 **The assembly now exists**: `oq-live` composes market data, the strategy,
 the risk gate and the order path into one process.
 
+The block below is **generated from `Cargo.toml`**, not written. The dependency
+claims in this section went stale twice in one day, once in each direction, and
+both times a person reading the code found it. So they are no longer written.
+
+<!-- begin generated: workspace facts (scripts/doc-facts.sh) -->
+
+```text
+crates (21)
+  oq-backtest oq-cli oq-core oq-data oq-engine oq-examples
+  oq-features oq-gateway oq-hash oq-ingest oq-journal oq-l2feed
+  oq-live oq-margin oq-parity oq-py oq-risk oq-sim oq-stats
+  oq-strategy oq-types
+
+the live path
+  oq-live
+    oq-core oq-engine oq-gateway oq-ingest oq-journal oq-l2feed
+    oq-margin oq-parity oq-risk oq-strategy oq-types
+  oq-backtest
+    oq-core oq-engine oq-margin oq-stats oq-strategy oq-types
+
+shared by both
+  oq-core oq-engine oq-margin oq-strategy oq-types
+live only
+  oq-gateway oq-ingest oq-journal oq-l2feed oq-parity oq-risk
+backtest only
+  oq-stats
+```
+
+<!-- end generated -->
+
 **All three parts of the attribution chain exist. They are not yet
 joined.**
 
