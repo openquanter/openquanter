@@ -327,7 +327,14 @@ not in the matching kernel.
   second is now met at the kernel: `oq-live` depends on `oq-core` and
   `oq-margin`; `oq_live::shadow` runs the same `Kernel` a backtest runs beside
   the live session, reporting where it and the venue disagree in four named
-  kinds plus a position comparison; and `oq_core::Matching` closes the half
+  kinds plus a position comparison, and handing that on to
+  `oq_parity::attribution` through `Shadow::evidence` — the last unconnected
+  seam in this project's headline claim, where the shadow produced divergences,
+  the decomposition wanted evidence, and nothing turned one into the other.
+  Funding and fees are **arguments** to it rather than fields, because a shadow
+  does not see them: passing `None` says nobody read the venue's statement, and
+  the report then declines to produce a residual rather than reporting a gap
+  explained by causes nobody measured. And `oq_core::Matching` closes the half
   that was missing. A kernel can now take fills the **venue** decided rather
   than producing its own, with identical accounting — a test asserts the same
   trade booked both ways leaves the same position, entry, fees, balance and
