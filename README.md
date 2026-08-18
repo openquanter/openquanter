@@ -315,6 +315,25 @@ download, a running backtest in a few minutes. See the
 [Roadmap](docs/ROADMAP.md) for what each milestone unlocks and what triggers
 it, and [Versioning](docs/VERSIONING.md) for what `2.0.0-alpha` promises.
 
+## Installing
+
+The Python bindings are on PyPI, as an alpha:
+
+```bash
+pip install --pre openquanter
+```
+
+Wheels for Linux (x86-64 and aarch64), macOS (Apple silicon) and Windows
+(x86-64). They are `abi3`, so one wheel serves every interpreter from 3.9
+forward, and no Rust toolchain is needed to install one. What that gets you
+is [documented on the package itself](https://pypi.org/project/openquanter/):
+the overfitting statistics, and a Python strategy run by the Rust engine.
+
+The Rust crates are not published. They will be when the API stops moving;
+until then `cargo add` would pin people to a version that is about to change
+under them, and a version yanked from crates.io is still a version somebody
+built against.
+
 ## Building
 
 ```bash
