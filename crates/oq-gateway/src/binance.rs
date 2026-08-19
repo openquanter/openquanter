@@ -140,6 +140,7 @@ pub struct Binance {
     agent: ureq::Agent,
     /// Venue clock minus local clock, in milliseconds.
     clock_offset_ms: i64,
+    round_trip_ms: i64,
 }
 
 impl Binance {
@@ -187,6 +188,7 @@ impl Binance {
             creds,
             agent: config.into(),
             clock_offset_ms: 0,
+            round_trip_ms: 0,
         }
     }
 
@@ -195,13 +197,63 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn sync_clock(&mut self) -> Result<i64, VenueError> {
-        let body = self.get_public("/fapi/v1/time", "")?;
-        let venue_ms = field_i64(&body, "serverTime").ok_or_else(|| VenueError::Malformed {
-            what: "serverTime",
-            body: body.clone(),
-        })?;
-        self.clock_offset_ms = venue_ms - now_ms();
-        Ok(self.clock_offset_ms)
+        // Read the local clock on both sides of the call and take the
+        // midpoint. Reading it only afterwards charges the whole return
+        // leg to the clock: on a link with a 750 ms round trip that is a
+        // systematic third of a second, and on a slow one it reported a
+        // 1.4-second skew for a host whose clock was within 250 ms.
+        //
+        // The estimate assumes the two legs are equal, which they are
+        // not, but the error is then half the asymmetry rather than the
+        // whole return leg.
+        let mut best: Option<(i64, i64)> = None; // (round trip, offset)
+        let mut last_err = None;
+        for _ in 0..3 {
+            let t0 = now_ms();
+            match self.get_public("/fapi/v1/time", "") {
+                Ok(body) => {
+                    let t1 = now_ms();
+                    let venue_ms =
+                        field_i64(&body, "serverTime").ok_or_else(|| VenueError::Malformed {
+                            what: "serverTime",
+                            body: body.clone(),
+                        })?;
+                    let round_trip = t1 - t0;
+                    let offset = offset_from(t0, venue_ms, t1);
+                    // Keep the quietest sample. A long round trip is the
+                    // one most likely to be asymmetric, and therefore the
+                    // one whose midpoint is least trustworthy.
+                    if best.is_none_or(|(rt, _)| round_trip < rt) {
+                        best = Some((round_trip, offset));
+                    }
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        match best {
+            Some((round_trip, offset)) => {
+                self.clock_offset_ms = offset;
+                self.round_trip_ms = round_trip;
+                Ok(offset)
+            }
+            None => Err(last_err.unwrap_or(VenueError::Malformed {
+                what: "serverTime",
+                body: String::new(),
+            })),
+        }
+    }
+
+    /// The round trip of the quietest clock sample, in milliseconds.
+    ///
+    /// Reported separately because it is a different problem with a
+    /// different fix. A skewed clock is corrected by the offset; a slow
+    /// link is not corrected by anything, and it is what makes a signed
+    /// request arrive with a timestamp the venue has already outrun —
+    /// Binance answers that with -1021, which reads like a clock problem
+    /// and is not one.
+    #[must_use]
+    pub const fn round_trip_ms(&self) -> i64 {
+        self.round_trip_ms
     }
 
     /// The measured offset, for a caller that wants to report it.
@@ -440,6 +492,18 @@ fn signed_url(base: &str, path: &str, query: &str, stamp_ms: i64, secret: &[u8])
 /// and the API key live.
 fn redact(url: &str) -> &str {
     url.split('?').next().unwrap_or("<url>")
+}
+
+/// The clock offset a round trip implies: venue time minus the midpoint
+/// of the two local readings.
+///
+/// Pure and separate so the arithmetic can be tested without a venue.
+/// The estimate is exact when the two legs are equal and wrong by half
+/// the asymmetry when they are not — which is the reason to prefer it to
+/// reading the local clock only after the reply, a method whose error is
+/// the entire return leg however symmetric the link.
+const fn offset_from(before: i64, venue: i64, after: i64) -> i64 {
+    venue - (before + after) / 2
 }
 
 fn now_ms() -> i64 {
@@ -1437,5 +1501,49 @@ mod signing_tests {
             (adjusted - (unadjusted - 30_000)).abs() < 1_000,
             "expected the offset to apply: {adjusted} vs {unadjusted}"
         );
+    }
+}
+
+#[cfg(test)]
+mod clock {
+    use super::*;
+
+    /// Why the midpoint, stated as arithmetic.
+    ///
+    /// A host whose clock sat within 250 ms of the venue was reported as
+    /// 1.4 seconds ahead, because the estimate this replaced charged the
+    /// whole return leg to the clock. On that link the measurement error
+    /// was larger than the quantity being measured.
+    #[test]
+    fn the_midpoint_survives_a_slow_link() {
+        // True offset zero, 800 ms round trip, legs equal.
+        let (before, after) = (1_000, 1_800);
+        let venue = 1_400;
+        assert_eq!(offset_from(before, venue, after), 0);
+        assert_eq!(
+            venue - after,
+            -400,
+            "the method this replaced: the return leg, reported as skew"
+        );
+    }
+
+    /// Asymmetry is where the midpoint is imperfect, and it is still the
+    /// better of the two by a wide margin.
+    #[test]
+    fn asymmetric_legs_cost_half_the_asymmetry_not_a_whole_leg() {
+        let (before, after) = (1_000, 1_800);
+        let venue = 1_200; // the reply took 600 of the 800
+        assert_eq!(offset_from(before, venue, after), -200);
+        assert_eq!(venue - after, -600, "three times the error");
+    }
+
+    /// A skew large enough to matter is still seen through a slow link.
+    /// The point of the change is not to hide skew, it is to stop
+    /// inventing it.
+    #[test]
+    fn real_skew_is_still_reported() {
+        let (before, after) = (1_000, 1_800);
+        let venue = 2_900; // venue genuinely 1.5 s ahead of the midpoint
+        assert_eq!(offset_from(before, venue, after), 1_500);
     }
 }

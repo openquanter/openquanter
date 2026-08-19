@@ -165,12 +165,26 @@ fn main() -> std::process::ExitCode {
                 // Reported because a signature failure caused by drift
                 // reads as an authentication problem, and the number
                 // that would have explained it is this one.
-                eprintln!("venue clock offset: {offset} ms");
+                eprintln!("venue clock offset: {offset} ms (round-trip midpoint)");
+                let round_trip = venue.round_trip_ms();
+                eprintln!("venue round trip: {round_trip} ms");
                 if offset < -1_000 {
                     eprintln!(
                         "  the local clock is more than a second ahead of the venue; \
                          Binance allows only 1000 ms in that direction whatever \
                          recvWindow says, so signed requests may be refused"
+                    );
+                }
+                // Reported separately because it is a different fault
+                // with a different fix, and because the venue answers it
+                // with -1021, which names the clock. A request signed
+                // here arrives half a round trip later, and the venue
+                // measures the age of that timestamp against recvWindow.
+                if round_trip > 500 {
+                    eprintln!(
+                        "  the round trip to the venue is {round_trip} ms; a signed \
+                         request arrives with a timestamp already that old, and a \
+                         -1021 from here is the link rather than the clock"
                     );
                 }
                 synced = true;
