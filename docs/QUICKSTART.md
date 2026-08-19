@@ -223,6 +223,80 @@ default, because a wrong scale does not fail — it silently rescales
 every price. If the instrument is unknown, the tool stops instead of
 guessing.
 
+## 8. Run one against a venue
+
+Everything above runs on recorded data. This is the same loop with the
+venue supplying the events instead of a file — the one step that cannot
+be checked by reading, because the difference between a backtest and
+live trading is entirely in what happens to an order after it leaves.
+
+You need testnet credentials from the venue. **Testnet.** Nothing here
+asks you to risk anything, and the example refuses `--live` outright.
+
+```bash
+export OQ_VENUE_KEY=…
+export OQ_VENUE_SECRET=…
+
+cargo run --release -p oq-live --example grid_live -- \
+  --symbol BTCUSDT --minutes 30
+```
+
+That is a real strategy — the grid from §"Strategies you already know"
+— against a real order book, with the risk gate in front of it, the
+kernel keeping the account, the journal recording it, and the shadow
+backtest running alongside so the gap between them is measured while it
+happens rather than argued about afterwards.
+
+It will refuse to start beside a position it was not told about. That
+is not caution for its own sake: a process that adopts an unexplained
+position has no way to tell a leftover from someone else's, and the
+first thing it would do is manage it. `--adopt-existing` says you
+checked.
+
+### Why the grid
+
+It is short volatility with no stop, which is the failure shape a
+margin model exists to make visible: every rung is profitable until the
+range breaks, and then the position is on the wrong side of a trend
+with more size than any single decision ever approved. A long run of it
+exercises the part of this framework that is hardest to exercise any
+other way.
+
+**It is not a recommendation.** It is the strategy most worth watching
+fail.
+
+### What to watch
+
+The run prints a banner with the limits it will enforce and their
+version, then a line per order. Three things are worth reading rather
+than skimming:
+
+- **`placed` and `refused` are different numbers.** The summary line
+  reports both, and their ratio is the thing a backtest cannot show
+  you: a simulated matcher answers every submission, so *asked* and
+  *accepted* coincide there and only there.
+- **An `UNRESOLVED` line means the account may not be where the rest of
+  the summary says it is.** It is printed separately, and only when it
+  happened, because it is the one outcome that is neither a yes nor a
+  no. Nothing replaces such an order — resending is the single move
+  that turns *maybe one order* into *certainly two*.
+- **Refusals are normal and are supposed to be loud.** A risk limit
+  firing is the gate working. The grid's own cap and the limits it runs
+  under are deliberately small so this happens inside half an hour
+  rather than never.
+- **The end-of-run metrics and alerts.** Alerts here are *judgements*,
+  not notifications — nothing sends anything. Wiring them to something
+  that does is deployment, and deliberately not this framework's job.
+
+### If you want it to send orders through `oq-trade` instead
+
+`oq-trade` has `observe` (sends nothing) and `probe` (a connectivity
+diagnostic, not a strategy). Neither is a strategy runner, on purpose:
+the strategies in this repository live in `oq-examples`, which is not
+published, and a published `oq-live` cannot depend on an unpublished
+crate. Writing your own is §5, and `grid_live.rs` is about thirty lines
+you can copy.
+
 ## What to read next
 
 | If you want to | Read |
