@@ -110,6 +110,13 @@ jobs:
       - name: Dependency claims in prose match Cargo.toml
         run: scripts/check-doc-claims.py
 
+      # Six defects in two days had one shape: one half present, the
+      # other absent, and the absent half silent. Every one had passing
+      # tests, because the unit was right and nothing invoked it. This
+      # asks the question no test asks — does anything reach it.
+      - name: Public API is reachable, or says why not
+        run: scripts/check-reachability.py --check
+
   throughput:
     name: Engine throughput floor
     runs-on: ubuntu-latest

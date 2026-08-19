@@ -31,8 +31,6 @@ pub struct RunManifest {
 /// One element of a run's identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityElement {
-    /// The code changed.
-    CodeCommit,
     /// The input data changed.
     DataHash,
     /// The effective configuration changed.
@@ -44,9 +42,6 @@ impl IdentityElement {
     #[must_use]
     pub fn explanation(self) -> &'static str {
         match self {
-            Self::CodeCommit => {
-                "the code differs: differences may be a regression, or may be the intended change"
-            }
             Self::DataHash => {
                 "the input data differs: this baseline describes a different experiment and must be rebased"
             }
@@ -60,7 +55,6 @@ impl IdentityElement {
 impl core::fmt::Display for IdentityElement {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let name = match self {
-            Self::CodeCommit => "code commit",
             Self::DataHash => "input data hash",
             Self::ConfigHash => "configuration hash",
         };

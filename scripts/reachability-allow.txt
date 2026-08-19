@@ -1,0 +1,16 @@
+# Public API that nothing in this workspace reaches, and stays.
+#
+# One line per item, with the reason. A silent entry is worse than the
+# finding it hides: the whole point of the checker is that "nobody
+# reaches this" is a claim somebody has to answer, and an allowlist
+# without reasons answers it with a shrug.
+#
+# Verify before adding. Two of the first seven turned out to model
+# states their own function cannot produce, and were removed rather
+# than listed.
+
+AsOf::Inclusive              # a join mode a consumer picks; `asof.rs:153` implements it
+Timeline::Event              # the other axis of a bitemporal read; same
+QueueAhead::VolumeMultiple   # an L1 queue model a caller configures; `l1.rs:381` matches on it
+TimeInForce::ImmediateOrCancel  # both adapters map it — okx.rs:479, and binance formats {tif}
+TimeInForce::FillOrKill      # same, okx.rs:480

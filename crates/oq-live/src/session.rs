@@ -39,8 +39,6 @@ pub enum StartupRefusal {
     },
     /// The venue holds an order the caller did not declare.
     UndeclaredOrder { client_id: String },
-    /// The venue could not be asked.
-    Unreachable(String),
 }
 
 impl core::fmt::Display for StartupRefusal {
@@ -62,7 +60,6 @@ impl core::fmt::Display for StartupRefusal {
                     "the venue has a resting order this process did not place: {client_id}"
                 )
             }
-            Self::Unreachable(e) => write!(f, "the venue could not be asked: {e}"),
         }
     }
 }
