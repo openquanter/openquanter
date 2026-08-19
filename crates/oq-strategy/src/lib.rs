@@ -171,6 +171,34 @@ pub trait Strategy {
     /// never has to reconstruct one.
     fn on_fill(&mut self, _fill: &Fill, _ctx: &Context, _out: &mut Vec<Intent>) {}
 
+    /// Called when the venue has answered a submission — and only then.
+    ///
+    /// A strategy that treats "I asked" as "it is resting" believes it
+    /// holds exposure it does not have. That is not a hypothetical: a
+    /// teaching example in this repository did exactly that, set its
+    /// `placed` flag before the answer arrived, and went on to cancel an
+    /// order the risk gate had refused:
+    ///
+    /// ```text
+    /// refused        OrderId(1): OrderTooLarge { qty: 11, limit: 1 }
+    /// unknown order  OrderId(1) — not in this run's map
+    /// ```
+    ///
+    /// `accepted` is the venue's answer as a boolean, which is the one
+    /// place in this project it is reduced to two values — and it is safe
+    /// here precisely because it is not the whole answer. An unresolved
+    /// placement is **not reported through this callback at all**: nobody
+    /// knows yet, and telling a strategy `false` would be telling it the
+    /// order does not exist. The host resolves it and calls back when
+    /// there is an answer, or the strategy times out on its own, which
+    /// is what `Placed::Unknown` obliges every caller to do.
+    ///
+    /// In a backtest this fires immediately after a submission the kernel
+    /// accepted, so a strategy written against it behaves the same in
+    /// both — which is the point of having it in the trait rather than in
+    /// the live host.
+    fn on_placed(&mut self, _id: OrderId, _accepted: bool) {}
+
     /// A name for reports.
     fn name(&self) -> &str;
 }

@@ -426,7 +426,21 @@ where
                 }
             };
             next_order_id += 1;
-            kernel.apply(&event);
+            // The kernel's answer, reported back the way a live host
+            // reports the venue's. A strategy written against
+            // `on_placed` therefore behaves the same in a backtest and
+            // live, which is the reason the callback is in the trait
+            // rather than in the live host.
+            let submitted = matches!(event, Event::Submit { .. });
+            let outputs: Vec<oq_core::Output> = kernel.apply(&event).to_vec();
+            if submitted {
+                if let Event::Submit { id, .. } = event {
+                    let refused = outputs.iter().any(|o| {
+                        matches!(o, oq_core::Output::Rejected { id: rejected, .. } if *rejected == id)
+                    });
+                    strategy.on_placed(id, !refused);
+                }
+            }
         }
         let _ = next_order_id;
     }

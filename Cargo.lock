@@ -779,6 +779,7 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "oq-core",
  "oq-engine",
+ "oq-examples",
  "oq-gateway",
  "oq-ingest",
  "oq-journal",

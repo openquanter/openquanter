@@ -84,12 +84,31 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         // while they are read; the buffer itself is reused, so this
         // costs no allocation per tick.
         let intents = core::mem::take(&mut self.intents);
-        let out = intents
+        let out: Vec<Outcome> = intents
             .iter()
             .map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
+        self.report_placements(&out);
         out
+    }
+
+    /// Tell the strategy which submissions the venue answered.
+    ///
+    /// Only the ones it answered. An unresolved placement is not reported
+    /// as a refusal — nobody knows whether it landed, and telling a
+    /// strategy `false` would be telling it the order does not exist,
+    /// which is the mistake `Placed::Unknown` exists to prevent.
+    fn report_placements(&mut self, outcomes: &[Outcome]) {
+        for o in outcomes {
+            match o {
+                Outcome::Sent { local, .. } => self.strategy.on_placed(*local, true),
+                Outcome::Refused { local, .. } => self.strategy.on_placed(*local, false),
+                // Unresolved, unknown, cancelled: not an answer about
+                // whether this submission is resting.
+                _ => {}
+            }
+        }
     }
 
     /// Tell the strategy about a fill.
@@ -97,11 +116,12 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         self.intents.clear();
         self.strategy.on_fill(fill, ctx, &mut self.intents);
         let intents = core::mem::take(&mut self.intents);
-        let out = intents
+        let out: Vec<Outcome> = intents
             .iter()
             .map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
+        self.report_placements(&out);
         out
     }
 
