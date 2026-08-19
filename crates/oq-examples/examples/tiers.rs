@@ -25,7 +25,7 @@
 //! strategy that earns a bit less than modelled; it is a different
 //! strategy, and its P&L is about a market that was not there.
 
-use oq_engine::{Impact, L1Engine, Latency, Policy, QueueAhead};
+use oq_engine::{Delay, Impact, L1Engine, Latency, Policy, QueueAhead};
 use oq_examples::{MarketShape, series};
 use oq_types::{
     InstrumentId, Nanos, Offset, Order, OrderId, OrderKind, PriceTicks, QtyLots, Side, Stamp,
@@ -134,8 +134,8 @@ fn main() {
         let policy = Policy {
             queue: QueueAhead::Fixed(QtyLots(ahead)),
             latency: Latency {
-                entry: Nanos(5_000_000),
-                response: Nanos(5_000_000),
+                entry: Delay::Fixed(Nanos(5_000_000)),
+                response: Delay::Fixed(Nanos(5_000_000)),
             },
             impact: Impact { coefficient: 50 },
         };
@@ -237,8 +237,8 @@ fn comparative_report() {
     let l1_policy = Policy {
         queue: QueueAhead::Fixed(QtyLots(50)),
         latency: Latency {
-            entry: Nanos(5_000_000),
-            response: Nanos(5_000_000),
+            entry: Delay::Fixed(Nanos(5_000_000)),
+            response: Delay::Fixed(Nanos(5_000_000)),
         },
         impact: Impact { coefficient: 50 },
     };
