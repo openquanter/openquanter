@@ -659,7 +659,22 @@ where
                     u.client_id, u.status, u.cumulative_qty, u.last_price
                 );
                 trader.apply(&u);
-                if let Some(fill) = fill_of(&u, &instrument) {
+                let parsed = fill_of(&u, &instrument);
+                if let Err(why) = &parsed {
+                    // A report the venue sent and this process did not
+                    // book. Said out loud and counted, because the
+                    // consequence is that the position believed here is
+                    // smaller than the account's, and silence about that
+                    // is indistinguishable from a fill that never
+                    // happened.
+                    metrics.unbookable_reports += 1;
+                    println!(
+                        "fill/DROPPED     {} {}: {why} — the position here is now smaller \
+                         than the account's",
+                        u.client_id, u.last_price
+                    );
+                }
+                if let Ok(fill) = parsed {
                     shadow.on_venue_fill(
                         fill.order,
                         fill.side,
@@ -852,6 +867,14 @@ where
         "other systems    {} events on this account belonged to something else",
         trader.foreign()
     );
+    // Above zero means this process and the account disagree about the
+    // position, and the disagreement is this process's fault rather than
+    // the venue's. Reported unconditionally: a zero here is the only
+    // thing that makes the numbers above believable.
+    println!(
+        "unbookable       {} report(s) the venue sent and this build could not read",
+        metrics.unbookable_reports
+    );
     ExitCode::SUCCESS
 }
 
@@ -1020,7 +1043,10 @@ pub fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
 /// So the quantity taken is `last_qty`, the amount *this* update filled,
 /// and an update whose `last_qty` is zero is not a fill however
 /// promising its status looks.
-fn fill_of(u: &oq_gateway::OrderUpdate, instrument: &Instrument) -> Option<oq_types::Fill> {
+fn fill_of(
+    u: &oq_gateway::OrderUpdate,
+    instrument: &Instrument,
+) -> Result<oq_types::Fill, &'static str> {
     let scaled = |text: &str, scale: u8| -> Option<i64> {
         let (int, frac) = text.split_once('.').unwrap_or((text, ""));
         let mut digits = String::from(int.trim_start_matches('+'));
@@ -1032,18 +1058,20 @@ fn fill_of(u: &oq_gateway::OrderUpdate, instrument: &Instrument) -> Option<oq_ty
         digits.parse::<i64>().ok()
     };
 
-    let qty = scaled(&u.last_qty, instrument.qty_scale)?;
+    let qty = scaled(&u.last_qty, instrument.qty_scale).ok_or("quantity is not a number")?;
     if qty <= 0 {
-        return None;
+        return Err("quantity is not positive");
     }
-    let price = scaled(&u.last_price, instrument.price_scale)?;
+    let price = scaled(&u.last_price, instrument.price_scale).ok_or("price is not a number")?;
     if price <= 0 {
         // A fill with no price is a report this build cannot book, and
-        // booking it at zero would price the position at nothing.
-        return None;
+        // booking it at zero would price the position at nothing — which
+        // is the shape of a real incident: a synthetic zero-price fill
+        // poisoned a position's average and every order derived from it.
+        return Err("price is not positive");
     }
 
-    Some(oq_types::Fill {
+    Ok(oq_types::Fill {
         stamp: oq_types::Stamp::new(now_ns(), now_ns()),
         instrument: oq_types::InstrumentId::new(1),
         order: OrderId(0),
@@ -1203,6 +1231,66 @@ mod adoption {
         );
         assert_eq!(legs.iter().map(|l| l.2).sum::<i64>(), 0);
         assert_ne!(legs[0].3, legs[1].3, "each leg keeps its own basis");
+    }
+}
+
+#[cfg(test)]
+mod unreadable_reports {
+    use super::fill_of;
+    use oq_types::Instrument;
+
+    fn update(price: &str, qty: &str) -> oq_gateway::OrderUpdate {
+        oq_gateway::OrderUpdate {
+            client_id: "oq-1".into(),
+            status: "FILLED".into(),
+            side: "BUY".into(),
+            last_qty: qty.into(),
+            last_price: price.into(),
+            cumulative_qty: qty.into(),
+            trade_id: Some(1),
+            maker: false,
+            event_ms: 0,
+            symbol: "BTCUSDT".into(),
+            venue_id: 0,
+        }
+    }
+
+    /// A zero price is refused, and the refusal says which field.
+    ///
+    /// This is the shape of a real incident: a synthetic fill carrying
+    /// no price poisoned a position's average, and every order derived
+    /// from that average went out at a nonsense price. Booking it at
+    /// zero prices the position at nothing.
+    #[test]
+    fn a_zero_price_is_refused_by_name() {
+        let e = fill_of(&update("0", "0.001"), &Instrument::linear(2, 3)).expect_err("must refuse");
+        assert!(e.contains("price"), "{e}");
+    }
+
+    #[test]
+    fn a_negative_price_is_refused() {
+        assert!(fill_of(&update("-100.0", "0.001"), &Instrument::linear(2, 3)).is_err());
+    }
+
+    /// A quantity of zero is a report about no trade.
+    #[test]
+    fn a_zero_quantity_is_refused_by_name() {
+        let e = fill_of(&update("100.0", "0"), &Instrument::linear(2, 3)).expect_err("must refuse");
+        assert!(e.contains("quantity"), "{e}");
+    }
+
+    /// Text this build cannot read is refused rather than guessed at.
+    #[test]
+    fn an_unparseable_price_is_refused() {
+        assert!(fill_of(&update("not a number", "0.001"), &Instrument::linear(2, 3)).is_err());
+    }
+
+    /// And a report that is fine comes through unchanged.
+    #[test]
+    fn a_readable_report_is_booked() {
+        let f = fill_of(&update("65432.10", "0.002"), &Instrument::linear(2, 3)).expect("reads");
+        assert_eq!(f.price.0, 6_543_210);
+        assert_eq!(f.qty.0, 2);
     }
 }
 
