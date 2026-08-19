@@ -213,9 +213,14 @@ were ready.
 - **No timing data.** Every "keep it short" here is unquantified. The
   first rehearsal's main product is how long the exposed interval
   actually is.
-- **`oq-live` is not yet a supervised process.** M3's scope opens by
-  noting that `oq-live` depends on neither `oq-core` nor `oq-margin`,
-  so what step 5 starts is not yet the process this procedure assumes.
+- ~~**`oq-live` is not yet a supervised process.**~~ Closed, and it was
+  stale before it was closed: it said the live path had neither the
+  kernel nor the margin model, which stopped being true when `books.rs`
+  put the account in `oq_core::Kernel` under `Matching::Venue`. What
+  step 5 starts now is the process this procedure assumes. Two limits
+  remain and are not this bullet: the interlock that keeps a second
+  process off the account is host-local, and restarting a process that
+  died is deployment and stays outside this repository.
 
 ## 7. What a rehearsal must produce
 
