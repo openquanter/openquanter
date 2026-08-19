@@ -244,6 +244,19 @@ impl Books {
         QtyLots(s.qty.0 - s.short_qty.0)
     }
 
+    /// Realized P&L net of fees and funding, as the venue's fills made
+    /// it.
+    ///
+    /// The live half of the attribution gap. It has to come from these
+    /// books and not from the shadow's: the two are fed different fill
+    /// streams — this one the venue's, the other the model's — and a gap
+    /// computed from one source is a number subtracted from itself.
+    #[must_use]
+    pub fn realized_net(&self) -> Cash {
+        let s = self.kernel.state();
+        Cash(s.realized.0 - s.fees.0 + s.funding.0)
+    }
+
     /// Equity at the last mark seen.
     #[must_use]
     pub fn equity(&self) -> Cash {

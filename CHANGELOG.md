@@ -138,8 +138,11 @@ Nothing here has traded real money, and the entry triggers in
   by the **same kernel** the backtest uses, so there is one book
   implementation rather than two that agree until they do not. Reconciles
   against the venue at startup and refuses to run beside a position it
-  was not told about. Shadow backtest alongside, with the gap decomposed
-  by cause and an explicitly unexplained residual.
+  was not told about, and runs a shadow backtest on the same events, so
+  every run ends with the gap decomposed by cause and an explicitly
+  unexplained residual. Funding and fee components report *unavailable*
+  rather than zero: the venue reports both per trade and nothing reads
+  that endpoint yet, so the residual carries them and says so.
 - Metrics are a **snapshot value** rendered in the line-oriented form
   collectors read, and alerts are judgements rather than notifications:
   nothing in this workspace sends anything anywhere.
