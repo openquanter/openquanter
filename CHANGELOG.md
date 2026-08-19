@@ -108,6 +108,17 @@ writing it down and better than leaving it out.
   regression.
 - `oq-stats` — deflated Sharpe ratio, PBO via CSCV, trial registry.
 
+**The classics catalogue's levered numbers moved.** *Changes results.*
+`GridTrader` used to advance its ladder when it submitted a rung; it now
+advances on the fill, anchored on the price actually paid, with at most
+one rung outstanding. The grid's levered result went from 4.06 to 4.46
+and its margin-free arm from −513.74 to −508.12. QUICKSTART quotes both,
+in two languages, and nothing failed when they changed — the catalogue
+was never pinned in `tests/golden.rs`. It is now, every levered row plus
+the claim the documentation actually makes: unlevered, the two arms agree
+for all six. Verified by putting 4.06 back, which fails with
+`expected 4.06, got 4.46`.
+
 ### Live trading
 
 Nothing here has traded real money, and the entry triggers in

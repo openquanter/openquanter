@@ -102,6 +102,14 @@ jobs:
       - name: Compare the generated blocks against Cargo.toml
         run: scripts/doc-facts.sh --check
 
+      # The generated block only guards the documents that embed it.
+      # Prose elsewhere stated the same facts and drifted: on 2026-08-19
+      # ROADMAP.md said in one paragraph that oq-live depends on neither
+      # oq-core nor oq-margin, and in another that it depends on both.
+      # This reads the sentences.
+      - name: Dependency claims in prose match Cargo.toml
+        run: scripts/check-doc-claims.py
+
   throughput:
     name: Engine throughput floor
     runs-on: ubuntu-latest

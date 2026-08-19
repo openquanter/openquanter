@@ -93,15 +93,16 @@ comments, absent from its functions), the connector conformance suite, a
 second execution venue, observability of any kind, the live/backtest
 attribution, `oq-sim`, and the cutover playbook.
 
-**G6 is not merely unmet — by its own definition it is unmeasurable.** It
-asks for p99 latency from journal write to socket write, and the live path
-did not journal: `oq-live` now depends on `oq-journal` and writes in
-`record.rs`, so the starting timestamp exists. What is still missing is the
-instrumentation itself, and the kernel — `oq-live` depends on neither `oq-core`
-nor `oq-margin`,
-so there is no first timestamp to measure from. This is the same missing
-wire as the attribution item in M3's scope, which is why that item calls
-itself the first task of the milestone rather than the last.
+**G6 is partly measured, and what is missing is the end of the interval
+rather than the beginning.** It asks for p99 latency from journal write
+to socket write. The near boundary exists — the live path journals in
+`record.rs`, and the kernel is on that path, keeping the account in
+`books.rs` — and `oq-live` reports the segment it can see, journal flush
+to client call, in every run's summary. The far boundary does not: the
+HTTP client does not expose when the bytes reached the socket, so the
+number printed is a lower bound and is labelled as not being G6's. What
+closes the gate is a client that reports its own write, or a measurement
+taken outside the process.
 
 "Committed" means it is the current default plan. "Triggered" means the
 milestone has an entry condition stated below and will not be started before
