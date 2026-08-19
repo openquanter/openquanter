@@ -184,15 +184,30 @@ fn main() {
         Err(e) => println!("  deflated Sharpe  unavailable: {e}"),
     }
     match &report.pbo {
-        Ok(v) => {
+        Ok(r) => {
+            let v = r.pbo;
             println!("  PBO              {v:.4}");
+            // The diagnostics, which were computed on every sweep and
+            // discarded before anybody could read them. The slope is the
+            // one worth the space: PBO says how often the winner stops
+            // winning, and this says whether winning meant anything.
+            println!(
+                "  OOS/IS slope     {:+.4}  ({} splits)",
+                r.performance_degradation, r.n_splits
+            );
+            if r.performance_degradation <= 0.0 {
+                println!("                   at or below zero: ranking these configurations");
+                println!("                   in sample predicted nothing out of sample");
+            }
+            println!("  loss out of samp {:.4}", r.probability_of_loss);
+            println!("  median OOS Sharpe {:.4}", r.median_oos_sharpe);
             // Worth reading rather than skipping past. A grid of moving
             // averages over one synthetic series is a hundred variants
             // of one strategy, none of which has an edge, so the best
             // in-sample configuration should be a coin flip out of
             // sample. A PBO near 0.5 is the statistic working. A PBO
             // near 0 here would mean it was broken.
-            if (v - 0.5).abs() < 0.15 {
+            if (v - 0.5_f64).abs() < 0.15 {
                 println!("                   ~0.5, as it should be: this grid is a hundred");
                 println!("                   variants of one strategy with no edge between them");
             }

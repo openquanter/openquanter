@@ -26,7 +26,7 @@ use oq_ingest::Aggregator;
 use oq_l2feed::session::{install_signal_handlers, now_ns, shutdown_requested};
 use oq_l2feed::venue::Deployment;
 use oq_risk::{Limits, RiskGate};
-use oq_strategy::Strategy;
+use oq_strategy::{Context, Strategy};
 use oq_types::{Cash, Instrument, Nanos, OrderId, PriceTicks, QtyLots, Side};
 
 use crate::{
@@ -44,6 +44,12 @@ pub struct RunConfig {
     pub strategy_name: String,
     pub deployment: Deployment,
     pub minutes: i64,
+    /// Minutes of history to warm the strategy with before it trades.
+    ///
+    /// Zero starts cold, which for an indicator with a window means it
+    /// cannot act until that many minutes of live data have arrived —
+    /// on a restart, that is time an account spends unmanaged.
+    pub warm_minutes: usize,
     pub window_ms: i64,
     pub id_prefix: String,
     pub adopt_existing: bool,
@@ -57,6 +63,33 @@ pub struct RunConfig {
     /// `oq_gateway::broker` for why conflating them eventually forces a
     /// fork.
     pub broker_code: Option<String>,
+}
+
+/// Side, quantity and offset of the intent an outcome answers.
+///
+/// `Outcome::Sent` carries two ids and nothing else, which is enough to
+/// map between the strategy and the venue and not enough to tell the
+/// kernel what was sent. `None` for a cancel, which submits nothing.
+fn shape_of(
+    intents: &[oq_strategy::Intent],
+    id: oq_types::OrderId,
+) -> Option<(oq_types::Side, oq_types::QtyLots, oq_types::Offset)> {
+    intents.iter().find_map(|i| match i {
+        oq_strategy::Intent::Limit {
+            id: this,
+            side,
+            qty,
+            offset,
+            ..
+        }
+        | oq_strategy::Intent::Market {
+            id: this,
+            side,
+            qty,
+            offset,
+        } if *this == id => Some((*side, *qty, *offset)),
+        _ => None,
+    })
 }
 
 /// The name this process was invoked as.
@@ -333,6 +366,23 @@ where
         // balance nobody read would report an account that is not this.
         starting_balance,
     );
+
+    // The same events, matched by the model instead of by the venue.
+    //
+    // Built here rather than left to a caller because the whole point is
+    // that it sees exactly what the account sees: a shadow fed a
+    // different event stream measures the difference between two event
+    // streams, which is not the number anybody wanted.
+    //
+    // It never places anything. `Shadow::apply` returns nothing for that
+    // reason — a caller acting on its outputs would be running a second
+    // trading system.
+    let mut shadow = crate::shadow::Shadow::new(
+        oq_types::InstrumentId::new(1),
+        oq_margin::Contract::new(10_000),
+        oq_margin::TierTable::example_btcusdt(),
+        starting_balance,
+    );
     // Kept so the adoption can be recorded once the journal exists.
     // Adopting is an in-memory act and has to happen here, before the
     // startup check; recording it has to happen after the writer opens.
@@ -435,6 +485,29 @@ where
     let mut session = session;
     session.record_reconciled(Nanos(now_ns()), adopted);
 
+    // Fetched while the session still owns the venue, replayed once the
+    // trader exists. A strategy that has not seen its window cannot act,
+    // and the first thing it would otherwise do is wait that window out
+    // in real time -- on a restart, that is an account left unmanaged
+    // for as long as the window is.
+    //
+    // A failure here is reported and does not stop the run. History
+    // makes a strategy ready sooner; it does not make it correct, and
+    // refusing to start because a public endpoint would not answer
+    // turns a slow start into no start.
+    let warm_bars: Option<Vec<oq_gateway::klines::Kline>> = if cfg.warm_minutes == 0 {
+        println!("warm-up          off, by request; the strategy starts cold");
+        None
+    } else {
+        match session.venue().recent_bars(&symbol, cfg.warm_minutes) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                println!("warm-up          FAILED: {e}; starting cold");
+                None
+            }
+        }
+    };
+
     let stream = match session.venue().open_user_stream() {
         Ok(s) => s,
         Err(e) => {
@@ -464,6 +537,30 @@ where
 
     let mut trader = Trader::new(make_strategy(&instrument), session);
 
+    // Replayed through the same books and the same context the live loop
+    // builds, so the strategy folds history with the code it already
+    // runs rather than a second path that has to agree with the first.
+    match warm_bars {
+        None => {}
+        Some(bars) if bars.is_empty() => {
+            println!("warm-up          the venue returned no history; starting cold");
+        }
+        Some(bars) => {
+            let n = bars.len();
+            for tick in warm_ticks(&bars) {
+                books.on_tick(&tick);
+                let ctx = books.context(tick);
+                trader.on_history(&ctx);
+            }
+            println!("warm-up          {n} bar(s) of history replayed");
+        }
+    }
+
+    // Stamped before the loop so the fee query at the end covers exactly
+    // this run. Asking for "everything" would sum a previous run's fees
+    // into this one's attribution, which is the sort of number that
+    // looks plausible and is somebody else's.
+    let started_ms = now_ns() / 1_000_000;
     install_signal_handlers();
     let deadline = Instant::now() + Duration::from_secs(60 * u64::try_from(minutes).unwrap_or(5));
     println!("running          until {minutes} minutes elapse or a signal arrives");
@@ -507,6 +604,7 @@ where
                         ticks += 1;
                         trader.record_tick(&tick);
                         metrics.ticks += 1;
+                        shadow.on_tick(tick);
                         for output in books.on_tick(&tick) {
                             // Under venue matching the kernel does not
                             // fill, so anything here is the account
@@ -517,6 +615,26 @@ where
                         }
                         let ctx = books.context(tick);
                         for outcome in trader.on_tick(&ctx, now) {
+                            if let Outcome::Sent { local, .. } = &outcome {
+                                // The kernel is told an order exists.
+                                // Without this `Context::working` is zero
+                                // for every live strategy that reads it,
+                                // and the books hold no order for a fill
+                                // to answer.
+                                if let Some((side, qty, offset)) =
+                                    shape_of(trader.submitted(), *local)
+                                {
+                                    books.on_submit(*local, side, qty, offset, now);
+                                    shadow.apply(&oq_core::Event::Submit {
+                                        id: *local,
+                                        side,
+                                        price: None,
+                                        qty,
+                                        offset,
+                                        stamp: oq_types::Stamp::new(now.0, now.0),
+                                    });
+                                }
+                            }
                             match &outcome {
                                 Outcome::Sent { .. } => sent += 1,
                                 Outcome::Cancelled { .. } => cancelled += 1,
@@ -557,6 +675,13 @@ where
                     );
                 }
                 if let Ok(fill) = parsed {
+                    shadow.on_venue_fill(
+                        fill.order,
+                        fill.side,
+                        fill.price,
+                        fill.qty,
+                        fill.stamp.exch,
+                    );
                     match books.on_venue_fill(&fill) {
                         crate::books::Booked::Applied(outputs) => {
                             for output in outputs {
@@ -630,6 +755,64 @@ where
     let _ = trader.close_stream();
 
     println!("ticks            {ticks}");
+
+    // What the model would have done with the same observations, and
+    // where it differs. Printed even when nothing traded: "no divergence
+    // because no trade" is a different statement from "no divergence",
+    // and only one of them is evidence.
+    // Asked once, at the end, over the window this run covered. A
+    // failure is reported and not fatal: the run is over, and refusing
+    // to print the rest of the report because one component could not be
+    // read would lose the components that could.
+    let shadow_fees = shadow.model_fees();
+    let venue_fees = match trader.venue().fees_charged(&symbol, started_ms) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fees             could not be read: {e}");
+            None
+        }
+    };
+    shadow.finish(Nanos(now_ns()));
+    println!();
+    let divergences = shadow.divergences();
+    let flattering = shadow.flattering();
+    println!(
+        "shadow           {} divergence(s), {flattering} of them flattering the model",
+        divergences.len()
+    );
+    // Every one, not a sample. A divergence that was summarised away is
+    // one nobody attributed, and the count above is the thing this run
+    // exists to produce.
+    for d in divergences {
+        println!(
+            "  {}{}",
+            if d.flatters_the_model() { "! " } else { "  " },
+            d.summary_line()
+        );
+    }
+    let attribution = oq_parity::attribution::attribute(
+        // Identified by what this run was, so a report cannot be
+        // mistaken for one from a different build or contract. The
+        // limits are in the config hash because a limit that fired is
+        // part of why the two arms differ.
+        oq_parity::RunManifest::from_content(
+            option_env!("GIT_COMMIT").unwrap_or("unknown"),
+            symbol.as_bytes(),
+            format!("{:?}", cfg.limits).as_bytes(),
+            format!("{}-{symbol}", cfg.strategy_name),
+        ),
+        &instrument,
+        books.realized_net(),
+        shadow.model_pnl(),
+        // Funding stays `None`: the venue reports it on an endpoint this
+        // adapter does not read, and zero is a measurement nobody took.
+        // Fees are asked for, and an adapter that does not report them
+        // says so rather than answering zero — either way `attribution`
+        // renders the component honestly and the residual carries what
+        // is missing.
+        &shadow.evidence(None, venue_fees.map(|v| (v, shadow_fees))),
+    );
+    print!("{}", attribution.render());
 
     // What a monitoring system would have read, and what it would have
     // woken somebody for. Printed at the end because this build has no
@@ -709,6 +892,8 @@ trait TraderLike {
     fn record_tick(&mut self, tick: &oq_engine::Tick);
     /// Sample what the strategy is waiting for, and record it.
     fn record_waiting(&mut self, at: Nanos);
+    /// One historical observation. Cannot produce intents.
+    fn on_history(&mut self, ctx: &Context);
     /// The same conditions, rendered for the terminal.
     fn waiting_summary(&self) -> String;
     fn latency(&self) -> String;
@@ -732,6 +917,10 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn foreign(&self) -> u64 {
         self.session().book().foreign()
     }
+    fn on_history(&mut self, ctx: &Context) {
+        self.strategy_mut().on_history(ctx);
+    }
+
     fn waiting_summary(&self) -> String {
         let w = self.strategy().waiting_on();
         if w.is_empty() {
@@ -1102,5 +1291,170 @@ mod unreadable_reports {
         let f = fill_of(&update("65432.10", "0.002"), &Instrument::linear(2, 3)).expect("reads");
         assert_eq!(f.price.0, 6_543_210);
         assert_eq!(f.qty.0, 2);
+    }
+}
+
+/// Venue bars as the ticks a strategy would have seen.
+///
+/// Pulled out of `run` so the conversion is testable: `run` needs a
+/// venue and cannot be called from a test, and the arithmetic here is
+/// where a real mistake would hide — a per-bar volume left un-accumulated
+/// would make every difference a consumer takes come out as the bar's
+/// own volume rather than the change since the last observation.
+fn warm_ticks(bars: &[oq_gateway::klines::Kline]) -> Vec<oq_engine::Tick> {
+    let mut cumulative: i64 = 0;
+    bars.iter()
+        .map(|b| {
+            // Accumulated, because that is the convention a live tick
+            // carries: consumers read differences between consecutive
+            // observations rather than the absolute value.
+            cumulative = cumulative.saturating_add(b.volume);
+            let at = Nanos(b.open_ms.saturating_mul(1_000_000));
+            oq_engine::Tick {
+                // Both stamps are the venue's. A bar fetched in bulk has
+                // no arrival time, and inventing one would put a latency
+                // in the record that no message experienced.
+                stamp: oq_types::Stamp {
+                    exch: at,
+                    local: at,
+                },
+                last: PriceTicks(b.close),
+                high: PriceTicks(b.high),
+                low: PriceTicks(b.low),
+                // A bar carries no book.
+                bid: PriceTicks(0),
+                ask: PriceTicks(0),
+                volume: QtyLots(cumulative),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod warm_up {
+    use super::warm_ticks;
+    use oq_gateway::klines::Kline;
+
+    fn bar(open_ms: i64, close: i64, volume: i64) -> Kline {
+        Kline {
+            open_ms,
+            high: close + 10,
+            low: close - 10,
+            close,
+            volume,
+        }
+    }
+
+    /// Volume accumulates, because that is what a live tick carries.
+    ///
+    /// A consumer reads the difference between consecutive observations.
+    /// Feeding per-bar volume would make every difference come out as
+    /// the bar's own volume — plausible numbers, and a volume gate that
+    /// arms on the wrong thing.
+    #[test]
+    fn volume_accumulates_across_the_bars() {
+        let t = warm_ticks(&[bar(0, 100, 5), bar(60_000, 101, 7), bar(120_000, 102, 3)]);
+        assert_eq!(
+            t.iter().map(|t| t.volume.0).collect::<Vec<_>>(),
+            vec![5, 12, 15]
+        );
+        // And the differences a consumer takes are the bars' own volumes.
+        let deltas: Vec<i64> = t
+            .windows(2)
+            .map(|w| w[1].volume.0 - w[0].volume.0)
+            .collect();
+        assert_eq!(deltas, vec![7, 3]);
+    }
+
+    /// Milliseconds to nanoseconds, on both stamps.
+    #[test]
+    fn the_stamp_is_the_venues_on_both_clocks() {
+        let t = warm_ticks(&[bar(1_499_040_000_000, 100, 1)]);
+        assert_eq!(t[0].stamp.exch.0, 1_499_040_000_000_000_000);
+        assert_eq!(
+            t[0].stamp.local.0, t[0].stamp.exch.0,
+            "a bar fetched in bulk has no arrival time to report"
+        );
+    }
+
+    /// A bar has no book, and says so rather than guessing one.
+    #[test]
+    fn there_is_no_book_in_a_bar() {
+        let t = warm_ticks(&[bar(0, 100, 1)]);
+        assert_eq!((t[0].bid.0, t[0].ask.0), (0, 0));
+        assert_eq!(t[0].last.0, 100, "but the traded price is real");
+        assert_eq!((t[0].high.0, t[0].low.0), (110, 90));
+    }
+
+    #[test]
+    fn no_bars_is_no_ticks() {
+        assert!(warm_ticks(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shape_of;
+    use oq_strategy::Intent;
+    use oq_types::{Offset, OrderId, PriceTicks, QtyLots, Side};
+
+    /// What is **not** covered here, said rather than left to be
+    /// assumed: that `run` calls `books.on_submit` and `shadow.apply`
+    /// at all. That was the defect — `Books` has tested `working`
+    /// since it was written and those tests passed the whole time,
+    /// because the unit was always right and nothing invoked it.
+    /// Reaching the call site needs a venue, and there is no way to
+    /// build one in a test.
+    fn market(id: u64, side: Side, qty: i64) -> Intent {
+        Intent::Market {
+            id: OrderId(id),
+            side,
+            qty: QtyLots(qty),
+            offset: Offset::Open,
+        }
+    }
+
+    #[test]
+    fn an_outcome_is_matched_back_to_what_was_asked_for() {
+        let intents = vec![
+            market(1, Side::Buy, 3),
+            market(2, Side::Sell, 7),
+            Intent::Cancel(OrderId(1)),
+        ];
+        assert_eq!(
+            shape_of(&intents, OrderId(2)),
+            Some((Side::Sell, QtyLots(7), Offset::Open))
+        );
+    }
+
+    /// A limit order carries its shape too, and the price is not part
+    /// of it: what the books need from a submission is that an order
+    /// exists, and a live order's resting price is the venue's.
+    #[test]
+    fn a_limit_order_is_matched_by_id_and_not_by_price() {
+        let intents = vec![Intent::Limit {
+            id: OrderId(9),
+            side: Side::Buy,
+            price: PriceTicks(6_000_000),
+            qty: QtyLots(2),
+            offset: Offset::Close,
+        }];
+        assert_eq!(
+            shape_of(&intents, OrderId(9)),
+            Some((Side::Buy, QtyLots(2), Offset::Close))
+        );
+    }
+
+    /// A cancel submits nothing, and an id nobody asked for is not
+    /// invented.
+    ///
+    /// Returning a default here would tell the kernel an order exists
+    /// with a side and a size that came from nowhere, which is worse
+    /// than the zero this replaces.
+    #[test]
+    fn a_cancel_and_an_unknown_id_produce_nothing() {
+        let intents = vec![Intent::Cancel(OrderId(4)), Intent::CancelAll];
+        assert_eq!(shape_of(&intents, OrderId(4)), None);
+        assert_eq!(shape_of(&intents, OrderId(99)), None);
     }
 }

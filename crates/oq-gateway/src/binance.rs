@@ -901,6 +901,30 @@ impl Execution for Binance {
 }
 
 impl crate::account::Account for Binance {
+    /// Summed from the venue's own trade records.
+    ///
+    /// `commission` is what was charged, per fill, in the settlement
+    /// asset — which for a USDT-margined perpetual is the currency the
+    /// kernel counts in, so no conversion is involved and none is
+    /// invented. A venue where that stopped being true would need this
+    /// to say so rather than to add unlike numbers.
+    ///
+    /// `Ok(None)` is never returned here: this adapter reports fees, and
+    /// a failure to read them is an error rather than an absence. The
+    /// difference matters — absence means the residual carries the
+    /// component, an error means the caller decides whether to proceed.
+    fn fees_charged(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<oq_types::Cash>, VenueError> {
+        let trades = self.my_trades(symbol, Some(since_ms))?;
+        let total: f64 = trades.iter().map(|t| t.commission).sum();
+        #[allow(clippy::cast_possible_truncation)]
+        let cash = (total * oq_types::CASH_SCALE as f64).round() as i64;
+        Ok(Some(oq_types::Cash(cash)))
+    }
+
     fn id(&self) -> &'static str {
         // Matches the market-data side's identifier for the same venue,
         // so a run's records and its archive file under one name.
@@ -909,6 +933,38 @@ impl crate::account::Account for Binance {
 
     fn id_rules(&self) -> crate::broker::IdRules {
         crate::broker::IdRules::BINANCE
+    }
+
+    fn recent_bars(
+        &self,
+        symbol: &str,
+        minutes: usize,
+    ) -> Result<Vec<crate::klines::Kline>, VenueError> {
+        // Unsigned: history is public, so a warm-up cannot fail for a
+        // reason that has anything to do with this account's keys.
+        //
+        // The venue caps a page at 1500 and a strategy that wants more
+        // than a day of minutes wants a different endpoint, so this is
+        // clamped rather than paged: a silent second request would make
+        // the returned range differ from the one asked for.
+        let limit = minutes.clamp(1, 1500);
+        let body = self.get_public(
+            "/fapi/v1/klines",
+            &format!("symbol={symbol}&interval=1m&limit={limit}"),
+        )?;
+        let (price_scale, qty_scale) = match crate::account::Account::instrument(self, symbol) {
+            Ok(i) => (i.price_scale, i.qty_scale),
+            Err(e) => {
+                return Err(VenueError::Malformed {
+                    what: "instrument for klines",
+                    body: e,
+                });
+            }
+        };
+        crate::klines::parse(&body, price_scale, qty_scale).ok_or(VenueError::Malformed {
+            what: "klines",
+            body,
+        })
     }
 
     fn sync_clock(&mut self) -> Result<i64, VenueError> {

@@ -77,6 +77,14 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         &self.strategy
     }
 
+    /// The strategy, for replaying history into it.
+    ///
+    /// Not a general escape hatch: the only caller is the warm-up, and
+    /// the callback it reaches cannot produce intents.
+    pub const fn strategy_mut(&mut self) -> &mut S {
+        &mut self.strategy
+    }
+
     #[must_use]
     pub fn new(strategy: S, session: Session<E>) -> Self {
         Self {
@@ -112,6 +120,32 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         self.intents = intents;
         self.report_placements(&out);
         out
+    }
+
+    /// The venue, for the questions a run asks once it is over.
+    ///
+    /// Reading only. Everything that places or cancels goes through the
+    /// session's own methods, so the gate cannot be walked around by
+    /// holding this.
+    #[must_use]
+    pub const fn venue(&self) -> &E {
+        self.session.venue()
+    }
+
+    /// The intents the strategy produced on the last call.
+    ///
+    /// Held so a caller can pair an [`Outcome::Sent`] back to what was
+    /// actually asked for: the outcome carries two ids and nothing about
+    /// side, size or price, and the books and the shadow both need those
+    /// to record that an order exists.
+    ///
+    /// It is the whole list, refusals included. Which ones reached the
+    /// venue is the outcomes' answer, not this one's — a method that
+    /// filtered would be making that judgement twice, in two places, and
+    /// they would eventually disagree.
+    #[must_use]
+    pub fn submitted(&self) -> &[Intent] {
+        &self.intents
     }
 
     /// Tell the strategy which submissions the venue answered.

@@ -32,11 +32,12 @@
 //! would couple a capture tool to an account credential, and the capture
 //! side has good reasons to run with neither.
 
-use oq_types::Instrument;
+use oq_types::{Cash, Instrument};
 
 use crate::binance::{AccountSnapshot, OpenOrder, PositionSnapshot, VenueError};
 use crate::broker::IdRules;
 use crate::exec::{Execution, NewOrder, OrderAck, Placed, UserStream};
+use crate::klines::Kline;
 
 /// Everything a live run needs from the account side of one venue.
 ///
@@ -60,6 +61,20 @@ pub trait Account: Execution {
     /// rejected at submission, which is the worst place to find out:
     /// the strategy has already decided to trade.
     fn id_rules(&self) -> IdRules;
+
+    /// The most recent `minutes` of one-minute bars, oldest first.
+    ///
+    /// A strategy whose indicator needs a window cannot act until it has
+    /// one, and from a cold start that wait is real time on a live
+    /// account — hours, for a long window — paid again on every restart.
+    ///
+    /// From the venue rather than from storage, because a venue always
+    /// has its own recent history and a database that has to be up in
+    /// order to start is a second thing that can be down.
+    ///
+    /// # Errors
+    /// Whatever the request reports.
+    fn recent_bars(&self, symbol: &str, minutes: usize) -> Result<Vec<Kline>, VenueError>;
 
     /// Agree with the venue about the time, and report the offset.
     ///
@@ -114,6 +129,29 @@ pub trait Account: Execution {
     ///
     /// # Errors
     /// Whatever the request reports.
+    /// Fees the venue actually charged on this symbol since `since_ms`.
+    ///
+    /// `Ok(None)` means this adapter does not report it — a third state,
+    /// and the reason this is not an `Ok(Cash(0))`. Zero is a
+    /// measurement; a venue that was never asked has not made one, and
+    /// `attribution` renders the difference as *unavailable* so the
+    /// residual carries it and says so. Reporting zero would put a
+    /// measured-looking number on the one component nobody measured.
+    ///
+    /// Positive as charged, matching the kernel's own `fees`, because
+    /// the number exists to be subtracted from the model's.
+    ///
+    /// Defaulted so a new adapter compiles without pretending: an
+    /// adapter that has not implemented this says so, rather than
+    /// silently answering zero for the component that would have shown
+    /// its fee tier was wrong.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    fn fees_charged(&self, _symbol: &str, _since_ms: i64) -> Result<Option<Cash>, VenueError> {
+        Ok(None)
+    }
+
     fn open_user_stream(&self) -> Result<UserStream, VenueError>;
 
     /// Tell the venue the stream is still wanted.
@@ -158,6 +196,9 @@ impl Account for Box<dyn Account> {
     }
     fn id_rules(&self) -> IdRules {
         (**self).id_rules()
+    }
+    fn recent_bars(&self, symbol: &str, minutes: usize) -> Result<Vec<Kline>, VenueError> {
+        (**self).recent_bars(symbol, minutes)
     }
     fn sync_clock(&mut self) -> Result<i64, VenueError> {
         (**self).sync_clock()
@@ -234,6 +275,9 @@ mod tests {
         fn id_rules(&self) -> IdRules {
             IdRules::OKX
         }
+        fn recent_bars(&self, _: &str, _: usize) -> Result<Vec<Kline>, VenueError> {
+            Ok(Vec::new())
+        }
         fn sync_clock(&mut self) -> Result<i64, VenueError> {
             Ok(0)
         }
@@ -274,6 +318,23 @@ mod tests {
     /// The trait is object-safe, which is the whole reason it can be
     /// chosen at runtime. A method taking `self` by value or returning
     /// `Self` would break this line and nothing else.
+    /// An adapter that has not implemented fee reporting says so.
+    ///
+    /// The default returns `None`, not `Ok(Cash(0))`, and the
+    /// difference is the whole point: zero is a measurement. An
+    /// adapter answering zero would put a measured-looking number on
+    /// the one attribution component nobody measured, and the
+    /// residual — whose job is to carry what is unexplained — would
+    /// stop carrying it.
+    #[test]
+    fn an_adapter_that_does_not_report_fees_returns_none_rather_than_zero() {
+        let v = Nowhere;
+        assert!(
+            matches!(v.fees_charged("BTCUSDT", 0), Ok(None)),
+            "an unimplemented adapter must not answer zero"
+        );
+    }
+
     #[test]
     fn an_account_can_be_boxed() {
         let venue: Box<dyn Account> = Box::new(Nowhere);
