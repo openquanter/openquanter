@@ -90,6 +90,22 @@ append-only.
 | 6 | 48 | ask, ticks | v1 |
 | 7 | 56 | cumulative volume, lots | v2 |
 
+### Zero is not a price
+
+`last` is never zero in a written record. The other price fields use zero
+for "unknown"; this one cannot, because the kernel takes it as the mark
+price without a guard, and a position marked at nothing liquidates at a
+leverage of 1x or more and understates minimum equity by the position's
+notional below that — silently, in both directions.
+
+A producer with no price does not write a record. `oq-ingest` carries the
+previous price across windows with no trade of their own, and writes
+nothing before the first trade. A reader may rely on this; a writer owes
+it.
+
+This became true when it was measured. A twelve-hour live capture carried
+`last = 0` on 56.4% of its ticks, and 8.0% of them had all three prices.
+
 ### The extensibility rule
 
 **A new field is appended and `record_len` grows. Nothing else changes,
