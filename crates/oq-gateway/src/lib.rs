@@ -43,6 +43,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account;
 pub mod binance;
 pub mod broker;
 pub mod conformance;
@@ -56,6 +57,7 @@ pub mod snapshot;
 pub mod stream;
 pub mod watch;
 
+pub use account::Account;
 pub use binance::parse_user_event;
 pub use binance::{AccountSnapshot, Binance, OpenOrder, PositionSnapshot, Trade, VenueError};
 pub use creds::Credentials;
