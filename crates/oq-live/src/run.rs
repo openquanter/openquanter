@@ -19,9 +19,9 @@ use core::time::Duration;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use oq_gateway::binance::Binance;
-use oq_gateway::exec::{Endpoint, Execution};
-use oq_gateway::{Credentials, StreamOutcome, UserEvent, UserStreamReader};
+use oq_gateway::account::Account;
+use oq_gateway::exec::Execution;
+use oq_gateway::{StreamOutcome, UserEvent, UserStreamReader};
 use oq_ingest::Aggregator;
 use oq_l2feed::session::{install_signal_handlers, now_ns, shutdown_requested};
 use oq_l2feed::venue::Deployment;
@@ -42,7 +42,6 @@ pub struct RunConfig {
     pub symbol: String,
     /// Printed in the banner. The run does not otherwise use it.
     pub strategy_name: String,
-    pub endpoint: Endpoint,
     pub deployment: Deployment,
     pub minutes: i64,
     pub window_ms: i64,
@@ -90,7 +89,7 @@ fn program() -> String {
 /// instrument is discovered here — precision and grid come from the
 /// deployment being traded, and a strategy that needs them cannot be
 /// constructed before this function has asked.
-pub fn run<S, F>(make_strategy: F, cfg: &RunConfig) -> ExitCode
+pub fn run<S, F>(mut venue: Box<dyn Account>, make_strategy: F, cfg: &RunConfig) -> ExitCode
 where
     S: Strategy,
     F: FnOnce(&Instrument) -> S,
@@ -99,24 +98,14 @@ where
     // unchanged. Rewriting every use to `cfg.x` would have edited eight
     // hundred lines to move them, and a move that edits is not a move.
     let symbol = cfg.symbol.clone();
-    let endpoint = cfg.endpoint;
     let deployment = cfg.deployment;
     let minutes = cfg.minutes;
     let window_ns = cfg.window_ms * 1_000_000;
-
-    let creds = match Credentials::from_env() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{}: {e}", program());
-            return ExitCode::FAILURE;
-        }
-    };
 
     println!("deployment       {deployment:?}");
     println!("symbol           {symbol}");
     println!("strategy         {}", cfg.strategy_name);
 
-    let mut venue = Binance::at(endpoint, creds);
     if let Err(e) = venue.sync_clock() {
         eprintln!("clock            FAILED: {e}");
         return ExitCode::FAILURE;
@@ -126,25 +115,21 @@ where
     // order path has to respect, and connecting it before anything is
     // sent means a feed that will not open stops the run before it
     // trades rather than after.
-    let (mut market, feed_venue) = match MarketData::open(
-        "binance-perp",
-        deployment,
-        &symbol,
-        Duration::from_millis(200),
-    ) {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!("market data      FAILED: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let (mut market, feed_venue) =
+        match MarketData::open(venue.id(), deployment, &symbol, Duration::from_millis(200)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("market data      FAILED: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
     // Precision *and* grid come from the deployment being traded, not
     // from the table compiled in. The tables exist so a replay gives
     // the same answer on any machine on any day; the question here is
     // the opposite one — what does this venue accept right now — and
     // the deployments disagree: one of them publishes four decimal
     // places of quantity where the other publishes three.
-    let instrument = match instrument_of(&venue, &symbol) {
+    let instrument = match venue.instrument(&symbol) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("instrument       FAILED: {e}");
@@ -156,7 +141,7 @@ where
         instrument.price_scale, instrument.price_tick, instrument.qty_scale, instrument.qty_step
     );
 
-    let hedged = match venue.is_hedged_account() {
+    let hedged = match venue.is_hedged() {
         Ok(h) => h,
         Err(e) => {
             eprintln!("position mode    FAILED: {e}");
@@ -177,7 +162,7 @@ where
     };
     // The venue's own number. Books opened at a configured balance would
     // report an equity curve about a different account.
-    let starting_balance = match venue.account() {
+    let starting_balance = match venue.balances() {
         Ok(a) => {
             println!(
                 "balance          {:.2} (wallet, from the venue)",
@@ -222,16 +207,10 @@ where
     // process's own orders. `IdScheme::owned_prefix` is that composition
     // in one place rather than two.
     let scheme = match &cfg.broker_code {
-        None => oq_gateway::broker::IdScheme::new(
-            cfg.id_prefix.clone(),
-            oq_gateway::broker::IdRules::BINANCE,
-        ),
+        None => oq_gateway::broker::IdScheme::new(cfg.id_prefix.clone(), venue.id_rules()),
         Some(code) => match oq_gateway::broker::BrokerCode::new(code.clone()) {
-            Ok(c) => oq_gateway::broker::IdScheme::new(
-                cfg.id_prefix.clone(),
-                oq_gateway::broker::IdRules::BINANCE,
-            )
-            .map(|s| s.with_broker(c)),
+            Ok(c) => oq_gateway::broker::IdScheme::new(cfg.id_prefix.clone(), venue.id_rules())
+                .map(|s| s.with_broker(c)),
             Err(e) => {
                 eprintln!("broker code      REFUSED: {e}");
                 return ExitCode::FAILURE;
@@ -354,26 +333,19 @@ where
         // balance nobody read would report an account that is not this.
         starting_balance,
     );
-    for p in &positions {
-        let amount = p.amount;
-        if amount != 0.0 {
-            #[allow(clippy::cast_possible_truncation)]
-            let lots = oq_types::QtyLots(
-                (amount.abs() * 10f64.powi(i32::from(instrument.qty_scale))) as i64,
-            );
-            #[allow(clippy::cast_possible_truncation)]
-            let entry = oq_types::PriceTicks(
-                (p.entry_price * 10f64.powi(i32::from(instrument.price_scale))) as i64,
-            );
-            let side = if amount > 0.0 { Side::Buy } else { Side::Sell };
-            books.adopt(side, lots, entry, Nanos(now_ns()));
-            println!(
-                "adopted          {} {} lots at {}",
-                if amount > 0.0 { "long" } else { "short" },
-                lots.0,
-                entry.0
-            );
-        }
+    // Kept so the adoption can be recorded once the journal exists.
+    // Adopting is an in-memory act and has to happen here, before the
+    // startup check; recording it has to happen after the writer opens.
+    // Conflating the two is what left this step invisible.
+    let adopted = adopted_legs(&positions, &instrument, &symbol);
+    for (side, lots, entry) in adopted_lots(&positions, &instrument) {
+        books.adopt(side, lots, entry, Nanos(now_ns()));
+        println!(
+            "adopted          {} {} lots at {}",
+            if side == Side::Buy { "long" } else { "short" },
+            lots.0,
+            entry.0
+        );
     }
 
     // Before anything is recorded, read what the last run left. An order
@@ -455,6 +427,13 @@ where
             }
         }
     };
+
+    // The one startup step that carries state across a migration, and
+    // until this call it was the one step the journal could not see. A
+    // reader rebuilding what this run believes it holds would have come
+    // up short by exactly the positions that were migrated.
+    let mut session = session;
+    session.record_reconciled(Nanos(now_ns()), adopted);
 
     let stream = match session.venue().open_user_stream() {
         Ok(s) => s,
@@ -707,7 +686,7 @@ trait TraderLike {
     fn halt(&self, why: &str);
 }
 
-impl<S: Strategy> TraderLike for Trader<S, Binance> {
+impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn apply(&mut self, u: &oq_gateway::OrderUpdate) -> bool {
         self.session_mut().apply(u)
     }
@@ -811,54 +790,6 @@ pub fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
     QtyLots(i64::try_from(lots).unwrap_or(1).max(1))
 }
 
-/// Precision and grid for `symbol`, from this deployment.
-fn instrument_of(venue: &Binance, symbol: &str) -> Result<oq_types::Instrument, String> {
-    let body = venue.exchange_info(symbol).map_err(|e| e.to_string())?;
-    let price_scale = integer_field(&body, "pricePrecision").ok_or("no pricePrecision")?;
-    let qty_scale = integer_field(&body, "quantityPrecision").ok_or("no quantityPrecision")?;
-    let price_scale = u8::try_from(price_scale).map_err(|_| "implausible price precision")?;
-    let qty_scale = u8::try_from(qty_scale).map_err(|_| "implausible quantity precision")?;
-    let tick = decimal_field(&body, "tickSize", price_scale).unwrap_or(1);
-    let step = decimal_field(&body, "stepSize", qty_scale).unwrap_or(1);
-    // The venue also refuses orders below a notional floor, and its
-    // message names the floor without naming what the order was worth.
-    // Carried on the instrument so a strategy does not learn it by
-    // being refused.
-    let floor = decimal_field(&body, "notional", 8).unwrap_or(0);
-    Ok(oq_types::Instrument::linear(price_scale, qty_scale)
-        .with_grid(tick, step)
-        .with_min_notional(Cash(floor)))
-}
-
-/// An unquoted integer field.
-fn integer_field(body: &str, key: &str) -> Option<i64> {
-    let needle = format!("\"{key}\":");
-    let start = body.find(&needle)? + needle.len();
-    let rest = &body[start..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-/// A quoted decimal string as an integer count at `scale`.
-fn decimal_field(body: &str, key: &str, scale: u8) -> Option<i64> {
-    let needle = format!("\"{key}\":\"");
-    let start = body.find(&needle)? + needle.len();
-    let rest = &body[start..];
-    let text = &rest[..rest.find('"')?];
-    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
-    let mut digits = String::from(whole);
-    let width = usize::from(scale);
-    let mut frac = frac.to_string();
-    frac.truncate(width);
-    while frac.len() < width {
-        frac.push('0');
-    }
-    digits.push_str(&frac);
-    digits.parse().ok()
-}
-
 /// The fill inside an order update, when there is one.
 ///
 /// `None` for an update that reports no new quantity — an
@@ -921,4 +852,138 @@ fn fill_of(u: &oq_gateway::OrderUpdate, instrument: &Instrument) -> Option<oq_ty
             oq_types::Liquidity::Taker
         },
     })
+}
+
+/// Venue positions, converted to this instrument's lots and ticks.
+///
+/// Pulled out of `run` so the conversion is testable: `run` needs a
+/// venue and cannot be called from a test, and the arithmetic here is
+/// where a real mistake would hide — a scale applied to the wrong field,
+/// or a short adopted as a long.
+fn adopted_lots(
+    positions: &[oq_gateway::binance::PositionSnapshot],
+    instrument: &Instrument,
+) -> Vec<(Side, QtyLots, PriceTicks)> {
+    positions
+        .iter()
+        .filter(|p| p.amount != 0.0)
+        .map(|p| {
+            #[allow(clippy::cast_possible_truncation)]
+            let lots =
+                QtyLots((p.amount.abs() * 10f64.powi(i32::from(instrument.qty_scale))) as i64);
+            #[allow(clippy::cast_possible_truncation)]
+            let entry =
+                PriceTicks((p.entry_price * 10f64.powi(i32::from(instrument.price_scale))) as i64);
+            let side = if p.amount > 0.0 {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
+            (side, lots, entry)
+        })
+        .collect()
+}
+
+/// The same positions, in the shape the journal records them.
+///
+/// Signed lots rather than a side plus a magnitude, because a reader
+/// summing a column should get the net without having to know the
+/// convention — and the side string is kept beside it so a hedged
+/// account's two legs stay distinguishable when they net to zero.
+fn adopted_legs(
+    positions: &[oq_gateway::binance::PositionSnapshot],
+    instrument: &Instrument,
+    symbol: &str,
+) -> Vec<(String, String, i64, i64)> {
+    adopted_lots(positions, instrument)
+        .into_iter()
+        .map(|(side, lots, entry)| {
+            let (name, signed) = if side == Side::Buy {
+                ("LONG", lots.0)
+            } else {
+                ("SHORT", -lots.0)
+            };
+            (symbol.to_string(), name.to_string(), signed, entry.0)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod adoption {
+    use super::{adopted_legs, adopted_lots};
+    use oq_gateway::binance::PositionSnapshot;
+    use oq_types::{Instrument, Side};
+
+    fn leg(amount: f64, entry: f64) -> PositionSnapshot {
+        PositionSnapshot {
+            symbol: "BTCUSDT".into(),
+            position_side: if amount > 0.0 { "LONG" } else { "SHORT" }.into(),
+            amount,
+            entry_price: entry,
+            unrealized: 0.0,
+        }
+    }
+
+    /// Quantity uses the quantity scale and price uses the price scale.
+    ///
+    /// Swapping them is the mistake that reads as a plausible number:
+    /// at 2 and 4 decimal places both conversions produce something in
+    /// the right order of magnitude, and the position would simply be
+    /// wrong by a hundredfold in one field.
+    #[test]
+    fn each_field_uses_its_own_scale() {
+        let got = adopted_lots(&[leg(0.016, 63_735.2)], &Instrument::linear(2, 4));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1.0, 160, "0.016 at four decimal places");
+        assert_eq!(got[0].2.0, 6_373_520, "63735.2 at two decimal places");
+    }
+
+    /// A short is adopted as a short.
+    #[test]
+    fn the_side_follows_the_sign() {
+        let i = Instrument::linear(2, 4);
+        assert_eq!(adopted_lots(&[leg(0.016, 1.0)], &i)[0].0, Side::Buy);
+        assert_eq!(adopted_lots(&[leg(-0.016, 1.0)], &i)[0].0, Side::Sell);
+    }
+
+    /// A flat leg is not a position, and recording it as one would put a
+    /// zero-sized holding in the journal for a reader to explain.
+    #[test]
+    fn a_flat_leg_is_not_adopted() {
+        assert!(adopted_lots(&[leg(0.0, 63_735.2)], &Instrument::linear(2, 4)).is_empty());
+    }
+
+    /// The journal's lots are signed, so summing the column gives the net.
+    #[test]
+    fn the_recorded_lots_carry_their_sign() {
+        let legs = adopted_legs(
+            &[leg(0.016, 60_000.0), leg(-0.004, 61_000.0)],
+            &Instrument::linear(2, 4),
+            "BTCUSDT",
+        );
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].1, "LONG");
+        assert_eq!(legs[0].2, 160);
+        assert_eq!(legs[1].1, "SHORT");
+        assert_eq!(legs[1].2, -40, "a short is negative in the record");
+        let net: i64 = legs.iter().map(|l| l.2).sum();
+        assert_eq!(net, 120, "the column sums to the net position");
+    }
+
+    /// Both legs of a hedged account survive even when they net to zero.
+    #[test]
+    fn a_hedged_pair_that_nets_to_zero_is_still_two_legs() {
+        let legs = adopted_legs(
+            &[leg(0.016, 60_000.0), leg(-0.016, 61_000.0)],
+            &Instrument::linear(2, 4),
+            "BTCUSDT",
+        );
+        assert_eq!(
+            legs.len(),
+            2,
+            "a net of zero is not the absence of a position"
+        );
+        assert_eq!(legs.iter().map(|l| l.2).sum::<i64>(), 0);
+        assert_ne!(legs[0].3, legs[1].3, "each leg keeps its own basis");
+    }
 }

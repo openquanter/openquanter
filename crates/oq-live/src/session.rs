@@ -268,6 +268,28 @@ impl<E: Execution> Session<E> {
         }
     }
 
+    /// Positions this run took over from the venue at startup.
+    ///
+    /// Call once, after the journal is open and before anything is sent.
+    /// Adopting a position and recording the adoption are two different
+    /// acts, and only the second one has to wait for the writer — which
+    /// is why this is a separate call rather than something `adopt` does.
+    ///
+    /// Nothing is written when the run has no journal, and nothing is
+    /// written for an empty list: a record saying "took over nothing" and
+    /// no record at all are the same claim, and only one of them can be
+    /// mistaken for a run that forgot to look.
+    pub fn record_reconciled(
+        &mut self,
+        at: oq_types::Nanos,
+        legs: Vec<(String, String, i64, i64)>,
+    ) {
+        if legs.is_empty() {
+            return;
+        }
+        self.write(&Record::Reconciled { at, legs });
+    }
+
     /// A tick the strategy is about to see.
     pub fn record_tick(&mut self, tick: &oq_engine::Tick) {
         self.write(&Record::Tick {

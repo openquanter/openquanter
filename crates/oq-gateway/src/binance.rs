@@ -139,8 +139,16 @@ pub struct Binance {
     creds: Credentials,
     agent: ureq::Agent,
     /// Venue clock minus local clock, in milliseconds.
-    clock_offset_ms: i64,
-    round_trip_ms: i64,
+    ///
+    /// Atomic because the offset has to be correctable from a `&self`
+    /// path. It is measured once at startup and then applied for the
+    /// whole run — twelve hours, on the deployment this was found on —
+    /// and a machine whose clock drifts past `recvWindow` in that time
+    /// gets every signed request refused with -1021. The correction has
+    /// to happen where the refusal is seen, and that is a read path
+    /// holding `&self`.
+    clock_offset_ms: core::sync::atomic::AtomicI64,
+    round_trip_ms: core::sync::atomic::AtomicI64,
 }
 
 impl Binance {
@@ -187,8 +195,8 @@ impl Binance {
             base: base.into(),
             creds,
             agent: config.into(),
-            clock_offset_ms: 0,
-            round_trip_ms: 0,
+            clock_offset_ms: core::sync::atomic::AtomicI64::new(0),
+            round_trip_ms: core::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -197,6 +205,14 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn sync_clock(&mut self) -> Result<i64, VenueError> {
+        self.resync_clock()
+    }
+
+    /// The same measurement, from a shared reference.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    pub fn resync_clock(&self) -> Result<i64, VenueError> {
         // Read the local clock on both sides of the call and take the
         // midpoint. Reading it only afterwards charges the whole return
         // leg to the clock: on a link with a 750 ms round trip that is a
@@ -232,8 +248,10 @@ impl Binance {
         }
         match best {
             Some((round_trip, offset)) => {
-                self.clock_offset_ms = offset;
-                self.round_trip_ms = round_trip;
+                self.clock_offset_ms
+                    .store(offset, core::sync::atomic::Ordering::Relaxed);
+                self.round_trip_ms
+                    .store(round_trip, core::sync::atomic::Ordering::Relaxed);
                 Ok(offset)
             }
             None => Err(last_err.unwrap_or(VenueError::Malformed {
@@ -252,14 +270,16 @@ impl Binance {
     /// Binance answers that with -1021, which reads like a clock problem
     /// and is not one.
     #[must_use]
-    pub const fn round_trip_ms(&self) -> i64 {
+    pub fn round_trip_ms(&self) -> i64 {
         self.round_trip_ms
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// The measured offset, for a caller that wants to report it.
     #[must_use]
-    pub const fn clock_offset_ms(&self) -> i64 {
+    pub fn clock_offset_ms(&self) -> i64 {
         self.clock_offset_ms
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// Now, on the venue's clock.
@@ -271,7 +291,7 @@ impl Binance {
     /// about than one carrying a single clock and some gaps.
     #[must_use]
     pub fn venue_time_ms(&self) -> i64 {
-        now_ms() + self.clock_offset_ms
+        now_ms() + self.clock_offset_ms()
     }
 
     /// Account balance and unrealized profit.
@@ -280,7 +300,7 @@ impl Binance {
     /// Anything the request reports.
     pub fn account(&self) -> Result<AccountSnapshot, VenueError> {
         let body = self.get_signed("/fapi/v2/account", "")?;
-        let read_at_ms = now_ms() + self.clock_offset_ms;
+        let read_at_ms = now_ms() + self.clock_offset_ms();
         Ok(AccountSnapshot {
             wallet_balance: need_f64(&body, "totalWalletBalance")?,
             unrealized: need_f64(&body, "totalUnrealizedProfit")?,
@@ -392,12 +412,35 @@ impl Binance {
     /// Sign and send. The signed string and the transmitted string are
     /// the same object, never rebuilt — a signature over a query that
     /// differs from the one sent is valid for a request nobody made.
+    ///
+    /// A -1021 re-measures the clock and sends once more. The offset is
+    /// taken at startup and applied for the life of the process, so a
+    /// machine that drifts past `recvWindow` during a long run has every
+    /// signed request refused from that moment until it is restarted —
+    /// which is what a twelve-hour run showed, twice.
+    ///
+    /// Exactly one retry, and only for reads. A clock still wrong after
+    /// a fresh measurement is a different fault, and a loop around a
+    /// refusal is how a process earns the venue's rate limiter — the same
+    /// run also collected a `-1003 IP banned`.
     fn get_signed(&self, path: &str, query: &str) -> Result<String, VenueError> {
+        match self.get_signed_once(path, query) {
+            Err(e) if is_stale_timestamp(&e) => {
+                // Measure first: retrying with the same offset would
+                // reproduce the refusal and spend a request proving it.
+                self.resync_clock()?;
+                self.get_signed_once(path, query)
+            }
+            other => other,
+        }
+    }
+
+    fn get_signed_once(&self, path: &str, query: &str) -> Result<String, VenueError> {
         let url = signed_url(
             &self.base,
             path,
             query,
-            now_ms() + self.clock_offset_ms,
+            now_ms() + self.clock_offset_ms(),
             self.creds.secret_bytes(),
         );
         self.send(&url, true)
@@ -486,6 +529,24 @@ fn signed_url(base: &str, path: &str, query: &str, stamp_ms: i64, secret: &[u8])
     };
     let signature = hmac_sha256_hex(secret, stamped.as_bytes());
     format!("{base}{path}?{stamped}&signature={signature}")
+}
+
+/// Whether a refusal says the request's timestamp was stale.
+///
+/// Matched on the venue's numeric code rather than its prose, because
+/// the prose is what changes. `-1021` is the one refusal a client can
+/// actually repair by itself: the request was well-formed and correctly
+/// signed, and only the clock it was stamped with was wrong.
+///
+/// Deliberately not matched: `-1003` (rate limited) and `-1007`
+/// (timeout, execution status unknown). The first would be repaired by
+/// waiting and the retry makes it worse; the second may have reached the
+/// matching engine, and repeating it is how one order becomes two.
+fn is_stale_timestamp(e: &VenueError) -> bool {
+    match e {
+        VenueError::Venue { body, .. } => body.contains("\"code\":-1021"),
+        _ => false,
+    }
 }
 
 /// The path of a URL, without the query — which is where the signature
@@ -769,12 +830,28 @@ impl Execution for Binance {
             &self.base,
             "/fapi/v1/order",
             &order_query(order, instrument),
-            now_ms() + self.clock_offset_ms,
+            now_ms() + self.clock_offset_ms(),
             self.creds.secret_bytes(),
         );
         match self.send_method(Method::Post, &url, true) {
             Ok(body) => ack_from(&body, &order.client_id),
-            Err(VenueError::Venue { status, body }) => classify(status, &body, &order.client_id),
+            Err(VenueError::Venue { status, body }) => {
+                // A stale timestamp is repairable, and the read paths
+                // repair it by sending again. This one does not. The
+                // venue refused *this* order, but a refusal and a silence
+                // are not distinguishable from here with certainty, and
+                // resending is the single action that can turn "maybe one
+                // order" into "certainly two".
+                //
+                // So the clock is corrected and the refusal is returned.
+                // The next order is stamped correctly; this one is the
+                // caller's to decide about, which is the whole reason
+                // Placed has three outcomes rather than two.
+                if body.contains("\"code\":-1021") {
+                    let _ = self.resync_clock();
+                }
+                classify(status, &body, &order.client_id)
+            }
             Err(e) => Placed::Unknown(Unresolved {
                 client_id: order.client_id.clone(),
                 reason: e.to_string(),
@@ -787,7 +864,7 @@ impl Execution for Binance {
             &self.base,
             "/fapi/v1/order",
             &format!("symbol={symbol}&origClientOrderId={client_id}"),
-            now_ms() + self.clock_offset_ms,
+            now_ms() + self.clock_offset_ms(),
             self.creds.secret_bytes(),
         );
         match self.send_method(Method::Delete, &url, true) {
@@ -821,6 +898,101 @@ impl Execution for Binance {
             _ => Err(malformed("order status", &body)),
         }
     }
+}
+
+impl crate::account::Account for Binance {
+    fn id(&self) -> &'static str {
+        // Matches the market-data side's identifier for the same venue,
+        // so a run's records and its archive file under one name.
+        "binance-perp"
+    }
+
+    fn id_rules(&self) -> crate::broker::IdRules {
+        crate::broker::IdRules::BINANCE
+    }
+
+    fn sync_clock(&mut self) -> Result<i64, VenueError> {
+        Self::sync_clock(self)
+    }
+
+    fn round_trip_ms(&self) -> i64 {
+        Self::round_trip_ms(self)
+    }
+
+    fn instrument(&self, symbol: &str) -> Result<Instrument, String> {
+        let body = self.exchange_info(symbol).map_err(|e| e.to_string())?;
+        let price_scale = integer_field(&body, "pricePrecision").ok_or("no pricePrecision")?;
+        let qty_scale = integer_field(&body, "quantityPrecision").ok_or("no quantityPrecision")?;
+        let price_scale = u8::try_from(price_scale).map_err(|_| "implausible price precision")?;
+        let qty_scale = u8::try_from(qty_scale).map_err(|_| "implausible quantity precision")?;
+        let tick = decimal_field(&body, "tickSize", price_scale).unwrap_or(1);
+        let step = decimal_field(&body, "stepSize", qty_scale).unwrap_or(1);
+        // The venue also refuses orders below a notional floor, and its
+        // message names the floor without naming what the order was worth.
+        // Carried on the instrument so a strategy does not learn it by
+        // being refused.
+        let floor = decimal_field(&body, "notional", 8).unwrap_or(0);
+        Ok(oq_types::Instrument::linear(price_scale, qty_scale)
+            .with_grid(tick, step)
+            .with_min_notional(oq_types::Cash(floor)))
+    }
+
+    fn is_hedged(&self) -> Result<bool, VenueError> {
+        self.is_hedged_account()
+    }
+
+    fn positions(&self, symbol: &str) -> Result<Vec<PositionSnapshot>, VenueError> {
+        Self::positions(self, symbol)
+    }
+
+    fn balances(&self) -> Result<AccountSnapshot, VenueError> {
+        self.account()
+    }
+
+    fn open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>, VenueError> {
+        Self::open_orders(self, symbol)
+    }
+
+    fn open_user_stream(&self) -> Result<UserStream, VenueError> {
+        Self::open_user_stream(self)
+    }
+
+    fn keepalive_user_stream(&self) -> Result<(), VenueError> {
+        Self::keepalive_user_stream(self)
+    }
+
+    fn close_user_stream(&self) -> Result<(), VenueError> {
+        Self::close_user_stream(self)
+    }
+}
+
+/// Parsing helpers for the instrument description, kept beside the only
+/// thing that reads that venue's shape.
+fn integer_field(body: &str, key: &str) -> Option<i64> {
+    let needle = format!("\"{key}\":");
+    let start = body.find(&needle)? + needle.len();
+    let rest = &body[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+fn decimal_field(body: &str, key: &str, scale: u8) -> Option<i64> {
+    let needle = format!("\"{key}\":\"");
+    let start = body.find(&needle)? + needle.len();
+    let rest = &body[start..];
+    let text = &rest[..rest.find('"')?];
+    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+    let mut digits = String::from(whole);
+    let width = usize::from(scale);
+    let mut frac = frac.to_string();
+    frac.truncate(width);
+    while frac.len() < width {
+        frac.push('0');
+    }
+    digits.push_str(&frac);
+    digits.parse().ok()
 }
 
 #[cfg(test)]
@@ -1488,14 +1660,15 @@ mod signing_tests {
     /// on a timeline nothing else in it shares.
     #[test]
     fn venue_time_moves_with_the_measured_offset() {
-        let mut c = Binance::at(Endpoint::Testnet, Credentials::new("k", "s"));
+        let c = Binance::at(Endpoint::Testnet, Credentials::new("k", "s"));
         let unadjusted = c.venue_time_ms();
         assert!(
             (unadjusted - now_ms()).abs() < 1_000,
             "with no offset it should be local time"
         );
 
-        c.clock_offset_ms = -30_000;
+        c.clock_offset_ms
+            .store(-30_000, core::sync::atomic::Ordering::Relaxed);
         let adjusted = c.venue_time_ms();
         assert!(
             (adjusted - (unadjusted - 30_000)).abs() < 1_000,
@@ -1545,5 +1718,70 @@ mod clock {
         let (before, after) = (1_000, 1_800);
         let venue = 2_900; // venue genuinely 1.5 s ahead of the midpoint
         assert_eq!(offset_from(before, venue, after), 1_500);
+    }
+}
+
+#[cfg(test)]
+mod stale_timestamp {
+    use super::{VenueError, is_stale_timestamp};
+
+    fn venue(body: &str) -> VenueError {
+        VenueError::Venue {
+            status: 400,
+            body: body.to_string(),
+        }
+    }
+
+    /// The refusal a client can repair by itself.
+    #[test]
+    fn a_stale_timestamp_is_recognised() {
+        assert!(is_stale_timestamp(&venue(
+            r#"{"code":-1021,"msg":"Timestamp for this request is outside of the recvWindow."}"#
+        )));
+    }
+
+    /// Rate limiting is repaired by waiting, and a retry makes it worse.
+    ///
+    /// Not hypothetical: the run that produced two -1021s also collected
+    /// a -1003 IP ban. Retrying into a rate limiter is how the second
+    /// follows the first.
+    #[test]
+    fn rate_limiting_is_not_retried() {
+        assert!(!is_stale_timestamp(&venue(
+            r#"{"code":-1003,"msg":"Way too many requests; IP banned until 1787144158148."}"#
+        )));
+    }
+
+    /// The one that must never be retried anywhere.
+    ///
+    /// -1007 says the venue does not know whether the request executed.
+    /// Sending it again is how one order becomes two.
+    #[test]
+    fn an_unknown_execution_status_is_not_retried() {
+        assert!(!is_stale_timestamp(&venue(
+            r#"{"code":-1007,"msg":"Timeout waiting for response from backend server. Send status unknown; execution status unknown."}"#
+        )));
+    }
+
+    /// A transport failure never reached the venue's validation, so
+    /// there is no code to read and nothing here can say the clock was
+    /// the problem.
+    #[test]
+    fn a_transport_failure_is_not_a_clock_problem() {
+        assert!(!is_stale_timestamp(&VenueError::Transport(
+            "connection reset".into()
+        )));
+    }
+
+    /// Matched on the code, not the prose.
+    ///
+    /// A body that merely mentions recvWindow — a different error whose
+    /// message names it, or a symbol that happens to contain the digits
+    /// — is not this error.
+    #[test]
+    fn the_prose_alone_does_not_count() {
+        assert!(!is_stale_timestamp(&venue(
+            r#"{"code":-2015,"msg":"Invalid API-key. See recvWindow and -1021 in the docs."}"#
+        )));
     }
 }

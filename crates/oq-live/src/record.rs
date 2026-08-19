@@ -122,9 +122,23 @@ pub enum Record {
         at: Nanos,
         breach: String,
     },
+    /// Positions the venue already held, taken over at startup.
+    ///
+    /// Written once, immediately after the session opens its journal and
+    /// before anything is sent. Until this was emitted the record existed
+    /// — encoded, decoded, rendered by `oq-replay` — with nothing in the
+    /// tree constructing it, so `--adopt-existing` was the one startup
+    /// step that left no trace. That is the step a migration is made of:
+    /// a tool rebuilding "what this system believes it holds" from the
+    /// journal would have come up short by exactly the migrated part.
+    ///
+    /// Each leg is (symbol, side, lots, entry in price ticks). The entry
+    /// is here because a position without its basis is not a position a
+    /// reader can do anything with: no unrealised figure, no cost, no
+    /// comparison against the venue.
     Reconciled {
         at: Nanos,
-        legs: Vec<(String, String, i64)>,
+        legs: Vec<(String, String, i64, i64)>,
     },
 }
 
@@ -222,10 +236,11 @@ impl Record {
             Self::Reconciled { at, legs } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(legs.len()).unwrap_or(0));
-                for (symbol, side, lots) in legs {
+                for (symbol, side, lots, entry) in legs {
                     put_str(&mut out, symbol);
                     put_str(&mut out, side);
                     put_i64(&mut out, *lots);
+                    put_i64(&mut out, *entry);
                 }
             }
         }
@@ -287,7 +302,12 @@ impl Record {
                 let n = take_i64(&mut p)?;
                 let mut legs = Vec::new();
                 for _ in 0..n.max(0) {
-                    legs.push((take_str(&mut p)?, take_str(&mut p)?, take_i64(&mut p)?));
+                    legs.push((
+                        take_str(&mut p)?,
+                        take_str(&mut p)?,
+                        take_i64(&mut p)?,
+                        take_i64(&mut p)?,
+                    ));
                 }
                 Self::Reconciled { at, legs }
             }
@@ -389,8 +409,8 @@ mod tests {
         roundtrip(&Record::Reconciled {
             at: Nanos(11),
             legs: vec![
-                ("ETHUSDT".into(), "LONG".into(), 160),
-                ("ETHUSDT".into(), "SHORT".into(), -40),
+                ("ETHUSDT".into(), "LONG".into(), 160, 250_000),
+                ("ETHUSDT".into(), "SHORT".into(), -40, 251_500),
             ],
         });
     }

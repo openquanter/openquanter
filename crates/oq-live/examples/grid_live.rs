@@ -63,7 +63,6 @@ fn main() -> ExitCode {
     let cfg = RunConfig {
         symbol: value("--symbol").unwrap_or_else(|| "BTCUSDT".to_string()),
         strategy_name: "grid".to_string(),
-        endpoint: oq_gateway::exec::Endpoint::Testnet,
         deployment: Deployment::Testnet,
         minutes: number("--minutes", 30),
         window_ms: number("--window-ms", 1_000),
@@ -87,5 +86,18 @@ fn main() -> ExitCode {
         },
     };
 
-    run(|_| GridTrader::new(), &cfg)
+    // Testnet, and not by a flag: see the refusal above.
+    let creds = match oq_gateway::Credentials::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("credentials      FAILED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let venue: Box<dyn oq_gateway::account::Account> = Box::new(oq_gateway::binance::Binance::at(
+        oq_gateway::exec::Endpoint::Testnet,
+        creds,
+    ));
+
+    run(venue, |_| GridTrader::new(), &cfg)
 }

@@ -36,6 +36,9 @@
 
 use std::process::ExitCode;
 
+use oq_gateway::Credentials;
+use oq_gateway::account::Account;
+use oq_gateway::binance::Binance;
 use oq_gateway::exec::Endpoint;
 use oq_l2feed::venue::Deployment;
 use oq_live::run::{RunConfig, run, smallest_allowed};
@@ -278,7 +281,6 @@ fn main() -> ExitCode {
         broker_code,
         symbol,
         strategy_name: strategy_name.clone(),
-        endpoint,
         deployment,
         minutes: number("--minutes", 5),
         window_ms: number("--window-ms", 1000),
@@ -300,9 +302,22 @@ fn main() -> ExitCode {
         },
     };
 
+    // The venue is built here rather than inside `run`, because which
+    // venue to trade is this binary's decision and `run` is generic over
+    // it. Credentials never travel further than this line.
+    let creds = match Credentials::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("credentials      FAILED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let venue: Box<dyn Account> = Box::new(Binance::at(endpoint, creds));
+
     match strategy_name.as_str() {
-        "observe" => run(|_| Observe { ticks: 0 }, &cfg),
+        "observe" => run(venue, |_| Observe { ticks: 0 }, &cfg),
         "probe" => run(
+            venue,
             |instrument| Probe {
                 confirmed: false,
                 placed: false,
