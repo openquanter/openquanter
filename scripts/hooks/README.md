@@ -41,3 +41,23 @@ an overlay is unaffected.
   > motivation needs a number, use one about the framework or the venue
   > — a latency, a tick count, a feed's quality — never one about a
   > strategy.
+
+## Configured and unable to check
+
+With no `oq.overlay` set the hook exits silently: a machine without an
+overlay has nothing to leak from one.
+
+With `oq.overlay` set and the checker missing it **refuses**, and says
+which path it looked at. That case is not the same as the first one. An
+operator who set the config asked for this protection, and passing
+quietly would hand them a push that looks checked and was not — at the
+moment it is likeliest to matter, since the overlay moving or renaming
+the script is the likely cause.
+
+```
+pre-push: oq.overlay is set to /path/that/moved
+          but /path/that/moved/tools/check_public_leak.py is not there,
+          so nothing was checked.
+          Fix the path, or unset it with:
+              git config --unset oq.overlay
+```
