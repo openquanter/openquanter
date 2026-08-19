@@ -393,10 +393,17 @@ built against.
 
 ```bash
 cargo build --workspace
-cargo test --workspace
+cargo test
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`cargo test` and not `--workspace`: the workspace variant also builds
+`oq-py`, whose tests link against a CPython shared library and fail on
+a machine whose Python does not match. The bindings have their own CI
+job with a pinned interpreter — `cargo clippy -p oq-py` and
+`cargo test -p oq-py` — and running them locally needs that interpreter
+present.
 
 ## License
 

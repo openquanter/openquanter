@@ -15,28 +15,53 @@ margin, backtest, data, parity, statistics — is plain std Rust, which
 `scripts/check-composability.sh` enforces in CI. If you only want the
 engine, `cargo build -p oq-core` pulls nothing.
 
-The command-line tools ship inside those crates rather than as separate
-packages, so there is nothing named `oq-capture` on crates.io to install:
+**`cargo install` does not work yet, and this is the only place that
+says so.** The names on crates.io are `0.0.1` placeholders reserving
+them — `oq-cli` is 1306 bytes against 16K of source — and their own
+published descriptions say the implementation lives in this repository.
+Installing one gets an empty crate and no error, which is worse than a
+missing package.
 
-```bash
-cargo install oq-cli      # oq — one name that finds the rest
-cargo install oq-l2feed   # oq-capture, oq-book-check, oq-trade-check, oq-merge, oq-resequence
-cargo install oq-ingest   # oq-ingest
-cargo install oq-gateway  # oq-recon, oq-order-check
-cargo install oq-live     # oq-trade, oq-belief, oq-replay
-```
-
-`oq` on its own lists every tool with what it is for, and `oq <tool>` runs
-it with the arguments passed through unchanged. It is worth installing
-first: it is the only one that tells you the others exist.
+So build from the checkout. Everything below assumes it:
 
 ```bash
 git clone https://github.com/openquanter/openquanter
 cd openquanter
-cargo test --workspace
+cargo test
 ```
 
-If the tests pass, everything below will work.
+If the tests pass, everything below will work. Measured on a clean
+clone with an empty target directory: 3 s to clone, 34 s for the tests,
+1 s for the first example — 38 s to a backtest, assuming Rust is
+already installed.
+
+`cargo test` and not `cargo test --workspace`. The workspace variant
+also builds `oq-py`, whose tests link against a CPython shared library
+and fail on a machine whose Python does not match — which says nothing
+about this repository and everything about that machine. The Python
+bindings have their own CI job with a pinned interpreter. This page
+said `--workspace` until somebody ran it on a clean clone and got exit
+101 one line above the sentence promising everything below would work.
+
+The command-line tools ship inside the library crates rather than as
+separate packages, so there is nothing named `oq-capture` to look for
+either. Run them with `cargo run`:
+
+```bash
+cargo run --bin oq          # one name that finds the rest
+cargo run --bin oq-capture  # also oq-book-check, oq-trade-check, oq-merge, oq-resequence
+cargo run --bin oq-ingest
+cargo run --bin oq-recon    # also oq-order-check
+cargo run --bin oq-trade    # also oq-belief, oq-replay
+```
+
+`oq` on its own lists every tool with what it is for, and `oq <tool>`
+runs it with the arguments passed through unchanged. It is worth
+running first: it is the only one that tells you the others exist.
+
+When the crates are published for real, `cargo install oq-cli` becomes
+the shorter path and this paragraph goes away.
+
 
 ## 2. Run the first example
 

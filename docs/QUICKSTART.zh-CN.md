@@ -13,27 +13,44 @@ dev-dependency `criterion`。引擎本身——类型、journal、内核、撮�
 数据、parity、统计——是纯 std Rust，这一点由 `scripts/check-composability.sh`
 在 CI 里强制。只要引擎的话，`cargo build -p oq-core` 什么都不拉。
 
-命令行工具随这些 crate 一起发布，不是独立的包，所以 crates.io 上没有一个叫
-`oq-capture` 的东西可装：
+**`cargo install` 现在还不能用，而这是唯一说出这件事的地方。** crates.io 上那些
+名字是 `0.0.1` 的占位发布，只为占名——`oq-cli` 发布出去是 1306 字节，而源码有 16K
+——它们自己的发布描述就写着"实现在仓库里"。装一个会拿到一个空 crate，而且**不会
+报错**，这比包不存在更糟。
 
-```bash
-cargo install oq-cli      # oq —— 一个名字找到其余全部
-cargo install oq-l2feed   # oq-capture、oq-book-check、oq-trade-check、oq-merge、oq-resequence
-cargo install oq-ingest   # oq-ingest
-cargo install oq-gateway  # oq-recon、oq-order-check
-cargo install oq-live     # oq-trade, oq-belief, oq-replay
-```
-
-`oq` 单独执行会列出每个工具和它的用途，`oq <工具>` 则把参数原样转发给它。
-**它值得第一个装：它是唯一一个会告诉你其余工具存在的。**
+所以从检出的仓库构建。下面所有内容都以此为前提：
 
 ```bash
 git clone https://github.com/openquanter/openquanter
 cd openquanter
-cargo test --workspace
+cargo test
 ```
 
-测试通过，下面的内容就都能跑。
+测试通过，下面的内容就都能跑。在一个干净克隆、空 target 目录上实测：克隆 3 秒、
+测试 34 秒、第一个示例 1 秒——**38 秒到一次回测**，前提是 Rust 已装好。
+
+是 `cargo test`，不是 `cargo test --workspace`。带 `--workspace` 会一并构建
+`oq-py`，它的测试要链接 CPython 的共享库，在 Python 版本对不上的机器上会失败
+——那说明的是那台机器，不是这个仓库。Python 绑定有自己的 CI job 和钉住的解释器。
+这一页此前写的就是 `--workspace`，直到有人在干净克隆上跑了一遍，在"下面的内容
+就都能跑"这句话的上一行拿到退出码 101。
+
+命令行工具随库 crate 一起，不是独立的包，所以也没有一个叫 `oq-capture` 的东西
+可找。用 `cargo run` 跑：
+
+```bash
+cargo run --bin oq          # 一个名字找到其余全部
+cargo run --bin oq-capture  # 另有 oq-book-check、oq-trade-check、oq-merge、oq-resequence
+cargo run --bin oq-ingest
+cargo run --bin oq-recon    # 另有 oq-order-check
+cargo run --bin oq-trade    # 另有 oq-belief、oq-replay
+```
+
+`oq` 单独执行会列出每个工具和它的用途，`oq <工具>` 则把参数原样转发给它。
+**它值得第一个跑：它是唯一一个会告诉你其余工具存在的。**
+
+等这些 crate 真正发布之后，`cargo install oq-cli` 会成为更短的那条路，这一段就
+可以删掉。
 
 ## 2. 跑第一个示例
 
