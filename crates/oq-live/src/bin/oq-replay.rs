@@ -128,7 +128,14 @@ fn main() -> ExitCode {
                 println!("refused {}  {breach}", at.0);
             }
             Some(Record::Reconciled { at, legs }) => {
+                // The legs individually, not a count. This record is what
+                // a migration leaves behind, and "3 legs" does not tell a
+                // reader whether the position this run took over is the
+                // position the old one handed across.
                 println!("reconciled {}  {} leg(s)", at.0, legs.len());
+                for (symbol, side, lots, entry) in legs {
+                    println!("           {symbol} {side} {lots} lots at {entry}");
+                }
             }
             // A record this build does not know, or the torn tail of a
             // process that died mid-write. Counted, because a rising

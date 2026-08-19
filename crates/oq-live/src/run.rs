@@ -333,26 +333,19 @@ where
         // balance nobody read would report an account that is not this.
         starting_balance,
     );
-    for p in &positions {
-        let amount = p.amount;
-        if amount != 0.0 {
-            #[allow(clippy::cast_possible_truncation)]
-            let lots = oq_types::QtyLots(
-                (amount.abs() * 10f64.powi(i32::from(instrument.qty_scale))) as i64,
-            );
-            #[allow(clippy::cast_possible_truncation)]
-            let entry = oq_types::PriceTicks(
-                (p.entry_price * 10f64.powi(i32::from(instrument.price_scale))) as i64,
-            );
-            let side = if amount > 0.0 { Side::Buy } else { Side::Sell };
-            books.adopt(side, lots, entry, Nanos(now_ns()));
-            println!(
-                "adopted          {} {} lots at {}",
-                if amount > 0.0 { "long" } else { "short" },
-                lots.0,
-                entry.0
-            );
-        }
+    // Kept so the adoption can be recorded once the journal exists.
+    // Adopting is an in-memory act and has to happen here, before the
+    // startup check; recording it has to happen after the writer opens.
+    // Conflating the two is what left this step invisible.
+    let adopted = adopted_legs(&positions, &instrument, &symbol);
+    for (side, lots, entry) in adopted_lots(&positions, &instrument) {
+        books.adopt(side, lots, entry, Nanos(now_ns()));
+        println!(
+            "adopted          {} {} lots at {}",
+            if side == Side::Buy { "long" } else { "short" },
+            lots.0,
+            entry.0
+        );
     }
 
     // Before anything is recorded, read what the last run left. An order
@@ -434,6 +427,13 @@ where
             }
         }
     };
+
+    // The one startup step that carries state across a migration, and
+    // until this call it was the one step the journal could not see. A
+    // reader rebuilding what this run believes it holds would have come
+    // up short by exactly the positions that were migrated.
+    let mut session = session;
+    session.record_reconciled(Nanos(now_ns()), adopted);
 
     let stream = match session.venue().open_user_stream() {
         Ok(s) => s,
@@ -852,4 +852,138 @@ fn fill_of(u: &oq_gateway::OrderUpdate, instrument: &Instrument) -> Option<oq_ty
             oq_types::Liquidity::Taker
         },
     })
+}
+
+/// Venue positions, converted to this instrument's lots and ticks.
+///
+/// Pulled out of `run` so the conversion is testable: `run` needs a
+/// venue and cannot be called from a test, and the arithmetic here is
+/// where a real mistake would hide — a scale applied to the wrong field,
+/// or a short adopted as a long.
+fn adopted_lots(
+    positions: &[oq_gateway::binance::PositionSnapshot],
+    instrument: &Instrument,
+) -> Vec<(Side, QtyLots, PriceTicks)> {
+    positions
+        .iter()
+        .filter(|p| p.amount != 0.0)
+        .map(|p| {
+            #[allow(clippy::cast_possible_truncation)]
+            let lots =
+                QtyLots((p.amount.abs() * 10f64.powi(i32::from(instrument.qty_scale))) as i64);
+            #[allow(clippy::cast_possible_truncation)]
+            let entry =
+                PriceTicks((p.entry_price * 10f64.powi(i32::from(instrument.price_scale))) as i64);
+            let side = if p.amount > 0.0 {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
+            (side, lots, entry)
+        })
+        .collect()
+}
+
+/// The same positions, in the shape the journal records them.
+///
+/// Signed lots rather than a side plus a magnitude, because a reader
+/// summing a column should get the net without having to know the
+/// convention — and the side string is kept beside it so a hedged
+/// account's two legs stay distinguishable when they net to zero.
+fn adopted_legs(
+    positions: &[oq_gateway::binance::PositionSnapshot],
+    instrument: &Instrument,
+    symbol: &str,
+) -> Vec<(String, String, i64, i64)> {
+    adopted_lots(positions, instrument)
+        .into_iter()
+        .map(|(side, lots, entry)| {
+            let (name, signed) = if side == Side::Buy {
+                ("LONG", lots.0)
+            } else {
+                ("SHORT", -lots.0)
+            };
+            (symbol.to_string(), name.to_string(), signed, entry.0)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod adoption {
+    use super::{adopted_legs, adopted_lots};
+    use oq_gateway::binance::PositionSnapshot;
+    use oq_types::{Instrument, Side};
+
+    fn leg(amount: f64, entry: f64) -> PositionSnapshot {
+        PositionSnapshot {
+            symbol: "BTCUSDT".into(),
+            position_side: if amount > 0.0 { "LONG" } else { "SHORT" }.into(),
+            amount,
+            entry_price: entry,
+            unrealized: 0.0,
+        }
+    }
+
+    /// Quantity uses the quantity scale and price uses the price scale.
+    ///
+    /// Swapping them is the mistake that reads as a plausible number:
+    /// at 2 and 4 decimal places both conversions produce something in
+    /// the right order of magnitude, and the position would simply be
+    /// wrong by a hundredfold in one field.
+    #[test]
+    fn each_field_uses_its_own_scale() {
+        let got = adopted_lots(&[leg(0.016, 63_735.2)], &Instrument::linear(2, 4));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1.0, 160, "0.016 at four decimal places");
+        assert_eq!(got[0].2.0, 6_373_520, "63735.2 at two decimal places");
+    }
+
+    /// A short is adopted as a short.
+    #[test]
+    fn the_side_follows_the_sign() {
+        let i = Instrument::linear(2, 4);
+        assert_eq!(adopted_lots(&[leg(0.016, 1.0)], &i)[0].0, Side::Buy);
+        assert_eq!(adopted_lots(&[leg(-0.016, 1.0)], &i)[0].0, Side::Sell);
+    }
+
+    /// A flat leg is not a position, and recording it as one would put a
+    /// zero-sized holding in the journal for a reader to explain.
+    #[test]
+    fn a_flat_leg_is_not_adopted() {
+        assert!(adopted_lots(&[leg(0.0, 63_735.2)], &Instrument::linear(2, 4)).is_empty());
+    }
+
+    /// The journal's lots are signed, so summing the column gives the net.
+    #[test]
+    fn the_recorded_lots_carry_their_sign() {
+        let legs = adopted_legs(
+            &[leg(0.016, 60_000.0), leg(-0.004, 61_000.0)],
+            &Instrument::linear(2, 4),
+            "BTCUSDT",
+        );
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].1, "LONG");
+        assert_eq!(legs[0].2, 160);
+        assert_eq!(legs[1].1, "SHORT");
+        assert_eq!(legs[1].2, -40, "a short is negative in the record");
+        let net: i64 = legs.iter().map(|l| l.2).sum();
+        assert_eq!(net, 120, "the column sums to the net position");
+    }
+
+    /// Both legs of a hedged account survive even when they net to zero.
+    #[test]
+    fn a_hedged_pair_that_nets_to_zero_is_still_two_legs() {
+        let legs = adopted_legs(
+            &[leg(0.016, 60_000.0), leg(-0.016, 61_000.0)],
+            &Instrument::linear(2, 4),
+            "BTCUSDT",
+        );
+        assert_eq!(
+            legs.len(),
+            2,
+            "a net of zero is not the absence of a position"
+        );
+        assert_eq!(legs.iter().map(|l| l.2).sum::<i64>(), 0);
+        assert_ne!(legs[0].3, legs[1].3, "each leg keeps its own basis");
+    }
 }
