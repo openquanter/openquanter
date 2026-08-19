@@ -254,6 +254,28 @@ where
     let id_prefix = scheme.owned_prefix();
     let config_prefix = id_prefix.clone();
 
+    // Claimed at the earliest point the key is known, and before startup
+    // reconciliation rather than after it.
+    //
+    // After would be too late in a way that hides itself: a second
+    // process shares this prefix, so `owns` says the first one's resting
+    // orders are *its* orders, and reconciliation would read them as
+    // leftovers of a previous run of itself and set about managing them.
+    // The refusal has to happen before anything looks at the account.
+    //
+    // Held for the rest of `run`. The binding matters — `let _ = ...`
+    // drops it immediately and releases the lock on the line that takes
+    // it.
+    let interlock =
+        match crate::interlock::Interlock::claim(&format!("{deployment:?}"), &symbol, &id_prefix) {
+            Ok(held) => held,
+            Err(taken) => {
+                eprintln!("interlock        REFUSED: {taken}");
+                return ExitCode::FAILURE;
+            }
+        };
+    println!("interlock        held ({})", interlock.path().display());
+
     let config = SessionConfig {
         symbol: symbol.clone(),
         instrument,

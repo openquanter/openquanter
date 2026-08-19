@@ -41,6 +41,7 @@
 pub mod book;
 pub mod books;
 pub mod feed;
+pub mod interlock;
 pub mod latency;
 pub mod metrics;
 pub mod record;

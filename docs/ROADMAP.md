@@ -185,7 +185,8 @@ input this project cannot reach, the second has not been written.
 | Live | **Books kept by the kernel** (one implementation for live and backtest) | Built |
 | Live | **A strategy learns whether the venue took its order** | Built — `Strategy::on_placed`, called from the backtest loop *and* the live trader, so a strategy written against one runs on the other |
 | Live | **A runnable strategy against a venue** | Built — `oq-live`'s `grid_live` example; `observe` sends nothing and `probe` is a diagnostic, so before it the repository had no way to run a strategy on a venue at all |
-| Live | Graceful restart, one process per account | Partial (recovery exists; orchestration does not) |
+| Live | **One process per account, enforced** | Built — an interlock on `(deployment, symbol, id_prefix)`, claimed before startup reconciliation. Host-local, and says so: two hosts against one account is what the `foreign_orders` metric is for |
+| Live | Graceful restart | Partial — signal handling, resting orders cancelled, recovery on the way back up; restarting the process is deployment and stays out |
 | Attribution | **Gap decomposed by cause, with an unexplained residual** | Built |
 | Attribution | Shadow → evidence → report, end to end | Built |
 | Observability | Latency histograms | Built |
