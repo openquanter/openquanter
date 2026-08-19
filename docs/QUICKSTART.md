@@ -23,7 +23,7 @@ cargo install oq-cli      # oq — one name that finds the rest
 cargo install oq-l2feed   # oq-capture, oq-book-check, oq-trade-check, oq-merge, oq-resequence
 cargo install oq-ingest   # oq-ingest
 cargo install oq-gateway  # oq-recon, oq-order-check
-cargo install oq-live     # oq-trade
+cargo install oq-live     # oq-trade, oq-belief, oq-replay
 ```
 
 `oq` on its own lists every tool with what it is for, and `oq <tool>` runs

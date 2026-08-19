@@ -21,7 +21,7 @@ cargo install oq-cli      # oq —— 一个名字找到其余全部
 cargo install oq-l2feed   # oq-capture、oq-book-check、oq-trade-check、oq-merge、oq-resequence
 cargo install oq-ingest   # oq-ingest
 cargo install oq-gateway  # oq-recon、oq-order-check
-cargo install oq-live     # oq-trade
+cargo install oq-live     # oq-trade, oq-belief, oq-replay
 ```
 
 `oq` 单独执行会列出每个工具和它的用途，`oq <工具>` 则把参数原样转发给它。
