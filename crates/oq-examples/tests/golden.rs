@@ -347,3 +347,145 @@ fn print_goldens() {
         r.fills.iter().map(|f| f.price.0).sum::<i64>()
     );
 }
+
+// ---------------------------------------------------------------------
+// The classics catalogue
+// ---------------------------------------------------------------------
+//
+// These were not pinned when the catalogue shipped, and it cost exactly
+// what this file exists to prevent. Changing `GridTrader` to move its
+// ladder on fills rather than on submission — a correctness fix — moved
+// the grid's levered result from 4.06 to 4.46 and its margin-free arm
+// from −513.74 to −508.12. Both numbers are quoted in QUICKSTART, in two
+// languages, and nothing failed. The whole suite passed and the
+// documentation was simply wrong from that commit onward.
+//
+// So the catalogue is pinned on the same terms as everything else here:
+// a failure means either the behaviour drifted or the change was
+// intended, and an intended change updates these constants **and** the
+// documentation in one commit.
+
+use oq_examples::classics::{
+    BollingerReversion, DonchianBreakout, DualThrust, GridTrader, MacdTrend, RsiReversion,
+};
+
+/// The example's own configuration, duplicated deliberately.
+///
+/// Importing it would make this test agree with the example by
+/// construction, and a golden that cannot disagree with the thing it
+/// pins is decoration. The one thing that must match is the margin
+/// tracking, because a run without it reports no margin at all.
+fn arms<S: Strategy, F: Fn() -> S>(
+    build: F,
+    ticks: &[oq_engine::Tick],
+    balance: i64,
+) -> (f64, f64) {
+    let base = RunConfig::new(
+        InstrumentId::new(1),
+        Contract::new(10_000),
+        TierTable::example_btcusdt(),
+        Cash::from_units(balance),
+    )
+    .tracking_margin();
+    let enforced = run(
+        &base.clone().with_margin(MarginMode::Enforced),
+        &mut build(),
+        ticks,
+    );
+    let ignored = run(&base.with_margin(MarginMode::Ignored), &mut build(), ticks);
+    (
+        enforced.final_equity.0 as f64 / 100_000_000.0,
+        ignored.final_equity.0 as f64 / 100_000_000.0,
+    )
+}
+
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.005
+}
+
+/// The numbers QUICKSTART quotes, to the cent it prints them at.
+///
+/// The grid specifically: it is the row the documentation singles out,
+/// and the only levered run in the catalogue where the two arms differ
+/// by three orders of magnitude.
+#[test]
+fn the_grid_levered_matches_what_the_documentation_quotes() {
+    let market = crash_series(11, 3_000, 900, 0.45);
+    let (enforced, free) = arms(GridTrader::new, &market, 60);
+    assert!(
+        close(enforced, 4.46),
+        "grid, margin enforced: expected 4.46, got {enforced:.2}"
+    );
+    assert!(
+        close(free, -508.12),
+        "grid, margin-free: expected -508.12, got {free:.2}"
+    );
+}
+
+/// Every levered row, so a change to any strategy is caught by the
+/// strategy it changed rather than by whichever one the documentation
+/// happened to quote.
+#[test]
+fn every_levered_row_is_pinned() {
+    let market = crash_series(11, 3_000, 900, 0.45);
+    let rows: [(&str, (f64, f64)); 6] = [
+        ("rsi-reversion", (1.19, -213.73)),
+        ("macd-trend", (1.21, -1.88)),
+        ("bollinger-reversion", (1.33, -214.20)),
+        ("donchian-breakout", (245.19, 245.19)),
+        ("grid", (4.46, -508.12)),
+        ("dual-thrust", (248.72, 248.72)),
+    ];
+    let actual = [
+        arms(RsiReversion::new, &market, 60),
+        arms(MacdTrend::new, &market, 60),
+        arms(BollingerReversion::new, &market, 60),
+        arms(DonchianBreakout::new, &market, 60),
+        arms(GridTrader::new, &market, 60),
+        arms(DualThrust::new, &market, 60),
+    ];
+    for ((name, (want_e, want_f)), (got_e, got_f)) in rows.iter().zip(actual) {
+        assert!(
+            close(*want_e, got_e),
+            "{name}, margin enforced: expected {want_e:.2}, got {got_e:.2}"
+        );
+        assert!(
+            close(*want_f, got_f),
+            "{name}, margin-free: expected {want_f:.2}, got {got_f:.2}"
+        );
+    }
+}
+
+/// The catalogue's headline finding, as a property rather than a
+/// number: unlevered, the two arms agree for every strategy.
+///
+/// Pinned separately from the values because it is the sentence the
+/// documentation actually makes — *a margin model is invisible until
+/// leverage is real* — and it would survive every constant above
+/// changing. If it ever fails, the claim is wrong rather than stale.
+#[test]
+fn unlevered_the_two_arms_agree_for_all_six() {
+    let market = crash_series(11, 3_000, 900, 0.45);
+    let all = [
+        ("rsi-reversion", arms(RsiReversion::new, &market, 10_000)),
+        ("macd-trend", arms(MacdTrend::new, &market, 10_000)),
+        (
+            "bollinger-reversion",
+            arms(BollingerReversion::new, &market, 10_000),
+        ),
+        (
+            "donchian-breakout",
+            arms(DonchianBreakout::new, &market, 10_000),
+        ),
+        ("grid", arms(GridTrader::new, &market, 10_000)),
+        ("dual-thrust", arms(DualThrust::new, &market, 10_000)),
+    ];
+    for (name, (enforced, free)) in all {
+        assert!(
+            close(enforced, free),
+            "{name} unlevered: the arms parted, {enforced:.2} vs {free:.2}. \
+             Either a strategy now liquidates without leverage, or the claim \
+             that a margin model is invisible until leverage is real is wrong."
+        );
+    }
+}
