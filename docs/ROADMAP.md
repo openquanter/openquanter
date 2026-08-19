@@ -194,7 +194,7 @@ input this project cannot reach, the second has not been written.
 | Observability | **Structured metrics, alert hooks** | Built — a snapshot rendered in the line-oriented form collectors read, and alerts as *judgements* rather than notifications: nothing here sends |
 | Simulation | Gateway fuzzing (disconnects, reordering, duplication, partial fills) | Built |
 | Cutover | Position-carrying playbook | **Written, never rehearsed**; its §6 lists what is missing before one can be |
-| Cutover | Account record/compare tooling (a rehearsal precondition) | Built |
+| Cutover | Account record/compare tooling (a rehearsal precondition) | Built — both halves: `oq-recon` compares the **venue** against a record, `oq-belief` compares the **new process's own journal** against the same one |
 | Entry trigger | 1. Core released ≥ 6 months, no open P0/P1 | **Not met** |
 | Entry trigger | 2. Shadow run with every divergence attributed | **Not met** (the instrument is ready; no long run yet) |
 | Entry trigger | 3. Two successful testnet cutover rehearsals | **Not met** |

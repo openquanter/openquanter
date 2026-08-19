@@ -139,11 +139,23 @@ was not told about, which is the correct default and the wrong one here.
 - **Abort:** stop the new system, restart the old one with
   `--adopt-existing`. The position has not changed; only which process
   is watching it has.
-- **Check before proceeding:** `oq-recon <SYMBOL> --against <the step 2
-  file>` must exit zero. The new system's view must equal the record
-  *exactly*. A difference in average entry is not cosmetic — it
-  is the number every subsequent P&L and every stop distance is computed
-  from.
+- **Check before proceeding:** two commands, and both must exit zero.
+  They ask different questions, and only one of them used to be
+  answerable.
+
+  ```bash
+  oq-recon  <SYMBOL>  --against <the step 2 file>   # has the venue moved
+  oq-belief <JOURNAL> --against <the step 2 file>   # does the new process agree
+  ```
+
+  The first reads the venue and catches the position changing under you.
+  The second reads the new process's own journal and catches it
+  *misreading* a position that did not change — which is what this step
+  actually risks, because it hands a live position to something that has
+  never seen it. A difference in average entry is not cosmetic: it is
+  the number every subsequent P&L and every stop distance is computed
+  from, and a process that adopted it wrong is wrong about all of them
+  while agreeing with the venue about the size.
 
 ### Step 6 — Re-establish protection
 
@@ -206,10 +218,20 @@ were ready.
   later reading, exiting non-zero on any difference — a leg that moved, an
   average entry that moved, an order that appeared or vanished. The
   timestamp is deliberately not compared, because the second reading is
-  later by construction. What is still missing is the same tool pointed at
-  the *new system's* view rather than the venue's: today step 5 compares
-  the venue against the record, which catches the position changing but not
-  the new system misreading it.
+  later by construction.
+
+  The other half — the same comparison pointed at the *new system's*
+  view rather than the venue's — is now `oq-belief <JOURNAL> --against
+  FILE`. It reads the journal, reconstructs what the process believed it
+  held, and renders it in the format `--record` writes so the two diff
+  against one file. It talks to no venue and needs no credentials.
+
+  It could not be built until adopted positions were journalled: a run
+  started with `--adopt-existing` used to write nothing about what it
+  took over, so replaying its journal reconstructed as flat — short by
+  exactly the position a cutover carries. A journal from before that
+  change reports `adoption no record` rather than claiming the account
+  was empty.
 - **No timing data.** Every "keep it short" here is unquantified. The
   first rehearsal's main product is how long the exposed interval
   actually is.
