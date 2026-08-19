@@ -213,7 +213,7 @@ input this project cannot reach, the second has not been written.
 | L1 | **Feed latency** | Deliberately not in the engine — it belongs to the event producer |
 | L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
 | L2 | Book reconstruction, snapshot reconciliation, gap handling | **Not built** |
-| Validation | Stylized-facts test set | **Not built** |
+| Validation | Stylized-facts test set | Built for the **generated** markets — `oq_stats::StylizedFacts` measures four facts, the fixtures are pinned against them, and the finding is that most do not hold (see QUICKSTART). Order-flow autocorrelation and the real-data half need a capture and are not done |
 | Validation | L0 / L0+margin / L1 comparative report | Built — `tiers` covers all three, and shows the rungs are **not** ordered by pessimism |
 
 ### M5 — AI extensions

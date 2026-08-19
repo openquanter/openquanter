@@ -14,6 +14,7 @@ oq-data.workspace = true
 oq-backtest.workspace = true
 oq-engine.workspace = true
 oq-margin.workspace = true
+oq-stats.workspace = true
 oq-types.workspace = true
 
 [dev-dependencies]
