@@ -1,0 +1,37 @@
+#!/bin/sh
+# Refuse to push anything belonging to a private overlay.
+#
+# This repository is public and an overlay repository carries a strategy
+# that is not. The failure this guards against is not copy-paste — it is
+# a comment here motivating framework work by quoting the overlay's
+# numbers. That happened: a window length and an entry threshold, in
+# prose, with no identifier and no digit for a reviewer to catch.
+#
+# The check itself is NOT in this repository, and that is deliberate. A
+# denylist of private identifiers, kept here so this hook could read it,
+# would name every parameter it protects. So the overlay owns the check,
+# derives its patterns from its own source, and publishes none of them.
+# This hook knows only where to ask.
+#
+#   git config oq.overlay /path/to/the/overlay
+#   ln -s ../../scripts/hooks/pre-push .git/hooks/pre-push
+#
+# With no overlay configured this exits silently: a machine that does not
+# have one has nothing to leak from it.
+overlay=$(git config --get oq.overlay 2>/dev/null)
+[ -n "$overlay" ] || exit 0
+
+check="$overlay/tools/check_public_leak.py"
+[ -f "$check" ] || exit 0
+
+if ! python3 "$check" "$(git rev-parse --show-toplevel)"; then
+  echo ""
+  echo "pre-push: refusing. The above belongs to the private overlay."
+  echo ""
+  echo "  A comment here may describe a problem the framework has."
+  echo "  It may not describe a strategy's parameters, in figures or in"
+  echo "  words. If motivation needs a number, use one about the"
+  echo "  framework or the venue -- a latency, a tick count, a feed's"
+  echo "  quality -- never one about a strategy."
+  exit 1
+fi
