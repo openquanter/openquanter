@@ -19,9 +19,9 @@ use core::time::Duration;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use oq_gateway::binance::Binance;
-use oq_gateway::exec::{Endpoint, Execution};
-use oq_gateway::{Credentials, StreamOutcome, UserEvent, UserStreamReader};
+use oq_gateway::account::Account;
+use oq_gateway::exec::Execution;
+use oq_gateway::{StreamOutcome, UserEvent, UserStreamReader};
 use oq_ingest::Aggregator;
 use oq_l2feed::session::{install_signal_handlers, now_ns, shutdown_requested};
 use oq_l2feed::venue::Deployment;
@@ -42,7 +42,6 @@ pub struct RunConfig {
     pub symbol: String,
     /// Printed in the banner. The run does not otherwise use it.
     pub strategy_name: String,
-    pub endpoint: Endpoint,
     pub deployment: Deployment,
     pub minutes: i64,
     pub window_ms: i64,
@@ -90,7 +89,7 @@ fn program() -> String {
 /// instrument is discovered here — precision and grid come from the
 /// deployment being traded, and a strategy that needs them cannot be
 /// constructed before this function has asked.
-pub fn run<S, F>(make_strategy: F, cfg: &RunConfig) -> ExitCode
+pub fn run<S, F>(mut venue: Box<dyn Account>, make_strategy: F, cfg: &RunConfig) -> ExitCode
 where
     S: Strategy,
     F: FnOnce(&Instrument) -> S,
@@ -99,24 +98,14 @@ where
     // unchanged. Rewriting every use to `cfg.x` would have edited eight
     // hundred lines to move them, and a move that edits is not a move.
     let symbol = cfg.symbol.clone();
-    let endpoint = cfg.endpoint;
     let deployment = cfg.deployment;
     let minutes = cfg.minutes;
     let window_ns = cfg.window_ms * 1_000_000;
-
-    let creds = match Credentials::from_env() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{}: {e}", program());
-            return ExitCode::FAILURE;
-        }
-    };
 
     println!("deployment       {deployment:?}");
     println!("symbol           {symbol}");
     println!("strategy         {}", cfg.strategy_name);
 
-    let mut venue = Binance::at(endpoint, creds);
     if let Err(e) = venue.sync_clock() {
         eprintln!("clock            FAILED: {e}");
         return ExitCode::FAILURE;
@@ -126,25 +115,21 @@ where
     // order path has to respect, and connecting it before anything is
     // sent means a feed that will not open stops the run before it
     // trades rather than after.
-    let (mut market, feed_venue) = match MarketData::open(
-        "binance-perp",
-        deployment,
-        &symbol,
-        Duration::from_millis(200),
-    ) {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!("market data      FAILED: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let (mut market, feed_venue) =
+        match MarketData::open(venue.id(), deployment, &symbol, Duration::from_millis(200)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("market data      FAILED: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
     // Precision *and* grid come from the deployment being traded, not
     // from the table compiled in. The tables exist so a replay gives
     // the same answer on any machine on any day; the question here is
     // the opposite one — what does this venue accept right now — and
     // the deployments disagree: one of them publishes four decimal
     // places of quantity where the other publishes three.
-    let instrument = match instrument_of(&venue, &symbol) {
+    let instrument = match venue.instrument(&symbol) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("instrument       FAILED: {e}");
@@ -156,7 +141,7 @@ where
         instrument.price_scale, instrument.price_tick, instrument.qty_scale, instrument.qty_step
     );
 
-    let hedged = match venue.is_hedged_account() {
+    let hedged = match venue.is_hedged() {
         Ok(h) => h,
         Err(e) => {
             eprintln!("position mode    FAILED: {e}");
@@ -177,7 +162,7 @@ where
     };
     // The venue's own number. Books opened at a configured balance would
     // report an equity curve about a different account.
-    let starting_balance = match venue.account() {
+    let starting_balance = match venue.balances() {
         Ok(a) => {
             println!(
                 "balance          {:.2} (wallet, from the venue)",
@@ -222,16 +207,10 @@ where
     // process's own orders. `IdScheme::owned_prefix` is that composition
     // in one place rather than two.
     let scheme = match &cfg.broker_code {
-        None => oq_gateway::broker::IdScheme::new(
-            cfg.id_prefix.clone(),
-            oq_gateway::broker::IdRules::BINANCE,
-        ),
+        None => oq_gateway::broker::IdScheme::new(cfg.id_prefix.clone(), venue.id_rules()),
         Some(code) => match oq_gateway::broker::BrokerCode::new(code.clone()) {
-            Ok(c) => oq_gateway::broker::IdScheme::new(
-                cfg.id_prefix.clone(),
-                oq_gateway::broker::IdRules::BINANCE,
-            )
-            .map(|s| s.with_broker(c)),
+            Ok(c) => oq_gateway::broker::IdScheme::new(cfg.id_prefix.clone(), venue.id_rules())
+                .map(|s| s.with_broker(c)),
             Err(e) => {
                 eprintln!("broker code      REFUSED: {e}");
                 return ExitCode::FAILURE;
@@ -707,7 +686,7 @@ trait TraderLike {
     fn halt(&self, why: &str);
 }
 
-impl<S: Strategy> TraderLike for Trader<S, Binance> {
+impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn apply(&mut self, u: &oq_gateway::OrderUpdate) -> bool {
         self.session_mut().apply(u)
     }
@@ -809,54 +788,6 @@ pub fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
     let need = i128::from(instrument.min_notional.0) * 11 / 10;
     let lots = (need + per_lot - 1) / per_lot;
     QtyLots(i64::try_from(lots).unwrap_or(1).max(1))
-}
-
-/// Precision and grid for `symbol`, from this deployment.
-fn instrument_of(venue: &Binance, symbol: &str) -> Result<oq_types::Instrument, String> {
-    let body = venue.exchange_info(symbol).map_err(|e| e.to_string())?;
-    let price_scale = integer_field(&body, "pricePrecision").ok_or("no pricePrecision")?;
-    let qty_scale = integer_field(&body, "quantityPrecision").ok_or("no quantityPrecision")?;
-    let price_scale = u8::try_from(price_scale).map_err(|_| "implausible price precision")?;
-    let qty_scale = u8::try_from(qty_scale).map_err(|_| "implausible quantity precision")?;
-    let tick = decimal_field(&body, "tickSize", price_scale).unwrap_or(1);
-    let step = decimal_field(&body, "stepSize", qty_scale).unwrap_or(1);
-    // The venue also refuses orders below a notional floor, and its
-    // message names the floor without naming what the order was worth.
-    // Carried on the instrument so a strategy does not learn it by
-    // being refused.
-    let floor = decimal_field(&body, "notional", 8).unwrap_or(0);
-    Ok(oq_types::Instrument::linear(price_scale, qty_scale)
-        .with_grid(tick, step)
-        .with_min_notional(Cash(floor)))
-}
-
-/// An unquoted integer field.
-fn integer_field(body: &str, key: &str) -> Option<i64> {
-    let needle = format!("\"{key}\":");
-    let start = body.find(&needle)? + needle.len();
-    let rest = &body[start..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-/// A quoted decimal string as an integer count at `scale`.
-fn decimal_field(body: &str, key: &str, scale: u8) -> Option<i64> {
-    let needle = format!("\"{key}\":\"");
-    let start = body.find(&needle)? + needle.len();
-    let rest = &body[start..];
-    let text = &rest[..rest.find('"')?];
-    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
-    let mut digits = String::from(whole);
-    let width = usize::from(scale);
-    let mut frac = frac.to_string();
-    frac.truncate(width);
-    while frac.len() < width {
-        frac.push('0');
-    }
-    digits.push_str(&frac);
-    digits.parse().ok()
 }
 
 /// The fill inside an order update, when there is one.
