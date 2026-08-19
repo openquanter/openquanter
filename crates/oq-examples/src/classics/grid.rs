@@ -132,6 +132,16 @@ impl oq_backtest::Strategy for GridTrader {
         }
     }
 
+    /// Note what this does *not* handle: a submission nobody got an
+    /// answer to. Those never reach here — the host does not report an
+    /// unresolved placement as a refusal — so `pending` stays set and
+    /// the grid stops placing rungs until the fill arrives or the run
+    /// ends.
+    ///
+    /// That stall is the intended outcome. A grid that stopped is a
+    /// grid an operator can look at; a grid that assumed an unanswered
+    /// rung was dead and placed another is holding twice what it thinks
+    /// it holds, and it will keep compounding that on every rung.
     fn on_placed(&mut self, id: OrderId, accepted: bool) {
         // Refused. Leave the ladder exactly where it was, so the same
         // condition places the same rung on the next tick — which is

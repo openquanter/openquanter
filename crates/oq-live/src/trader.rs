@@ -33,8 +33,21 @@ use crate::session::{Session, Submission};
 pub enum Outcome {
     /// An order was sent. Carries the strategy's id and the venue's.
     Sent { local: OrderId, client_id: String },
-    /// The gate or the venue refused it.
+    /// The gate or the venue refused it. The order does not exist.
     Refused { local: OrderId, why: String },
+    /// Sent, and nobody knows whether it landed.
+    ///
+    /// Separate from `Refused` because they oblige opposite actions. A
+    /// refusal is final and the order can be replaced; an unresolved
+    /// submission may be resting right now, and replacing it is the one
+    /// move that turns *maybe one order* into *certainly two*.
+    ///
+    /// It was folded into `Refused` until 2026-08-19, which meant
+    /// `report_placements` — whose own comment says an unresolved
+    /// placement must not be reported as a refusal — reported every one
+    /// of them as exactly that. The comment described a variant that did
+    /// not exist, so the guard it described could never fire.
+    Unresolved { local: OrderId, why: String },
     /// A cancel naming an order this process has no client id for.
     ///
     /// Reported rather than ignored: it means the strategy and this
@@ -106,7 +119,9 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 Outcome::Refused { local, .. } => self.strategy.on_placed(*local, false),
                 // Unresolved, unknown, cancelled: not an answer about
                 // whether this submission is resting.
-                _ => {}
+                Outcome::Unresolved { .. }
+                | Outcome::UnknownOrder(_)
+                | Outcome::Cancelled { .. } => {}
             }
         }
     }
@@ -218,9 +233,8 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 local,
                 why: format!("{b:?}"),
             },
-            Submission::Rejected(why) | Submission::Unresolved(why) => {
-                Outcome::Refused { local, why }
-            }
+            Submission::Rejected(why) => Outcome::Refused { local, why },
+            Submission::Unresolved(why) => Outcome::Unresolved { local, why },
         }
     }
 }
