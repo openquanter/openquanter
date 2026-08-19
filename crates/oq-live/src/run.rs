@@ -508,6 +508,11 @@ where
 
     let mut trader = Trader::new(make_strategy(&instrument), session);
 
+    // Stamped before the loop so the fee query at the end covers exactly
+    // this run. Asking for "everything" would sum a previous run's fees
+    // into this one's attribution, which is the sort of number that
+    // looks plausible and is somebody else's.
+    let started_ms = now_ns() / 1_000_000;
     install_signal_handlers();
     let deadline = Instant::now() + Duration::from_secs(60 * u64::try_from(minutes).unwrap_or(5));
     println!("running          until {minutes} minutes elapse or a signal arrives");
@@ -692,6 +697,18 @@ where
     // where it differs. Printed even when nothing traded: "no divergence
     // because no trade" is a different statement from "no divergence",
     // and only one of them is evidence.
+    // Asked once, at the end, over the window this run covered. A
+    // failure is reported and not fatal: the run is over, and refusing
+    // to print the rest of the report because one component could not be
+    // read would lose the components that could.
+    let shadow_fees = shadow.model_fees();
+    let venue_fees = match trader.venue().fees_charged(&symbol, started_ms) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fees             could not be read: {e}");
+            None
+        }
+    };
     shadow.finish(Nanos(now_ns()));
     println!();
     let divergences = shadow.divergences();
@@ -724,12 +741,13 @@ where
         &instrument,
         books.realized_net(),
         shadow.model_pnl(),
-        // Funding and fees are `None` rather than zero. Zero is a
-        // measurement and this process has not taken one — the venue
-        // reports both per trade and nothing here reads that endpoint
-        // yet, so those components stay `Unavailable` and the residual
-        // stays honest about how much it is carrying.
-        &shadow.evidence(None, None),
+        // Funding stays `None`: the venue reports it on an endpoint this
+        // adapter does not read, and zero is a measurement nobody took.
+        // Fees are asked for, and an adapter that does not report them
+        // says so rather than answering zero — either way `attribution`
+        // renders the component honestly and the residual carries what
+        // is missing.
+        &shadow.evidence(None, venue_fees.map(|v| (v, shadow_fees))),
     );
     print!("{}", attribution.render());
 

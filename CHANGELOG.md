@@ -140,9 +140,12 @@ Nothing here has traded real money, and the entry triggers in
   against the venue at startup and refuses to run beside a position it
   was not told about, and runs a shadow backtest on the same events, so
   every run ends with the gap decomposed by cause and an explicitly
-  unexplained residual. Funding and fee components report *unavailable*
-  rather than zero: the venue reports both per trade and nothing reads
-  that endpoint yet, so the residual carries them and says so.
+  unexplained residual. Fees come from the venue's own
+  trade records via `Account::fees_charged`, whose default is `None` —
+  an adapter that has not implemented it says so rather than answering
+  zero, because zero is a measurement. Funding is still *unavailable*:
+  the venue reports it on an endpoint no adapter reads. The residual
+  carries what is missing and the report names it.
 - Metrics are a **snapshot value** rendered in the line-oriented form
   collectors read, and alerts are judgements rather than notifications:
   nothing in this workspace sends anything anywhere.
