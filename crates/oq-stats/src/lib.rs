@@ -17,11 +17,13 @@ pub mod dsr;
 pub mod moments;
 pub mod normal;
 pub mod pbo;
+pub mod stylized;
 pub mod trials;
 
 pub use dsr::{deflated_sharpe_ratio, expected_max_sharpe, probabilistic_sharpe_ratio};
 pub use moments::Moments;
 pub use pbo::{PboReport, probability_of_backtest_overfitting};
+pub use stylized::{StylizedFacts, Verdict, autocorrelation};
 pub use trials::TrialRegistry;
 
 /// Errors returned by the statistics in this crate.

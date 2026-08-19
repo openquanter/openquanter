@@ -317,6 +317,38 @@ They demonstrate properties of the framework. A project whose central
 claim is that backtests flatter you would be a poor place to show off a
 pretty equity curve.
 
+### And a word about the markets they run on
+
+`series` and `crash_series` are **fixtures, not simulations**, and
+`oq_stats::StylizedFacts` measures the difference rather than leaving it
+to be assumed. Against the properties that hold in essentially every
+liquid market:
+
+| | calm | trending | crash |
+|---|---|---|---|
+| uncorrelated returns | holds | holds | **absent, ρ(1) = 0.54** |
+| heavy tails | absent | absent | absent |
+| volatility clustering | absent | absent | holds |
+| aggregational gaussianity | holds | absent | holds |
+
+Two things follow, and both change how the numbers above should be read.
+
+**None of them has heavy tails.** Excess kurtosis of 0.03, 0.07 and
+−0.05, against a real perpetual's tens. Liquidation is a tail event, so
+a fixture without a tail produces one only where it was told to — and
+the margin-free-versus-enforced gap these examples report is therefore
+a **floor** on the real one rather than an estimate of it.
+
+**The crash fixture's returns are strongly autocorrelated.** A sustained
+monotone move means consecutive returns share a sign for hundreds of
+observations, which a one-lag rule would predict and no real market
+offers. That predictability is exactly what makes it a usable fixture —
+the liquidation happens where it was put — and exactly why a strategy
+result from it is a statement about this series and not about trading.
+
+The measurements are pinned in `crates/oq-examples/tests/stylized.rs`,
+so changing a generator is noticed by whoever changes it.
+
 ## Strategies you already know
 
 ```bash
