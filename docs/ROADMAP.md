@@ -209,7 +209,7 @@ input this project cannot reach, the second has not been written.
 | L1 | Square-root taker impact | Built |
 | L1 | Participation-rate alerting | Built (shipped with M2's fidelity report) |
 | L1 | **Probabilistic queue model** | Not built — by the stated order, only after calibration |
-| L1 | **Latency as distributions rather than constants** | Not built |
+| L1 | **Latency as distributions rather than constants** | Built — `Delay::Measured` takes p50/p90/p99/p999, which is what a latency measurement produces; nearest-rank and never interpolated, drawn deterministically from the order id so a replay from a snapshot fills the same way |
 | L1 | **Feed latency** | Deliberately not in the engine — it belongs to the event producer |
 | L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
 | L2 | Book reconstruction, snapshot reconciliation, gap handling | **Not built** |
