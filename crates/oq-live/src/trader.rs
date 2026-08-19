@@ -77,6 +77,14 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         &self.strategy
     }
 
+    /// The strategy, for replaying history into it.
+    ///
+    /// Not a general escape hatch: the only caller is the warm-up, and
+    /// the callback it reaches cannot produce intents.
+    pub const fn strategy_mut(&mut self) -> &mut S {
+        &mut self.strategy
+    }
+
     #[must_use]
     pub fn new(strategy: S, session: Session<E>) -> Self {
         Self {

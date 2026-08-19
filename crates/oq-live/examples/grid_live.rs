@@ -65,6 +65,8 @@ fn main() -> ExitCode {
         strategy_name: "grid".to_string(),
         deployment: Deployment::Testnet,
         minutes: number("--minutes", 30),
+        // The grid decides from the current book, not from a window.
+        warm_minutes: 0,
         window_ms: number("--window-ms", 1_000),
         id_prefix: value("--id-prefix").unwrap_or_else(|| "oqgrid".to_string()),
         broker_code: value("--broker-code"),

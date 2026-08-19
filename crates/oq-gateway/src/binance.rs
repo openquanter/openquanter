@@ -935,6 +935,38 @@ impl crate::account::Account for Binance {
         crate::broker::IdRules::BINANCE
     }
 
+    fn recent_bars(
+        &self,
+        symbol: &str,
+        minutes: usize,
+    ) -> Result<Vec<crate::klines::Kline>, VenueError> {
+        // Unsigned: history is public, so a warm-up cannot fail for a
+        // reason that has anything to do with this account's keys.
+        //
+        // The venue caps a page at 1500 and a strategy that wants more
+        // than a day of minutes wants a different endpoint, so this is
+        // clamped rather than paged: a silent second request would make
+        // the returned range differ from the one asked for.
+        let limit = minutes.clamp(1, 1500);
+        let body = self.get_public(
+            "/fapi/v1/klines",
+            &format!("symbol={symbol}&interval=1m&limit={limit}"),
+        )?;
+        let (price_scale, qty_scale) = match crate::account::Account::instrument(self, symbol) {
+            Ok(i) => (i.price_scale, i.qty_scale),
+            Err(e) => {
+                return Err(VenueError::Malformed {
+                    what: "instrument for klines",
+                    body: e,
+                });
+            }
+        };
+        crate::klines::parse(&body, price_scale, qty_scale).ok_or(VenueError::Malformed {
+            what: "klines",
+            body,
+        })
+    }
+
     fn sync_clock(&mut self) -> Result<i64, VenueError> {
         Self::sync_clock(self)
     }

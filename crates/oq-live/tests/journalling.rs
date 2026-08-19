@@ -351,8 +351,8 @@ fn taking_over_nothing_is_not_recorded_as_an_event() {
 /// the one most likely to be wrong.
 ///
 /// This was not hypothetical. A twelve-hour run placed nothing, and the
-/// reason — a volume threshold calibrated for a busier venue, and a
-/// warm-up of two hundred bars — was reachable only by reading the
+/// reason — a gate whose threshold this deployment never reached, and a
+/// warm-up not yet finished — was reachable only by reading the
 /// strategy's source. That is the worst tool to reach for while
 /// something is going wrong on a venue.
 #[test]
