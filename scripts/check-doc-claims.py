@@ -128,23 +128,76 @@ def _split(start, text):
             yield start, s.strip()
 
 
+def install_claims(root):
+    """Docs must not offer an install of something not published.
+
+    `VERSIONING.md` states the publication state of the Rust crates in a
+    table. The quickstart offered five `cargo install oq-*` lines while
+    that table said *nothing published*, and the two stood in the
+    repository together for weeks: `cargo install` succeeds against a
+    name placeholder, produces an empty crate, and reports no error, so
+    a reader following the first document had no way to learn the second
+    one existed.
+
+    Offline on purpose. Asking crates.io would make CI depend on a
+    network call to tell it something the repository already states, and
+    a flaky check is a check somebody disables.
+    """
+    versioning = os.path.join(root, "docs/VERSIONING.md")
+    if not os.path.exists(versioning):
+        return []
+    with open(versioning, encoding="utf-8") as f:
+        text = f.read()
+    published = "nothing published" not in text.lower()
+    if published:
+        return []
+
+    docs = subprocess.run(
+        ["git", "ls-files", "*.md"], cwd=root,
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    out = []
+    for doc in docs:
+        # The two pages whose subject *is* the contradiction may name it.
+        if doc.startswith("scripts/") or "VERSIONING" in doc:
+            continue
+        with open(os.path.join(root, doc), encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                stripped = line.strip()
+                if stripped.startswith("cargo install oq-"):
+                    out.append(
+                        f"{doc}:{n} offers `{stripped}` while VERSIONING.md says "
+                        "nothing is published"
+                    )
+    return out
+
+
 def main():
     root = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
+    # The install check is text and needs nothing built, so it runs
+    # first and runs regardless. Putting it after the cargo probe would
+    # make a text check unavailable whenever an unrelated tool was
+    # missing — which is the same shape as every defect this file was
+    # written for: one half silent because the other half was absent.
+    failures = install_claims(root)
+
     deps = workspace_deps(root)
     if deps is None:
-        print("check-doc-claims: cargo not found or the tree does not build")
-        return 2
+        for f in failures:
+            print(f"FAIL {f}")
+        print("check-doc-claims: cargo not found, so only the text checks ran")
+        return 1 if failures else 2
 
     docs = subprocess.run(
         ["git", "ls-files", "*.md"], cwd=root,
         capture_output=True, text=True, check=True,
     ).stdout.split()
 
-    failures, unchecked, checked = [], [], 0
+    unchecked, checked = [], 0
 
     for doc in docs:
         # This file describes the check; its examples are not claims.

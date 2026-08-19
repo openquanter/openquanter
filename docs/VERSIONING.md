@@ -93,6 +93,20 @@ types are still moving. Publishing them now would pin people to a version
 about to change under them, and a version yanked from crates.io is still a
 version somebody built against.
 
+**When the crates go up.** Not on a date. The condition is the one this
+section already gives: the workspace's types stop moving. That is what
+2.0 means here — the roadmap puts API stabilisation after M3 and after
+external adoption — so the crates publish when the API they expose is
+one somebody can build against without being moved off it. Until then
+the install path is `git clone`, and
+[Quickstart](QUICKSTART.md#1-build) says so rather than offering a
+`cargo install` that succeeds and delivers an empty crate.
+
+That contradiction existed. This page said *nothing published* while
+the quickstart listed five `cargo install` lines as the first thing to
+do, and a reader following the quickstart got placeholders and no
+error. Two documents, opposite claims about the same fact.
+
 Note that a PyPI version cannot be re-uploaded either. `2.0.0a1` is
 permanent, which is why the metadata that ships with it — the description,
 the README, the classifiers — is checked before the upload rather than
