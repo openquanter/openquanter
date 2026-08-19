@@ -26,7 +26,7 @@ use oq_ingest::Aggregator;
 use oq_l2feed::session::{install_signal_handlers, now_ns, shutdown_requested};
 use oq_l2feed::venue::Deployment;
 use oq_risk::{Limits, RiskGate};
-use oq_strategy::Strategy;
+use oq_strategy::{Context, Strategy};
 use oq_types::{Cash, Instrument, Nanos, OrderId, PriceTicks, QtyLots, Side};
 
 use crate::{
@@ -44,6 +44,12 @@ pub struct RunConfig {
     pub strategy_name: String,
     pub deployment: Deployment,
     pub minutes: i64,
+    /// Minutes of history to warm the strategy with before it trades.
+    ///
+    /// Zero starts cold, which for an indicator with a window means it
+    /// cannot act until that many minutes of live data have arrived —
+    /// on a restart, that is time an account spends unmanaged.
+    pub warm_minutes: usize,
     pub window_ms: i64,
     pub id_prefix: String,
     pub adopt_existing: bool,
@@ -479,6 +485,29 @@ where
     let mut session = session;
     session.record_reconciled(Nanos(now_ns()), adopted);
 
+    // Fetched while the session still owns the venue, replayed once the
+    // trader exists. A strategy that has not seen its window cannot act,
+    // and the first thing it would otherwise do is wait that window out
+    // in real time -- on a restart, that is an account left unmanaged
+    // for as long as the window is.
+    //
+    // A failure here is reported and does not stop the run. History
+    // makes a strategy ready sooner; it does not make it correct, and
+    // refusing to start because a public endpoint would not answer
+    // turns a slow start into no start.
+    let warm_bars: Option<Vec<oq_gateway::klines::Kline>> = if cfg.warm_minutes == 0 {
+        println!("warm-up          off, by request; the strategy starts cold");
+        None
+    } else {
+        match session.venue().recent_bars(&symbol, cfg.warm_minutes) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                println!("warm-up          FAILED: {e}; starting cold");
+                None
+            }
+        }
+    };
+
     let stream = match session.venue().open_user_stream() {
         Ok(s) => s,
         Err(e) => {
@@ -507,6 +536,25 @@ where
     let event_time = feed_venue.event_time_reader();
 
     let mut trader = Trader::new(make_strategy(&instrument), session);
+
+    // Replayed through the same books and the same context the live loop
+    // builds, so the strategy folds history with the code it already
+    // runs rather than a second path that has to agree with the first.
+    match warm_bars {
+        None => {}
+        Some(bars) if bars.is_empty() => {
+            println!("warm-up          the venue returned no history; starting cold");
+        }
+        Some(bars) => {
+            let n = bars.len();
+            for tick in warm_ticks(&bars) {
+                books.on_tick(&tick);
+                let ctx = books.context(tick);
+                trader.on_history(&ctx);
+            }
+            println!("warm-up          {n} bar(s) of history replayed");
+        }
+    }
 
     // Stamped before the loop so the fee query at the end covers exactly
     // this run. Asking for "everything" would sum a previous run's fees
@@ -821,6 +869,8 @@ trait TraderLike {
     fn record_tick(&mut self, tick: &oq_engine::Tick);
     /// Sample what the strategy is waiting for, and record it.
     fn record_waiting(&mut self, at: Nanos);
+    /// One historical observation. Cannot produce intents.
+    fn on_history(&mut self, ctx: &Context);
     /// The same conditions, rendered for the terminal.
     fn waiting_summary(&self) -> String;
     fn latency(&self) -> String;
@@ -844,6 +894,10 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn foreign(&self) -> u64 {
         self.session().book().foreign()
     }
+    fn on_history(&mut self, ctx: &Context) {
+        self.strategy_mut().on_history(ctx);
+    }
+
     fn waiting_summary(&self) -> String {
         let w = self.strategy().waiting_on();
         if w.is_empty() {
@@ -1149,6 +1203,104 @@ mod adoption {
         );
         assert_eq!(legs.iter().map(|l| l.2).sum::<i64>(), 0);
         assert_ne!(legs[0].3, legs[1].3, "each leg keeps its own basis");
+    }
+}
+
+/// Venue bars as the ticks a strategy would have seen.
+///
+/// Pulled out of `run` so the conversion is testable: `run` needs a
+/// venue and cannot be called from a test, and the arithmetic here is
+/// where a real mistake would hide — a per-bar volume left un-accumulated
+/// would make every difference a consumer takes come out as the bar's
+/// own volume rather than the change since the last observation.
+fn warm_ticks(bars: &[oq_gateway::klines::Kline]) -> Vec<oq_engine::Tick> {
+    let mut cumulative: i64 = 0;
+    bars.iter()
+        .map(|b| {
+            // Accumulated, because that is the convention a live tick
+            // carries: consumers read differences between consecutive
+            // observations rather than the absolute value.
+            cumulative = cumulative.saturating_add(b.volume);
+            let at = Nanos(b.open_ms.saturating_mul(1_000_000));
+            oq_engine::Tick {
+                // Both stamps are the venue's. A bar fetched in bulk has
+                // no arrival time, and inventing one would put a latency
+                // in the record that no message experienced.
+                stamp: oq_types::Stamp {
+                    exch: at,
+                    local: at,
+                },
+                last: PriceTicks(b.close),
+                high: PriceTicks(b.high),
+                low: PriceTicks(b.low),
+                // A bar carries no book.
+                bid: PriceTicks(0),
+                ask: PriceTicks(0),
+                volume: QtyLots(cumulative),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod warm_up {
+    use super::warm_ticks;
+    use oq_gateway::klines::Kline;
+
+    fn bar(open_ms: i64, close: i64, volume: i64) -> Kline {
+        Kline {
+            open_ms,
+            high: close + 10,
+            low: close - 10,
+            close,
+            volume,
+        }
+    }
+
+    /// Volume accumulates, because that is what a live tick carries.
+    ///
+    /// A consumer reads the difference between consecutive observations.
+    /// Feeding per-bar volume would make every difference come out as
+    /// the bar's own volume — plausible numbers, and a volume gate that
+    /// arms on the wrong thing.
+    #[test]
+    fn volume_accumulates_across_the_bars() {
+        let t = warm_ticks(&[bar(0, 100, 5), bar(60_000, 101, 7), bar(120_000, 102, 3)]);
+        assert_eq!(
+            t.iter().map(|t| t.volume.0).collect::<Vec<_>>(),
+            vec![5, 12, 15]
+        );
+        // And the differences a consumer takes are the bars' own volumes.
+        let deltas: Vec<i64> = t
+            .windows(2)
+            .map(|w| w[1].volume.0 - w[0].volume.0)
+            .collect();
+        assert_eq!(deltas, vec![7, 3]);
+    }
+
+    /// Milliseconds to nanoseconds, on both stamps.
+    #[test]
+    fn the_stamp_is_the_venues_on_both_clocks() {
+        let t = warm_ticks(&[bar(1_499_040_000_000, 100, 1)]);
+        assert_eq!(t[0].stamp.exch.0, 1_499_040_000_000_000_000);
+        assert_eq!(
+            t[0].stamp.local.0, t[0].stamp.exch.0,
+            "a bar fetched in bulk has no arrival time to report"
+        );
+    }
+
+    /// A bar has no book, and says so rather than guessing one.
+    #[test]
+    fn there_is_no_book_in_a_bar() {
+        let t = warm_ticks(&[bar(0, 100, 1)]);
+        assert_eq!((t[0].bid.0, t[0].ask.0), (0, 0));
+        assert_eq!(t[0].last.0, 100, "but the traded price is real");
+        assert_eq!((t[0].high.0, t[0].low.0), (110, 90));
+    }
+
+    #[test]
+    fn no_bars_is_no_ticks() {
+        assert!(warm_ticks(&[]).is_empty());
     }
 }
 

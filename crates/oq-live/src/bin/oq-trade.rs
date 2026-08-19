@@ -57,6 +57,7 @@ OPTIONS:
     --strategy <NAME>      observe | probe [default: observe]
     --window-ms <MS>       Tick width [default: 1000]
     --minutes <N>          Stop after this long [default: 5]
+    --warm-minutes <N>     Replay this much history first [default: 0]
     --max-qty <LOTS>       Largest single order [default: 1]
                            One lot is below the minimum notional on most
                            contracts, so the gate refuses every order at the
@@ -283,6 +284,8 @@ fn main() -> ExitCode {
         strategy_name: strategy_name.clone(),
         deployment,
         minutes: number("--minutes", 5),
+        // The teaching strategies need no history.
+        warm_minutes: usize::try_from(number("--warm-minutes", 0)).unwrap_or(0),
         window_ms: number("--window-ms", 1000),
         id_prefix: value("--id-prefix").unwrap_or_else(|| "oq".to_string()),
         adopt_existing: args.iter().any(|a| a == "--adopt-existing"),
