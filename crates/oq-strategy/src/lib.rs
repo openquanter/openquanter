@@ -199,6 +199,25 @@ pub trait Strategy {
     /// the live host.
     fn on_placed(&mut self, _id: OrderId, _accepted: bool) {}
 
+    /// One historical observation, replayed before the run begins.
+    ///
+    /// **No intents can be produced here, and that is the point.** The
+    /// reference implementation warms its indicators from a day of
+    /// history and guards the whole load with a `preheating` flag that
+    /// every trading path has to remember to check. A callback that
+    /// cannot emit is the same rule enforced by the compiler instead.
+    ///
+    /// History arrives as ticks, in order, exactly as live data does, so
+    /// a strategy folds them with the code it already has — its bar
+    /// generator, its indicator windows — rather than a second path that
+    /// has to agree with the first.
+    ///
+    /// Called before [`Strategy::on_tick`] ever is, and never again.
+    ///
+    /// The default ignores history. A strategy that needs none — one
+    /// that decides from the current book — is not made to say so.
+    fn on_history(&mut self, _ctx: &Context) {}
+
     /// What this strategy is waiting for, named, for the record.
     ///
     /// A run that does nothing is the hardest one to explain, because

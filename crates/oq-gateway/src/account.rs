@@ -37,6 +37,7 @@ use oq_types::Instrument;
 use crate::binance::{AccountSnapshot, OpenOrder, PositionSnapshot, VenueError};
 use crate::broker::IdRules;
 use crate::exec::{Execution, NewOrder, OrderAck, Placed, UserStream};
+use crate::klines::Kline;
 
 /// Everything a live run needs from the account side of one venue.
 ///
@@ -60,6 +61,21 @@ pub trait Account: Execution {
     /// rejected at submission, which is the worst place to find out:
     /// the strategy has already decided to trade.
     fn id_rules(&self) -> IdRules;
+
+    /// The most recent `minutes` of one-minute bars, oldest first.
+    ///
+    /// A strategy whose indicator needs a window cannot act until it has
+    /// one, and from a cold start that wait is real time on a live
+    /// account — two hundred bars is three hours and twenty minutes,
+    /// paid again on every restart.
+    ///
+    /// From the venue rather than from storage, because a venue always
+    /// has its own recent history and a database that has to be up in
+    /// order to start is a second thing that can be down.
+    ///
+    /// # Errors
+    /// Whatever the request reports.
+    fn recent_bars(&self, symbol: &str, minutes: usize) -> Result<Vec<Kline>, VenueError>;
 
     /// Agree with the venue about the time, and report the offset.
     ///
@@ -159,6 +175,9 @@ impl Account for Box<dyn Account> {
     fn id_rules(&self) -> IdRules {
         (**self).id_rules()
     }
+    fn recent_bars(&self, symbol: &str, minutes: usize) -> Result<Vec<Kline>, VenueError> {
+        (**self).recent_bars(symbol, minutes)
+    }
     fn sync_clock(&mut self) -> Result<i64, VenueError> {
         (**self).sync_clock()
     }
@@ -233,6 +252,9 @@ mod tests {
         // hardcoded `IdRules::BINANCE` in the runner used to do.
         fn id_rules(&self) -> IdRules {
             IdRules::OKX
+        }
+        fn recent_bars(&self, _: &str, _: usize) -> Result<Vec<Kline>, VenueError> {
+            Ok(Vec::new())
         }
         fn sync_clock(&mut self) -> Result<i64, VenueError> {
             Ok(0)
