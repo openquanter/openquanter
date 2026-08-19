@@ -239,3 +239,106 @@ fn a_session_without_a_journal_still_trades() {
     .expect("starts");
     assert!(s.submit(buy(), PriceTicks(6_000_000), Nanos(7)).is_sent());
 }
+
+/// A position taken over at startup is in the record, with its basis.
+///
+/// This one was written because the record existed and nothing wrote it:
+/// `Record::Reconciled` had a kind, an encoder, a decoder, a round-trip
+/// test and a line in `oq-replay` that rendered it — and no construction
+/// site anywhere in the tree. `--adopt-existing` was therefore the one
+/// startup step that left no trace, which is the step a migration is
+/// made of. A reader rebuilding what this run believes it holds would
+/// have come up short by exactly the migrated positions.
+#[test]
+fn a_position_taken_over_at_startup_is_recorded_with_its_basis() {
+    let path = temp("reconciled.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.record_reconciled(
+        Nanos(3),
+        vec![("ETHUSDT".into(), "LONG".into(), 160, 250_000)],
+    );
+
+    let all = records(&path);
+    let at = all
+        .iter()
+        .position(|r| matches!(r, Record::Reconciled { .. }))
+        .unwrap_or_else(|| panic!("the adoption must be in the journal: {all:?}"));
+    // After the identity, because a record whose run cannot be named is
+    // a record about nothing.
+    assert!(
+        matches!(all.first(), Some(Record::SessionStart { .. })),
+        "{all:?}"
+    );
+    assert!(at > 0, "the identity comes first: {all:?}");
+
+    match &all[at] {
+        Record::Reconciled { legs, .. } => {
+            assert_eq!(legs.len(), 1, "{legs:?}");
+            // The entry price is the half that makes this usable. Side
+            // and size alone say a position exists; without its basis
+            // there is no unrealised figure and nothing to compare
+            // against the venue.
+            assert_eq!(legs[0].3, 250_000, "the basis travels with the leg");
+            assert_eq!(legs[0].2, 160);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Taking over nothing writes nothing.
+///
+/// A record saying "adopted no positions" and no record at all are the
+/// same claim, and only one of them can be mistaken for a run that
+/// forgot to look.
+#[test]
+fn taking_over_nothing_is_not_recorded_as_an_event() {
+    let path = temp("reconciled-empty.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.record_reconciled(Nanos(3), Vec::new());
+
+    let all = records(&path);
+    assert!(
+        !all.iter().any(|r| matches!(r, Record::Reconciled { .. })),
+        "nothing was taken over, so nothing may claim to have been: {all:?}"
+    );
+}
