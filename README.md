@@ -274,13 +274,22 @@ everything under *AI-native* above. The pillars section describes where this
 is going; this section describes where it is.
 
 **On live trading specifically,** because the pieces above make it easy to
-overstate. The whole loop has run against a real venue's testnet.
-`oq-trade` reads the contract's precision, grid and order floor from that
-deployment, refuses to start beside a position it was not told about,
-connects market data and the account stream, folds ticks, hands them to a
-strategy, sends what the gate approved, watches the same order arrive on
-the account stream, cancels it, and sees the cancellation confirmed there
-too: 523 ticks, one order placed and withdrawn, no redelivered fills.
+overstate. The whole loop has run against a real venue's testnet. It reads
+the contract's precision, grid and order floor from that deployment,
+refuses to start beside a position it was not told about, connects market
+data and the account stream, folds ticks, hands them to a strategy, sends
+what the gate approved, watches the same order arrive on the account
+stream, cancels it, and sees the cancellation confirmed there too: 523
+ticks, one order placed and withdrawn, no redelivered fills.
+
+That run's strategy was `oq-trade probe`, which places one order at a
+time to measure the round trip — a diagnostic, not a strategy.
+`cargo run -p oq-live --example grid_live` is the same assembly with an
+actual strategy in it, and it is about thirty lines because the assembly
+is the part that was hard. **It has not been run long.** A strategy
+running for hours is what M3's second entry trigger asks for, and that
+has not happened yet; what is claimed here is that there is now something
+to run, not that it has run.
 
 Those runs are the evidence for everything claimed above, and each of them
 found something no unit test could reach — a price with the right number

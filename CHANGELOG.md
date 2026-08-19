@@ -108,6 +108,44 @@ writing it down and better than leaving it out.
   regression.
 - `oq-stats` — deflated Sharpe ratio, PBO via CSCV, trial registry.
 
+### Live trading
+
+Nothing here has traded real money, and the entry triggers in
+[Roadmap](docs/ROADMAP.md) §M3 say what would have to be true first.
+
+- `oq-gateway` — execution adapters for two venues. Placement is
+  three-state: accepted, rejected, and **unknown**, which is not an error
+  because an error lets a caller `?` past the one case that must be
+  handled. A conformance suite drives both adapters through the same
+  cases and is itself checked against three deliberately-wrong adapters.
+  `broker::IdScheme` composes client ids carrying a venue-issued referral
+  code, kept separate from the prefix that answers *is this order mine*.
+- `oq-risk` — pre-trade gate, kill switch, startup reconciliation.
+  `VersionedLimits` records which limit moved and from what; a change
+  that alters nothing does not advance the version.
+- `oq-live` — process assembly, snapshot recovery, and the account kept
+  by the **same kernel** the backtest uses, so there is one book
+  implementation rather than two that agree until they do not. Reconciles
+  against the venue at startup and refuses to run beside a position it
+  was not told about. Shadow backtest alongside, with the gap decomposed
+  by cause and an explicitly unexplained residual.
+- Metrics are a **snapshot value** rendered in the line-oriented form
+  collectors read, and alerts are judgements rather than notifications:
+  nothing in this workspace sends anything anywhere.
+
+**`Outcome::Unresolved` split from `Outcome::Refused`.** *Changes live
+behaviour.* A submission that was sent and never answered was reported
+to the strategy as `accepted = false` — telling it the order does not
+exist when it may be resting, which invites the one action that turns
+*maybe one order* into *certainly two*. Unanswered submissions are now
+their own outcome and are not reported through `Strategy::on_placed` at
+all. Console output and the end-of-run summary distinguish them. No
+backtest result changes: a simulated matcher answers every submission.
+
+**`Strategy::on_placed` added**, defaulted to empty and called from both
+the backtest loop and the live host. A strategy that treats *I asked*
+as *it is resting* believes it holds exposure it does not have.
+
 ### Fees
 
 Maker/taker trading fees are charged in the kernel. A maker rate may be
@@ -131,8 +169,14 @@ number the documentation quotes is gross of costs.
 
 ### Examples and performance
 
-- `oq-examples` — three teaching examples on a seeded synthetic market,
-  with `tests/golden.rs` pinning every number the documentation quotes.
+- `oq-examples` — teaching examples on a seeded synthetic market, with
+  `tests/golden.rs` pinning every number the documentation quotes. Plus
+  a catalogue of six classic strategies — RSI, MACD, Bollinger,
+  Donchian, grid, Dual Thrust — at their published parameters, untuned.
+  Every one is decades old and traded by enough people that whatever
+  edge it had is not waiting in a public repository; they are here so
+  the framework can be learned by recognising something. Each documents
+  where it breaks rather than claiming an edge.
 - `criterion` benchmarks, plus a CI job asserting a throughput **floor**
   rather than a tracked baseline. Shared runners vary by several times
   from hour to hour, and a gate that fails on noise gets disabled;
