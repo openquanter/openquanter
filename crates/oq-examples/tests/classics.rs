@@ -161,3 +161,138 @@ fn the_grid_under_leverage_shows_what_a_margin_free_backtest_hides() {
         "the two arms must differ, or there is nothing to read against each other"
     );
 }
+
+// ---------------------------------------------------------------------
+// The grid's ladder
+// ---------------------------------------------------------------------
+//
+// `GridTrader` is the only strategy in the catalogue that carries state
+// derived from its own orders, and the only one wired to a venue
+// (`oq-live`'s `grid_live` example). Both facts point at the same risk:
+// a refused rung must not move the ladder. These drive the strategy
+// directly rather than through `run`, because the simulated matcher
+// fills market orders immediately and so cannot express a refusal.
+
+use oq_backtest::{Context, Intent};
+use oq_types::{Fill, Liquidity, Offset, OrderId, PriceTicks, QtyLots, Side, Stamp, TradeId};
+
+fn at(price: i64, position: i64) -> Context {
+    Context {
+        tick: oq_engine::Tick {
+            last: PriceTicks(price),
+            ..oq_engine::Tick::default()
+        },
+        position: QtyLots(position),
+        entry: PriceTicks(0),
+        short_position: QtyLots(0),
+        short_entry: PriceTicks(0),
+        equity: Cash::from_units(10_000),
+        working: 0,
+    }
+}
+
+fn filled(order: OrderId, price: i64, side: Side) -> Fill {
+    Fill {
+        stamp: Stamp::default(),
+        instrument: InstrumentId::new(1),
+        order,
+        trade: TradeId(order.0),
+        side,
+        offset: Offset::Open,
+        price: PriceTicks(price),
+        qty: QtyLots(1),
+        liquidity: Liquidity::Taker,
+    }
+}
+
+fn asked(out: &[Intent]) -> Option<OrderId> {
+    out.iter().find_map(|i| match i {
+        Intent::Market { id, .. } | Intent::Limit { id, .. } => Some(*id),
+        _ => None,
+    })
+}
+
+/// A refused rung leaves the ladder where it was, and the same
+/// condition places it again.
+///
+/// The failure this guards against is silent: an optimistic grid
+/// advances its anchor on submission, so after a refusal it waits for a
+/// step down from a rung it never bought. Price would have to fall
+/// twice as far before it acted, and further for every later refusal —
+/// a strategy that looks like it is running and is not.
+#[test]
+fn refused_rung_does_not_move_the_ladder() {
+    let mut grid = GridTrader::new();
+    let mut out = Vec::new();
+
+    // The anchoring rung, refused.
+    grid.on_tick(&at(100_000, 0), &mut out);
+    let first = asked(&out).expect("the grid anchors on its first observation");
+    grid.on_placed(first, false);
+
+    // Same observation, no position: it must ask again.
+    out.clear();
+    grid.on_tick(&at(100_000, 0), &mut out);
+    let second = asked(&out).expect("a refused anchor is retried, not skipped");
+    assert_ne!(first, second, "a retry is a new order, not a resubmission");
+}
+
+/// The ladder anchors on the price that was paid, not on the tick that
+/// produced the order.
+///
+/// Anchoring on the trigger price would fold every rung's slippage into
+/// the grid's geometry, where it stops being visible as a cost and
+/// starts being visible as a strategy that trades at slightly wrong
+/// levels — which is the harder bug to ever notice.
+#[test]
+fn the_ladder_anchors_on_the_fill_price() {
+    let mut grid = GridTrader::new();
+    let mut out = Vec::new();
+
+    grid.on_tick(&at(100_000, 0), &mut out);
+    let first = asked(&out).expect("the grid anchors on its first observation");
+    // Asked at 100_000, paid 101_000 — a full step of slippage.
+    grid.on_fill(
+        &filled(first, 101_000, Side::Buy),
+        &at(101_000, 1),
+        &mut out,
+    );
+
+    // Anchored on the fill, the next rung is a step below 101_000, so
+    // it triggers at 100_495. Anchored on the price that *triggered*
+    // the order it would be a step below 100_000, or 99_500. The two
+    // answers differ across (99_500, 100_495] and nowhere else, which
+    // is the only interval worth probing: outside it both anchorings
+    // agree and a passing assertion would prove nothing.
+    out.clear();
+    grid.on_tick(&at(100_000, 1), &mut out);
+    assert!(
+        asked(&out).is_some(),
+        "100_000 is a step below the fill at 101_000; only a ladder still \
+         anchored on the trigger price would sit here doing nothing"
+    );
+}
+
+/// One rung in flight at a time.
+///
+/// The entry condition stays true until the rung fills, so a grid
+/// ticking faster than the venue answers would place one per tick — the
+/// position grows by however long the round trip took, which is a
+/// number the strategy never approved.
+#[test]
+fn only_one_rung_is_outstanding() {
+    let mut grid = GridTrader::new();
+    let mut out = Vec::new();
+
+    grid.on_tick(&at(100_000, 0), &mut out);
+    assert!(asked(&out).is_some());
+
+    for _ in 0..20 {
+        out.clear();
+        grid.on_tick(&at(100_000, 0), &mut out);
+        assert!(
+            out.is_empty(),
+            "a second rung was placed while the first was unanswered"
+        );
+    }
+}

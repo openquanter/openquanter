@@ -51,6 +51,13 @@ pub struct RunConfig {
     /// `None` means run without one, which is `--no-journal`.
     pub journal: Option<String>,
     pub limits: Limits,
+    /// A venue-issued broker or referral code, when the operator has one.
+    ///
+    /// Separate from `id_prefix`, which answers *is this order mine*.
+    /// This answers *who gets paid for this flow* — see
+    /// `oq_gateway::broker` for why conflating them eventually forces a
+    /// fork.
+    pub broker_code: Option<String>,
 }
 
 /// Run one strategy against one venue until the clock or a signal ends it.
@@ -184,7 +191,43 @@ where
     // recognises its own previous orders on the account stream. A prefix
     // derived from the process id would change on every restart and make
     // every prior order look like another system's.
-    let id_prefix = cfg.id_prefix.clone();
+    // The prefix orders actually carry. A broker code goes in front of
+    // the ownership prefix, and the ownership check has to match the
+    // whole thing — the venue echoes the composed id back, and a check
+    // matching only the owner segment would stop recognising this
+    // process's own orders. `IdScheme::owned_prefix` is that composition
+    // in one place rather than two.
+    let scheme = match &cfg.broker_code {
+        None => oq_gateway::broker::IdScheme::new(
+            cfg.id_prefix.clone(),
+            oq_gateway::broker::IdRules::BINANCE,
+        ),
+        Some(code) => match oq_gateway::broker::BrokerCode::new(code.clone()) {
+            Ok(c) => oq_gateway::broker::IdScheme::new(
+                cfg.id_prefix.clone(),
+                oq_gateway::broker::IdRules::BINANCE,
+            )
+            .map(|s| s.with_broker(c)),
+            Err(e) => {
+                eprintln!("broker code      REFUSED: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let scheme = match scheme {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("id prefix        REFUSED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if cfg.broker_code.is_some() {
+        println!(
+            "broker code      flow attributed; ids begin {}",
+            scheme.owned_prefix()
+        );
+    }
+    let id_prefix = scheme.owned_prefix();
     let config_prefix = id_prefix.clone();
 
     let config = SessionConfig {
@@ -249,6 +292,14 @@ where
     // so every strategy that decides by reading `ctx.position` — which is
     // all of them — saw a constant. A strategy that opens when flat
     // opened again on every observation.
+    // What a monitoring system reads. Counted here rather than derived
+    // afterwards: several of these — a redelivered fill, a report with
+    // no trade id — are events that leave no trace in the final state,
+    // so a count taken at the end would be zero for all of them.
+    let mut metrics = crate::metrics::Snapshot::default();
+    let limits = oq_risk::VersionedLimits::new(cfg.limits);
+    println!("limits           version {}", limits.version());
+
     let mut books = crate::books::Books::new(
         oq_types::InstrumentId::new(1),
         oq_margin::Contract::new(10_000),
@@ -424,6 +475,7 @@ where
                     if let Some(tick) = closed {
                         ticks += 1;
                         trader.record_tick(&tick);
+                        metrics.ticks += 1;
                         for output in books.on_tick(&tick) {
                             // Under venue matching the kernel does not
                             // fill, so anything here is the account
@@ -467,9 +519,13 @@ where
                         // a stream repeating itself is a fact about the
                         // link, and silence would hide how often.
                         crate::books::Booked::Duplicate => {
+                            metrics.duplicate_fills += 1;
+                            metrics.fills = metrics.fills.saturating_sub(1);
                             println!("books            trade {} already booked", fill.trade.0);
                         }
                         crate::books::Booked::Unidentifiable => {
+                            metrics.unidentifiable_fills += 1;
+                            metrics.fills = metrics.fills.saturating_sub(1);
                             println!(
                                 "books            {} reported a fill with no trade id; \
                                  not booked, because it cannot be deduplicated",
@@ -490,6 +546,7 @@ where
                 }
             }
             StreamOutcome::Disconnected(why) => {
+                metrics.disconnects += 1;
                 eprintln!("user stream      lost: {why}");
                 for action in supervisor.on_disconnect() {
                     act(&action, &mut trader, &symbol);
@@ -519,6 +576,32 @@ where
     let _ = trader.close_stream();
 
     println!("ticks            {ticks}");
+
+    // What a monitoring system would have read, and what it would have
+    // woken somebody for. Printed at the end because this build has no
+    // scrape endpoint — the snapshot is a value, and where it goes is
+    // the operator's choice rather than this crate's dependency.
+    metrics.foreign_orders = trader.foreign() as u64;
+    println!();
+    print!("{}", metrics.render(None));
+    let raised = crate::metrics::alerts(&metrics, crate::metrics::AlertRules::default());
+    if raised.is_empty() {
+        println!();
+        println!("alerts           none");
+    } else {
+        println!();
+        for a in &raised {
+            println!(
+                "alerts           {} {}: {}",
+                if a.urgent { "URGENT" } else { "notice" },
+                a.name,
+                a.detail
+            );
+        }
+    }
+    if limits.version() != 1 {
+        println!("limits           ended at version {}", limits.version());
+    }
     println!("orders           {sent} placed, {cancelled} withdrawn");
     // The in-process segment only. G6's far boundary is the socket write,
     // which the HTTP client does not expose, so this is not the gate's
