@@ -189,12 +189,7 @@ fn main() -> ExitCode {
         drop(loaded);
     }
     ticks.extend(agg.flush());
-    let counts = agg.counts();
-    report.depth_applied = counts.depth_applied;
-    report.trades = counts.trades;
-    report.quiet_windows = counts.quiet_windows;
-    report.windows_before_first_trade = counts.windows_before_first_trade;
-    report.ticks = ticks.len() as u64;
+    report.absorb(agg.counts(), ticks.len());
     println!("batches {batches} hour(s) folded one at a time");
     // The instrument id is opaque to the tick format; a stable hash of
     // venue and symbol keeps two different instruments from sharing one,

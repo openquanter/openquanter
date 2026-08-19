@@ -278,3 +278,64 @@ fn depth_alone_publishes_nothing() {
         "no trade means no price; publishing would set the mark to zero: {ticks:?}"
     );
 }
+
+/// The dropped windows are counted, and the count reaches the report.
+///
+/// Both halves matter, and the second half is the one that broke. The
+/// counter existed on the aggregator and was correct there; the report
+/// was assembled field by field in two places, and the binary's copy
+/// was missed — so `oq-ingest` printed nothing, and would have gone on
+/// printing nothing, because a field that is never assigned reads zero
+/// rather than failing.
+///
+/// That number is the difference between the windows a capture crossed
+/// and the ticks it wrote. Anyone comparing a re-converted file against
+/// an older one needs it, and should not have to derive it.
+#[test]
+fn windows_dropped_before_the_first_trade_reach_the_report() {
+    let depth = |at: i64, first: u64, last: u64| {
+        Record {
+        kind: Kind::Payload,
+        local_ts: at,
+        exch_ts: at,
+        payload: format!(
+            r#"{{"e":"depthUpdate","E":{at},"U":{first},"u":{last},"b":[["99.00","1.000"]],"a":[["101.00","1.000"]]}}"#
+        )
+        .into_bytes(),
+    }
+    };
+    // Three windows of book with no trade in them, then a trade.
+    let books = [
+        depth(T0, 1, 1),
+        depth(T0 + SECOND, 2, 2),
+        depth(T0 + 2 * SECOND, 3, 3),
+    ];
+    let trades = [trade(T0 + 3 * SECOND, "100.00", "1.000")];
+    let (ticks, report) = to_ticks(
+        &BinancePerp::new(),
+        &[
+            Source {
+                records: &books,
+                stream: "depth",
+            },
+            Source {
+                records: &trades,
+                stream: "trade",
+            },
+        ],
+        scales(),
+        SECOND,
+    )
+    .expect("convert");
+
+    assert_eq!(
+        report.windows_before_first_trade, 3,
+        "three windows were crossed before the trade stream said anything"
+    );
+    assert!(
+        ticks.iter().all(|t| t.last.0 > 0),
+        "and none of them was published: {ticks:?}"
+    );
+    // The identity a reader compares two conversions with.
+    assert_eq!(report.ticks, ticks.len() as u64);
+}

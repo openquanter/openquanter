@@ -64,7 +64,34 @@ pub struct Report {
     ///
     /// Large here means the streams are reordering against each other,
     /// which is worth knowing before the numbers are believed.
+    ///
+    /// Always zero on the conversion path, and that is a fact rather
+    /// than an omission: [`to_ticks`] sorts its events before folding
+    /// them. It is copied rather than left unset, so that if the sort
+    /// ever goes away the counter starts reporting instead of going on
+    /// reading zero.
     pub out_of_order: u64,
+}
+
+impl Report {
+    /// Take the aggregator's counters, and the tick count, as one act.
+    ///
+    /// Two callers reach this: [`to_ticks`], and the binary, which folds
+    /// an hour at a time and so cannot use it. They copied the fields
+    /// one by one in two places, and the second time a counter was added
+    /// the binary's copy was missed — so `oq-ingest` printed nothing for
+    /// it, and would have gone on printing nothing, because **a field
+    /// that is never assigned reads zero rather than failing**.
+    ///
+    /// A new counter is now copied in exactly one place.
+    pub fn absorb(&mut self, counts: crate::agg::Counts, ticks: usize) {
+        self.depth_applied = counts.depth_applied;
+        self.trades = counts.trades;
+        self.quiet_windows = counts.quiet_windows;
+        self.windows_before_first_trade = counts.windows_before_first_trade;
+        self.out_of_order = counts.out_of_order;
+        self.ticks = ticks as u64;
+    }
 }
 
 /// One source file, and what kind of records it holds.
@@ -105,13 +132,7 @@ pub fn to_ticks(
     let mut report = Report::default();
     let mut ticks = fold_into(venue, sources, scales, &mut agg, &mut report);
     ticks.extend(agg.flush());
-    let counts = agg.counts();
-    report.depth_applied = counts.depth_applied;
-    report.trades = counts.trades;
-    report.quiet_windows = counts.quiet_windows;
-    report.windows_before_first_trade = counts.windows_before_first_trade;
-    report.out_of_order = counts.out_of_order;
-    report.ticks = ticks.len() as u64;
+    report.absorb(agg.counts(), ticks.len());
     Ok((ticks, report))
 }
 
