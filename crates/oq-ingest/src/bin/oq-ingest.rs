@@ -193,6 +193,7 @@ fn main() -> ExitCode {
     report.depth_applied = counts.depth_applied;
     report.trades = counts.trades;
     report.quiet_windows = counts.quiet_windows;
+    report.windows_before_first_trade = counts.windows_before_first_trade;
     report.ticks = ticks.len() as u64;
     println!("batches {batches} hour(s) folded one at a time");
     // The instrument id is opaque to the tick format; a stable hash of
@@ -216,6 +217,19 @@ fn main() -> ExitCode {
     println!("  from trades   {}", report.trades);
     println!("  from depth    {}", report.depth_applied);
     println!("  quiet windows {}", report.quiet_windows);
+    if report.windows_before_first_trade > 0 {
+        // Separate from the quiet-window count: a quiet window is a
+        // market that did not trade, these are windows the capture
+        // reached before its trade stream had said anything at all.
+        // They are the only ones dropped, so this is the difference
+        // between the windows crossed and the ticks written, and a
+        // reader comparing a re-converted file against an older one
+        // should not have to derive it.
+        println!(
+            "  before 1st trade {} dropped — the trade stream had not spoken yet",
+            report.windows_before_first_trade
+        );
+    }
     println!("gap markers     {}", report.gaps);
     println!("unparseable     {}", report.unparseable);
     println!("wrote           {out} ({} bytes)", encoded.len());

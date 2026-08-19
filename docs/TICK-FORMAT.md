@@ -222,6 +222,21 @@ custom reader:
 df = pd.read_parquet("out.parquet")
 latency_ms = (df.local_ts - df.exch_ts) / 1e6   # median 89.8, p99 102.1
 ```
+**The 4.06 MB and the 24% predate the aggregator carrying `last` across
+windows, and are the only figures here that do.** The tick count does
+not move: ticks are dropped only before a capture's first trade, and
+`oq-ingest` now prints how many that was. Nor does 16.79 MB, which is
+that count times a 64-byte record — 262,365 × 64 = 16,791,360, exactly
+the figure quoted. The compressed size is the one number that depends
+on the *content* rather than the count, and the content changed: at a
+100 ms window this capture averages 0.48 trades per window, so more
+than half of its ticks previously carried `last = 0` and now carry the
+last traded price. A long run of a repeated constant compresses better
+than one alternating between zero and a price, so the export is
+expected to shrink and the ratio with it. Re-running the conversion
+settles it; the archive itself is unaffected, because what was wrong
+was the conversion and not the capture.
+
 
 The checksum is not carried across. Parquet has page-level integrity of
 its own, and asserting ours over bytes we no longer control would be a
