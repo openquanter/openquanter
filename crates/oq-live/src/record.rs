@@ -52,6 +52,8 @@ pub mod kind {
     pub const REFUSED: u16 = 6;
     /// Positions adopted from the venue.
     pub const RECONCILED: u16 = 7;
+    /// What the strategy was waiting for, sampled on a timer.
+    pub const WAITING: u16 = 8;
 }
 
 /// How a submitted order turned out.
@@ -140,6 +142,16 @@ pub enum Record {
         at: Nanos,
         legs: Vec<(String, String, i64, i64)>,
     },
+    /// What the strategy was waiting for, sampled on a timer.
+    ///
+    /// Every other record here is something that happened. This is the
+    /// one that says why nothing did — which is the state a run is
+    /// hardest to explain in, and the state a run that places no orders
+    /// spends all of its time in.
+    Waiting {
+        at: Nanos,
+        entries: Vec<(String, i64)>,
+    },
 }
 
 impl Record {
@@ -154,6 +166,7 @@ impl Record {
             Self::Fill { .. } => kind::FILL,
             Self::Refused { .. } => kind::REFUSED,
             Self::Reconciled { .. } => kind::RECONCILED,
+            Self::Waiting { .. } => kind::WAITING,
         }
     }
 
@@ -233,6 +246,14 @@ impl Record {
                 put_i64(&mut out, at.0);
                 put_str(&mut out, breach);
             }
+            Self::Waiting { at, entries } => {
+                put_i64(&mut out, at.0);
+                put_i64(&mut out, i64::try_from(entries.len()).unwrap_or(0));
+                for (name, value) in entries {
+                    put_str(&mut out, name);
+                    put_i64(&mut out, *value);
+                }
+            }
             Self::Reconciled { at, legs } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(legs.len()).unwrap_or(0));
@@ -297,6 +318,15 @@ impl Record {
                 at: Nanos(take_i64(&mut p)?),
                 breach: take_str(&mut p)?,
             },
+            kind::WAITING => {
+                let at = Nanos(take_i64(&mut p)?);
+                let n = take_i64(&mut p)?;
+                let mut entries = Vec::new();
+                for _ in 0..n.max(0) {
+                    entries.push((take_str(&mut p)?, take_i64(&mut p)?));
+                }
+                Self::Waiting { at, entries }
+            }
             kind::RECONCILED => {
                 let at = Nanos(take_i64(&mut p)?);
                 let n = take_i64(&mut p)?;
@@ -405,6 +435,10 @@ mod tests {
         roundtrip(&Record::Refused {
             at: Nanos(10),
             breach: "Halted".into(),
+        });
+        roundtrip(&Record::Waiting {
+            at: Nanos(12),
+            entries: vec![("bars".into(), 15), ("volume_gate".into(), 1)],
         });
         roundtrip(&Record::Reconciled {
             at: Nanos(11),

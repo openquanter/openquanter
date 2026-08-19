@@ -69,6 +69,14 @@ pub struct Trader<S: Strategy, E: Execution> {
 }
 
 impl<S: Strategy, E: Execution> Trader<S, E> {
+    /// The strategy, for asking it what it is waiting for.
+    ///
+    /// Read-only on purpose: the host observes the strategy, it does not
+    /// reach in and change it.
+    pub const fn strategy(&self) -> &S {
+        &self.strategy
+    }
+
     #[must_use]
     pub fn new(strategy: S, session: Session<E>) -> Self {
         Self {

@@ -290,6 +290,18 @@ impl<E: Execution> Session<E> {
         self.write(&Record::Reconciled { at, legs });
     }
 
+    /// What the strategy is waiting for, sampled on a timer.
+    ///
+    /// Nothing is written when the strategy names no conditions: an
+    /// empty record would claim the question was asked and answered,
+    /// when it was asked and declined.
+    pub fn record_waiting(&mut self, at: oq_types::Nanos, entries: Vec<(String, i64)>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.write(&Record::Waiting { at, entries });
+    }
+
     /// A tick the strategy is about to see.
     pub fn record_tick(&mut self, tick: &oq_engine::Tick) {
         self.write(&Record::Tick {

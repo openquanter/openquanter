@@ -189,6 +189,10 @@ fn render(record: &Record) -> String {
             at.0
         ),
         Record::Refused { at, breach } => format!("refused {}  {breach}", at.0),
+        Record::Waiting { at, entries } => {
+            let body: Vec<String> = entries.iter().map(|(k, v)| format!("{k} {v}")).collect();
+            format!("waiting {}  {}", at.0, body.join(", "))
+        }
         Record::Reconciled { at, legs } => {
             // The legs individually, not a count. This record is what a
             // migration leaves behind, and "3 leg(s)" does not tell a
@@ -315,6 +319,23 @@ mod readout {
                 breach: "zz-breach".into(),
             },
             &["1111", "zz-breach"],
+        );
+    }
+
+    /// The conditions, by name and value.
+    ///
+    /// This is the record that explains a run in which nothing
+    /// happened, so a readout that summarised it — "3 conditions" —
+    /// would leave the run exactly as unexplained as having no record
+    /// at all.
+    #[test]
+    fn a_wait_shows_every_condition_it_names() {
+        shows(
+            &Record::Waiting {
+                at: Nanos(1_111),
+                entries: vec![("zz_bars".into(), 2_222), ("zz_gate".into(), 3_333)],
+            },
+            &["1111", "zz_bars", "2222", "zz_gate", "3333"],
         );
     }
 

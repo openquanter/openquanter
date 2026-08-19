@@ -199,6 +199,31 @@ pub trait Strategy {
     /// the live host.
     fn on_placed(&mut self, _id: OrderId, _accepted: bool) {}
 
+    /// What this strategy is waiting for, named, for the record.
+    ///
+    /// A run that does nothing is the hardest one to explain, because
+    /// doing nothing leaves no trace: every record in the journal is
+    /// something that happened. A twelve-hour run placed no orders and
+    /// the reason — a volume threshold calibrated for a busier venue —
+    /// was reachable only by reading the strategy's source, which is
+    /// the worst tool to reach for while something is going wrong.
+    ///
+    /// Return the conditions between this strategy and its next action,
+    /// as `(name, value)`. Counters and thresholds, not prose: they are
+    /// journalled and compared across runs, and a sentence cannot be.
+    /// Typical entries are progress towards a warm-up (`bars`, `200`) or
+    /// whether a gate is currently armed (`volume_gate`, `1`).
+    ///
+    /// Called on a timer rather than per tick, so the cost is a snapshot
+    /// every thirty seconds and not a per-observation allocation.
+    ///
+    /// The default is empty: a strategy that says nothing is as
+    /// unexplainable as before, which is a choice its author makes
+    /// rather than one the framework makes for them.
+    fn waiting_on(&self) -> Vec<(&'static str, i64)> {
+        Vec::new()
+    }
+
     /// A name for reports.
     fn name(&self) -> &str;
 }
