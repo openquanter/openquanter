@@ -165,6 +165,7 @@ input this project cannot reach, the second has not been written.
 | Research | **Strict mode refusing over-threshold results** | Built — `SweepReport::refusals` names every reason, and an unscored sweep is refused rather than waved through |
 | Fidelity | Fidelity report and participation-rate flag | Built |
 | Adoption | Quickstart, seven example strategies, goldens | Built |
+| Adoption | **Classic-strategy catalogue** (RSI, MACD, Bollinger, Donchian, grid, dual-thrust) | Built — teaching references, each one documenting where it breaks rather than claiming an edge |
 | Gate | **G3 throughput ≥8× the interpreted baseline** | **Blocked** — needs a multi-year window and a same-machine predecessor run; the data is on production hosts and the capture is days old |
 | Gate | **G7 re-passing parity after conversion** | **Half blocked** — the mode half is met and tested; the parity half shares G3's blocker |
 | Gate | **G11 external cold start ≤ 30 minutes** | **Blocked** — needs a person who has not seen this repository |
@@ -182,6 +183,8 @@ input this project cannot reach, the second has not been written.
 | Risk | **Limit changes journalled as auditable events** | Built — `VersionedLimits` records which field moved and from what; a no-op does not advance the version |
 | Live | Process assembly, snapshot recovery | Built |
 | Live | **Books kept by the kernel** (one implementation for live and backtest) | Built |
+| Live | **A strategy learns whether the venue took its order** | Built — `Strategy::on_placed`, called from the backtest loop *and* the live trader, so a strategy written against one runs on the other |
+| Live | **A runnable strategy against a venue** | Built — `oq-live`'s `grid_live` example; `observe` sends nothing and `probe` is a diagnostic, so before it the repository had no way to run a strategy on a venue at all |
 | Live | Graceful restart, one process per account | Partial (recovery exists; orchestration does not) |
 | Attribution | **Gap decomposed by cause, with an unexplained residual** | Built |
 | Attribution | Shadow → evidence → report, end to end | Built |

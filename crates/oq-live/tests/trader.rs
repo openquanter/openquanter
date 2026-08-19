@@ -217,3 +217,129 @@ fn a_refused_order_is_not_remembered_as_resting() {
     assert!(matches!(out[0], Outcome::Refused { .. }), "{out:?}");
     assert!(t.resting().is_empty());
 }
+
+// ---------------------------------------------------------------------
+// Unanswered submissions
+// ---------------------------------------------------------------------
+
+/// A venue that takes the order and then goes quiet: `place` returns
+/// `Unknown`, and asking about it does not settle the question either.
+///
+/// This is the shape of a timeout on a request that may well have been
+/// executed — the one case where the account and this process can
+/// silently disagree.
+struct Silent;
+
+impl Execution for Silent {
+    fn place(&self, order: &NewOrder, _i: &Instrument) -> Placed {
+        Placed::Unknown(oq_gateway::Unresolved {
+            client_id: order.client_id.clone(),
+            reason: "timed out waiting for a response".into(),
+        })
+    }
+    fn cancel(&self, _symbol: &str, client_id: &str) -> Placed {
+        Placed::Unknown(oq_gateway::Unresolved {
+            client_id: client_id.to_string(),
+            reason: "timed out".into(),
+        })
+    }
+    fn order_status(&self, _s: &str, _c: &str) -> Result<Option<OrderAck>, VenueError> {
+        Err(VenueError::Transport("still nothing".into()))
+    }
+}
+
+/// Counts what the host claims to know about each submission.
+///
+/// The log is shared rather than read back through an accessor: adding
+/// one to `Trader` would widen the public API for a test's convenience,
+/// and nothing outside a test wants it.
+struct Listening {
+    told: std::rc::Rc<RefCell<Vec<(OrderId, bool)>>>,
+    fired: Vec<Intent>,
+}
+
+impl Strategy for Listening {
+    fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+        out.append(&mut self.fired);
+    }
+    fn on_placed(&mut self, id: OrderId, accepted: bool) {
+        self.told.borrow_mut().push((id, accepted));
+    }
+    fn name(&self) -> &str {
+        "listening"
+    }
+}
+
+type Told = std::rc::Rc<RefCell<Vec<(OrderId, bool)>>>;
+
+fn silent_trader(intents: Vec<Intent>) -> (Trader<Listening, Silent>, Told) {
+    let session = Session::start(
+        Silent,
+        RiskGate::new(Limits {
+            max_order_qty: QtyLots(100),
+            max_position_qty: QtyLots(1000),
+            max_order_notional: Cash(1_000_000 * oq_types::CASH_SCALE),
+            price_band: Ratio(500_000_000),
+            max_working: 10,
+            max_rate: 100,
+            rate_window: Nanos(1_000_000_000),
+        }),
+        SessionConfig {
+            symbol: "BTCUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "live".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("clean venue");
+    let told: Told = std::rc::Rc::new(RefCell::new(Vec::new()));
+    (
+        Trader::new(
+            Listening {
+                told: std::rc::Rc::clone(&told),
+                fired: intents,
+            },
+            session,
+        ),
+        told,
+    )
+}
+
+/// An unanswered submission is its own outcome, not a refusal.
+///
+/// They oblige opposite actions. A refusal is final and the order can
+/// be replaced; an unresolved submission may be resting right now, and
+/// replacing it is the single move that turns *maybe one order* into
+/// *certainly two*. Reporting one as the other is not a labelling
+/// problem — it is an instruction to do the wrong thing.
+#[test]
+fn an_unanswered_submission_is_not_a_refusal() {
+    let (mut t, _told) = silent_trader(vec![limit(1)]);
+    let outcomes = t.on_tick(&ctx(), Nanos(0));
+    assert!(
+        matches!(outcomes.as_slice(), [Outcome::Unresolved { local, .. }] if *local == OrderId(1)),
+        "expected one Unresolved, got {outcomes:?}"
+    );
+}
+
+/// And it is not reported to the strategy at all.
+///
+/// `on_placed`'s contract says so in as many words, but the guard it
+/// described could not fire: `Submission::Unresolved` was mapped onto
+/// `Outcome::Refused` before `report_placements` ever saw it, so the
+/// match arm meant to skip unresolved placements was unreachable and
+/// every one of them was reported as `accepted = false` — telling the
+/// strategy an order does not exist when it may be resting.
+#[test]
+fn the_strategy_is_not_told_an_unanswered_order_was_refused() {
+    let (mut t, told) = silent_trader(vec![limit(1)]);
+    let _ = t.on_tick(&ctx(), Nanos(0));
+    assert!(
+        told.borrow().is_empty(),
+        "the strategy was told {:?} about an order nobody has an answer for",
+        told.borrow()
+    );
+}

@@ -60,6 +60,30 @@ pub struct RunConfig {
     pub broker_code: Option<String>,
 }
 
+/// The name this process was invoked as.
+///
+/// `run` is called by more than one binary — `oq-trade` and the
+/// `grid_live` example, and whatever a reader writes next — so a
+/// hard-coded name puts a *different* program's name in front of every
+/// diagnostic, which is a bad thing to be reading at the moment
+/// something has gone wrong on a venue.
+///
+/// It also names the journal. Two programs defaulting to the same
+/// journal file is worse than cosmetic: the second run's record lands
+/// in a file describing the first one's.
+fn program() -> String {
+    std::env::args()
+        .next()
+        .and_then(|a| {
+            std::path::Path::new(&a)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        // Argv can be empty and a stem can be non-UTF-8. Neither is
+        // worth failing a run over.
+        .unwrap_or_else(|| "oq-live".to_string())
+}
+
 /// Run one strategy against one venue until the clock or a signal ends it.
 ///
 /// The strategy is built by a closure rather than passed in, because the
@@ -83,7 +107,7 @@ where
     let creds = match Credentials::from_env() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("oq-trade: {e}");
+            eprintln!("{}: {e}", program());
             return ExitCode::FAILURE;
         }
     };
@@ -267,7 +291,7 @@ where
     let journal_path = cfg
         .journal
         .clone()
-        .unwrap_or_else(|| "oq-trade.oqj".to_string());
+        .unwrap_or_else(|| format!("{}.oqj", program()));
     let no_journal = cfg.journal.is_none();
 
     let session = match Session::start(
@@ -447,6 +471,12 @@ where
     let mut ticks = 0_u64;
     let mut sent = 0_u64;
     let mut cancelled = 0_u64;
+    // Counted because the difference between them is the number a
+    // backtest cannot produce. A summary reporting only what was *asked
+    // for* is the same optimism the `on_placed` callback exists to fix,
+    // one level up.
+    let mut refused = 0_u64;
+    let mut unresolved = 0_u64;
     let mut last_tick_report = Instant::now();
 
     while Instant::now() < deadline && !shutdown_requested() {
@@ -489,6 +519,8 @@ where
                             match &outcome {
                                 Outcome::Sent { .. } => sent += 1,
                                 Outcome::Cancelled { .. } => cancelled += 1,
+                                Outcome::Refused { .. } => refused += 1,
+                                Outcome::Unresolved { .. } => unresolved += 1,
                                 _ => {}
                             }
                             report(&outcome);
@@ -602,7 +634,16 @@ where
     if limits.version() != 1 {
         println!("limits           ended at version {}", limits.version());
     }
-    println!("orders           {sent} placed, {cancelled} withdrawn");
+    println!("orders           {sent} placed, {refused} refused, {cancelled} withdrawn");
+    if unresolved > 0 {
+        // Loud, and only when it happened. This is the count that says
+        // the account may not be where this summary claims it is, so it
+        // does not belong on the same line as the ones that are known.
+        println!(
+            "UNRESOLVED       {unresolved} submission(s) never got an answer — reconcile \
+             against the venue before trusting anything above"
+        );
+    }
     // The in-process segment only. G6's far boundary is the socket write,
     // which the HTTP client does not expose, so this is not the gate's
     // number and is not labelled as it.
@@ -709,6 +750,12 @@ fn report(outcome: &Outcome) {
     match outcome {
         Outcome::Sent { local, client_id } => println!("sent             {local:?} as {client_id}"),
         Outcome::Refused { local, why } => println!("refused          {local:?}: {why}"),
+        // Deliberately not printed as a refusal. An operator reading
+        // "refused" concludes the order does not exist and that the
+        // account is where they left it; here neither is known.
+        Outcome::Unresolved { local, why } => println!(
+            "UNRESOLVED       {local:?}: {why} — this order may be resting; do not replace it"
+        ),
         Outcome::Cancelled { local, client_id } => {
             println!("cancelled        {local:?} ({client_id})");
         }
