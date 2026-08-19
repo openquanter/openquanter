@@ -56,9 +56,15 @@ pub struct SweepReport {
     /// Deflated Sharpe ratio of the best configuration, or the reason it
     /// could not be computed.
     pub deflated_sharpe: Result<f64, String>,
-    /// Probability that the best in-sample configuration is not the best
-    /// out of sample, or the reason it could not be computed.
-    pub pbo: Result<f64, String>,
+    /// Whether the best in-sample configuration survives out of sample,
+    /// or the reason it could not be computed.
+    ///
+    /// The whole report and not the headline number. `PboReport` also
+    /// carries the split logits and a performance-degradation slope
+    /// whose own documentation calls it *the defining symptom of an
+    /// overfit search*, and both were computed on every sweep and
+    /// discarded at this line.
+    pub pbo: Result<oq_stats::PboReport, String>,
     /// Configurations that produced too few returns to score.
     pub unscorable: Vec<String>,
 }
@@ -141,7 +147,7 @@ pub fn sweep<S: Strategy>(
     }
 }
 
-fn pbo_of(columns: &[Vec<f64>]) -> Result<f64, String> {
+fn pbo_of(columns: &[Vec<f64>]) -> Result<oq_stats::PboReport, String> {
     if columns.len() < 2 {
         return Err("fewer than two scorable configurations".to_string());
     }
@@ -157,9 +163,7 @@ fn pbo_of(columns: &[Vec<f64>]) -> Result<f64, String> {
     }
     let cut: Vec<Vec<f64>> = columns.iter().map(|c| c[..shortest].to_vec()).collect();
     let matrix = PerformanceMatrix::from_columns(&cut).map_err(|e| format!("{e}"))?;
-    probability_of_backtest_overfitting(&matrix, blocks)
-        .map(|r| r.pbo)
-        .map_err(|e| format!("{e}"))
+    probability_of_backtest_overfitting(&matrix, blocks).map_err(|e| format!("{e}"))
 }
 
 #[cfg(test)]
@@ -227,8 +231,18 @@ mod tests {
         let b: Vec<f64> = (0..60).map(|i| 0.01 * f64::from(i % 5) - 0.01).collect();
         let got = pbo_of(&[a, b]);
         assert!(got.is_ok(), "60 is enough for 16 blocks: {got:?}");
-        let pbo = got.expect("computed");
-        assert!((0.0..=1.0).contains(&pbo), "a probability: {pbo}");
+        let report = got.expect("computed");
+        assert!(
+            (0.0..=1.0).contains(&report.pbo),
+            "a probability: {}",
+            report.pbo
+        );
+        // The diagnostics travel with it now. They were computed here
+        // all along and thrown away at the call site, which is why a
+        // sweep could never report the slope its own documentation
+        // calls the defining symptom of an overfit search.
+        assert_eq!(report.logits.len(), report.n_splits);
+        assert!(report.performance_degradation.is_finite());
     }
 
     #[test]
@@ -262,6 +276,14 @@ pub struct Thresholds {
     /// number of trials that produced it. Below a half, the search is
     /// more likely to have manufactured the winner than found it.
     pub min_deflated_sharpe: f64,
+    /// Smallest acceptable slope of out-of-sample Sharpe on in-sample
+    /// Sharpe.
+    ///
+    /// At or below zero, in-sample rank carries no out-of-sample
+    /// information — a search that ordered its configurations by noise.
+    /// A sweep can pass the PBO threshold and fail this, which is why
+    /// it is its own refusal rather than a footnote to that one.
+    pub min_degradation_slope: f64,
 }
 
 impl Default for Thresholds {
@@ -276,6 +298,12 @@ impl Default for Thresholds {
         Self {
             max_pbo: 0.35,
             min_deflated_sharpe: 0.95,
+            // Zero, and not a margin above it, because the statistic's
+            // own meaning changes sign there: above zero, being better
+            // in sample predicted something; at or below, it predicted
+            // nothing. A tolerance would be inventing a threshold where
+            // the definition already supplies one.
+            min_degradation_slope: 0.0,
         }
     }
 }
@@ -288,6 +316,19 @@ pub enum Refusal {
         /// What the sweep measured.
         pbo: f64,
         /// What it had to be at most.
+        limit: f64,
+    },
+    /// In-sample rank carries no out-of-sample information.
+    ///
+    /// Separate from `Overfit` because they measure different things
+    /// and can disagree. PBO asks how often the best configuration
+    /// fails to stay best; this asks whether being better in sample
+    /// predicted anything at all. A search can pass the first and fail
+    /// this, and the failure means the ranking it produced was noise.
+    NoInformation {
+        /// What the sweep measured.
+        slope: f64,
+        /// What it had to exceed.
         limit: f64,
     },
     /// The deflated Sharpe ratio is too low.
@@ -318,6 +359,13 @@ impl core::fmt::Display for Refusal {
                 "probability of backtest overfitting is {pbo:.3}, above the limit of \
                  {limit:.3}: this search is likelier to have found its own noise than an edge"
             ),
+            Self::NoInformation { slope, limit } => write!(
+                f,
+                "out-of-sample Sharpe regressed on in-sample Sharpe has slope {slope:.3}, \
+                 at or below {limit:.3}: ranking the configurations in sample predicted \
+                 nothing about them out of sample, so the winner is the one that fit the \
+                 noise best"
+            ),
             Self::Deflated { value, limit } => write!(
                 f,
                 "deflated Sharpe ratio is {value:.3}, below the limit of {limit:.3}: \
@@ -344,11 +392,28 @@ impl SweepReport {
     pub fn refusals(&self, thresholds: Thresholds) -> Vec<Refusal> {
         let mut out = Vec::new();
         match &self.pbo {
-            Ok(p) if *p > thresholds.max_pbo => out.push(Refusal::Overfit {
-                pbo: *p,
-                limit: thresholds.max_pbo,
-            }),
-            Ok(_) => {}
+            Ok(r) => {
+                // Two independent checks, not two arms of one match. A
+                // guard clause would report whichever fired first and
+                // hide the other, which is precisely what the paragraph
+                // above says this function must not do — and the sweep
+                // example proved it: a slope of -0.95 went unreported
+                // because the PBO threshold matched first.
+                if r.pbo > thresholds.max_pbo {
+                    out.push(Refusal::Overfit {
+                        pbo: r.pbo,
+                        limit: thresholds.max_pbo,
+                    });
+                }
+                // They can disagree. PBO asks how often the winner stops
+                // winning; the slope asks whether winning meant anything.
+                if r.performance_degradation <= thresholds.min_degradation_slope {
+                    out.push(Refusal::NoInformation {
+                        slope: r.performance_degradation,
+                        limit: thresholds.min_degradation_slope,
+                    });
+                }
+            }
             Err(why) => out.push(Refusal::Unscored {
                 statistic: "probability of backtest overfitting",
                 why: why.clone(),
@@ -379,14 +444,77 @@ impl SweepReport {
 mod strict_mode {
     use super::*;
 
+    /// A report with a given PBO and a slope that passes, so a test
+    /// about one threshold is not silently also about the other.
     fn report(pbo: Result<f64, String>, dsr: Result<f64, String>) -> SweepReport {
+        with_slope(pbo, dsr, 1.0)
+    }
+
+    fn with_slope(pbo: Result<f64, String>, dsr: Result<f64, String>, slope: f64) -> SweepReport {
         SweepReport {
             results: Vec::new(),
             equity_every: 1,
             deflated_sharpe: dsr,
-            pbo,
+            pbo: pbo.map(|p| oq_stats::PboReport {
+                pbo: p,
+                n_splits: 16,
+                logits: vec![0.0; 16],
+                probability_of_loss: 0.0,
+                median_oos_sharpe: 0.0,
+                performance_degradation: slope,
+            }),
             unscorable: Vec::new(),
         }
+    }
+
+    /// A sweep can clear the PBO threshold and still be a search that
+    /// ordered its configurations by noise.
+    ///
+    /// The two statistics answer different questions — how often the
+    /// winner stops winning, and whether winning meant anything — so a
+    /// gate that checked only the first would pass exactly the sweep
+    /// this one exists to stop.
+    #[test]
+    fn a_flat_slope_is_refused_even_when_the_pbo_passes() {
+        let r = with_slope(Ok(0.05), Ok(0.99), 0.0);
+        let refusals = r.refusals(Thresholds::default());
+        assert!(
+            refusals
+                .iter()
+                .any(|x| matches!(x, Refusal::NoInformation { .. })),
+            "a zero slope was accepted: {refusals:?}"
+        );
+    }
+
+    /// Failing both reports both.
+    ///
+    /// Written after getting it wrong: the first version made these two
+    /// arms of one `match`, so a sweep that failed both reported only
+    /// the PBO and the slope went unmentioned. The sweep example caught
+    /// it — a measured slope of -0.95 produced no refusal — which is
+    /// the sort of thing a guard clause hides and a run does not.
+    #[test]
+    fn a_sweep_failing_the_pbo_and_the_slope_is_refused_on_both() {
+        let r = with_slope(Ok(0.9), Ok(0.99), -0.9);
+        let refusals = r.refusals(Thresholds::default());
+        assert!(
+            refusals
+                .iter()
+                .any(|x| matches!(x, Refusal::Overfit { .. }))
+        );
+        assert!(
+            refusals
+                .iter()
+                .any(|x| matches!(x, Refusal::NoInformation { .. })),
+            "only one of two failures was reported: {refusals:?}"
+        );
+    }
+
+    /// And a positive slope does not add a refusal of its own.
+    #[test]
+    fn a_positive_slope_is_not_refused() {
+        let r = with_slope(Ok(0.05), Ok(0.99), 0.4);
+        assert!(r.refusals(Thresholds::default()).is_empty());
     }
 
     /// A sweep that clears both thresholds is deployable, or the gate
