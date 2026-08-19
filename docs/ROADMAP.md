@@ -163,7 +163,7 @@ input this project cannot reach, the second has not been written.
 | CLI | `data`, `replay`, `parity` subcommands | Built |
 | CLI | `backtest`, `sweep` subcommands | **Deliberately absent** (a strategy is compiled Rust) |
 | Research | Sweeps emit DSR/PBO by default | Built |
-| Research | **Strict mode refusing over-threshold results** | Built — `SweepReport::refusals` names every reason, and an unscored sweep is refused rather than waved through |
+| Research | **Strict mode refusing over-threshold results** | Built — `SweepReport::refusals` names every reason, checks them independently so two failures report as two, and refuses an unscored sweep rather than waving it through. Three reasons now: PBO, deflated Sharpe, and an out-of-sample-on-in-sample Sharpe slope at or below zero |
 | Fidelity | Fidelity report and participation-rate flag | Built |
 | Adoption | Quickstart, seven example strategies, goldens | Built |
 | Adoption | **Classic-strategy catalogue** (RSI, MACD, Bollinger, Donchian, grid, dual-thrust) | Built — teaching references, each one documenting where it breaks rather than claiming an edge |
