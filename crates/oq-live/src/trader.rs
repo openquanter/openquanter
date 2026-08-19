@@ -114,6 +114,22 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         out
     }
 
+    /// The intents the strategy produced on the last call.
+    ///
+    /// Held so a caller can pair an [`Outcome::Sent`] back to what was
+    /// actually asked for: the outcome carries two ids and nothing about
+    /// side, size or price, and the books and the shadow both need those
+    /// to record that an order exists.
+    ///
+    /// It is the whole list, refusals included. Which ones reached the
+    /// venue is the outcomes' answer, not this one's — a method that
+    /// filtered would be making that judgement twice, in two places, and
+    /// they would eventually disagree.
+    #[must_use]
+    pub fn submitted(&self) -> &[Intent] {
+        &self.intents
+    }
+
     /// Tell the strategy which submissions the venue answered.
     ///
     /// Only the ones it answered. An unresolved placement is not reported
