@@ -68,7 +68,8 @@ lowest equity            61.53    -30302.14
 fills                        4                6
 liquidations                 1                0
 
-martingale-ladder: LIQUIDATED 1x, margin-free equity 20908.11 vs real 61.53
+martingale-ladder: LIQUIDATED 1x, first at t=114750000000; margin-free equity
+20908.11 vs real 61.53
 (overstated by 20846.58); 2 fills in the margin-free run happened after the
 account was already closed
 ```
@@ -288,5 +289,5 @@ cargo run --release -p oq-examples --example classics
 这个例子不会打印一条资金曲线就结束。它把每个策略在**建模强平**和**不建模强平**
 两种模式下各跑一遍并同时打印——因为一条永远不会被强平的曲线，描述的是任何交易所
 都不提供的账户。**不加杠杆时六个策略的两列完全相同**，而这本身就是结论：
-**保证金模型在杠杆变成真的之前是看不见的。** 加了杠杆之后，网格最终剩 4.06、
-账户被交易所关闭两次，而 margin-free 那一侧为一个它一直持有着的仓位报告 −513.74。
+**保证金模型在杠杆变成真的之前是看不见的。** 加了杠杆之后，网格最终剩 4.46、
+账户被交易所关闭两次，而 margin-free 那一侧为一个它一直持有着的仓位报告 −508.12。
