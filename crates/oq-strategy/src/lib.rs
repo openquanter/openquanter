@@ -223,9 +223,10 @@ pub trait Strategy {
     /// A run that does nothing is the hardest one to explain, because
     /// doing nothing leaves no trace: every record in the journal is
     /// something that happened. A twelve-hour run placed no orders and
-    /// the reason — a volume threshold calibrated for a busier venue —
-    /// was reachable only by reading the strategy's source, which is
-    /// the worst tool to reach for while something is going wrong.
+    /// the reason — a gate whose threshold that deployment never
+    /// reached — was reachable only by reading the strategy's source,
+    /// which is the worst tool to reach for while something is going
+    /// wrong.
     ///
     /// Return the conditions between this strategy and its next action,
     /// as `(name, value)`. Counters and thresholds, not prose: they are

@@ -1,10 +1,9 @@
 //! Recent history, as the ticks a strategy would have seen.
 //!
-//! A strategy whose indicator needs two hundred bars cannot act for the
-//! first two hundred minutes of a run — three hours and twenty minutes,
-//! measured on the deployment this was written for. Every restart pays
-//! it again, which on a production account is that long unable to manage
-//! whatever it is holding.
+//! A strategy whose indicator needs a window of bars cannot act until it
+//! has one, and from a cold start that wait is measured in hours of real
+//! time. Every restart pays it again, which on a production account is
+//! that long unable to manage whatever it is holding.
 //!
 //! The reference implementation loads a day of bars at startup and falls
 //! back to the venue's REST endpoint when its database has none. This is

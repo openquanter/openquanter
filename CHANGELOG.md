@@ -138,8 +138,14 @@ Nothing here has traded real money, and the entry triggers in
   by the **same kernel** the backtest uses, so there is one book
   implementation rather than two that agree until they do not. Reconciles
   against the venue at startup and refuses to run beside a position it
-  was not told about. Shadow backtest alongside, with the gap decomposed
-  by cause and an explicitly unexplained residual.
+  was not told about, and runs a shadow backtest on the same events, so
+  every run ends with the gap decomposed by cause and an explicitly
+  unexplained residual. Fees come from the venue's own
+  trade records via `Account::fees_charged`, whose default is `None` —
+  an adapter that has not implemented it says so rather than answering
+  zero, because zero is a measurement. Funding is still *unavailable*:
+  the venue reports it on an endpoint no adapter reads. The residual
+  carries what is missing and the report names it.
 - Metrics are a **snapshot value** rendered in the line-oriented form
   collectors read, and alerts are judgements rather than notifications:
   nothing in this workspace sends anything anywhere.

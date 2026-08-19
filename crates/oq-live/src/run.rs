@@ -65,6 +65,33 @@ pub struct RunConfig {
     pub broker_code: Option<String>,
 }
 
+/// Side, quantity and offset of the intent an outcome answers.
+///
+/// `Outcome::Sent` carries two ids and nothing else, which is enough to
+/// map between the strategy and the venue and not enough to tell the
+/// kernel what was sent. `None` for a cancel, which submits nothing.
+fn shape_of(
+    intents: &[oq_strategy::Intent],
+    id: oq_types::OrderId,
+) -> Option<(oq_types::Side, oq_types::QtyLots, oq_types::Offset)> {
+    intents.iter().find_map(|i| match i {
+        oq_strategy::Intent::Limit {
+            id: this,
+            side,
+            qty,
+            offset,
+            ..
+        }
+        | oq_strategy::Intent::Market {
+            id: this,
+            side,
+            qty,
+            offset,
+        } if *this == id => Some((*side, *qty, *offset)),
+        _ => None,
+    })
+}
+
 /// The name this process was invoked as.
 ///
 /// `run` is called by more than one binary — `oq-trade` and the
@@ -339,6 +366,23 @@ where
         // balance nobody read would report an account that is not this.
         starting_balance,
     );
+
+    // The same events, matched by the model instead of by the venue.
+    //
+    // Built here rather than left to a caller because the whole point is
+    // that it sees exactly what the account sees: a shadow fed a
+    // different event stream measures the difference between two event
+    // streams, which is not the number anybody wanted.
+    //
+    // It never places anything. `Shadow::apply` returns nothing for that
+    // reason — a caller acting on its outputs would be running a second
+    // trading system.
+    let mut shadow = crate::shadow::Shadow::new(
+        oq_types::InstrumentId::new(1),
+        oq_margin::Contract::new(10_000),
+        oq_margin::TierTable::example_btcusdt(),
+        starting_balance,
+    );
     // Kept so the adoption can be recorded once the journal exists.
     // Adopting is an in-memory act and has to happen here, before the
     // startup check; recording it has to happen after the writer opens.
@@ -512,6 +556,11 @@ where
         }
     }
 
+    // Stamped before the loop so the fee query at the end covers exactly
+    // this run. Asking for "everything" would sum a previous run's fees
+    // into this one's attribution, which is the sort of number that
+    // looks plausible and is somebody else's.
+    let started_ms = now_ns() / 1_000_000;
     install_signal_handlers();
     let deadline = Instant::now() + Duration::from_secs(60 * u64::try_from(minutes).unwrap_or(5));
     println!("running          until {minutes} minutes elapse or a signal arrives");
@@ -555,6 +604,7 @@ where
                         ticks += 1;
                         trader.record_tick(&tick);
                         metrics.ticks += 1;
+                        shadow.on_tick(tick);
                         for output in books.on_tick(&tick) {
                             // Under venue matching the kernel does not
                             // fill, so anything here is the account
@@ -565,6 +615,26 @@ where
                         }
                         let ctx = books.context(tick);
                         for outcome in trader.on_tick(&ctx, now) {
+                            if let Outcome::Sent { local, .. } = &outcome {
+                                // The kernel is told an order exists.
+                                // Without this `Context::working` is zero
+                                // for every live strategy that reads it,
+                                // and the books hold no order for a fill
+                                // to answer.
+                                if let Some((side, qty, offset)) =
+                                    shape_of(trader.submitted(), *local)
+                                {
+                                    books.on_submit(*local, side, qty, offset, now);
+                                    shadow.apply(&oq_core::Event::Submit {
+                                        id: *local,
+                                        side,
+                                        price: None,
+                                        qty,
+                                        offset,
+                                        stamp: oq_types::Stamp::new(now.0, now.0),
+                                    });
+                                }
+                            }
                             match &outcome {
                                 Outcome::Sent { .. } => sent += 1,
                                 Outcome::Cancelled { .. } => cancelled += 1,
@@ -590,6 +660,13 @@ where
                 );
                 trader.apply(&u);
                 if let Some(fill) = fill_of(&u, &instrument) {
+                    shadow.on_venue_fill(
+                        fill.order,
+                        fill.side,
+                        fill.price,
+                        fill.qty,
+                        fill.stamp.exch,
+                    );
                     match books.on_venue_fill(&fill) {
                         crate::books::Booked::Applied(outputs) => {
                             for output in outputs {
@@ -663,6 +740,64 @@ where
     let _ = trader.close_stream();
 
     println!("ticks            {ticks}");
+
+    // What the model would have done with the same observations, and
+    // where it differs. Printed even when nothing traded: "no divergence
+    // because no trade" is a different statement from "no divergence",
+    // and only one of them is evidence.
+    // Asked once, at the end, over the window this run covered. A
+    // failure is reported and not fatal: the run is over, and refusing
+    // to print the rest of the report because one component could not be
+    // read would lose the components that could.
+    let shadow_fees = shadow.model_fees();
+    let venue_fees = match trader.venue().fees_charged(&symbol, started_ms) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fees             could not be read: {e}");
+            None
+        }
+    };
+    shadow.finish(Nanos(now_ns()));
+    println!();
+    let divergences = shadow.divergences();
+    let flattering = shadow.flattering();
+    println!(
+        "shadow           {} divergence(s), {flattering} of them flattering the model",
+        divergences.len()
+    );
+    // Every one, not a sample. A divergence that was summarised away is
+    // one nobody attributed, and the count above is the thing this run
+    // exists to produce.
+    for d in divergences {
+        println!(
+            "  {}{}",
+            if d.flatters_the_model() { "! " } else { "  " },
+            d.summary_line()
+        );
+    }
+    let attribution = oq_parity::attribution::attribute(
+        // Identified by what this run was, so a report cannot be
+        // mistaken for one from a different build or contract. The
+        // limits are in the config hash because a limit that fired is
+        // part of why the two arms differ.
+        oq_parity::RunManifest::from_content(
+            option_env!("GIT_COMMIT").unwrap_or("unknown"),
+            symbol.as_bytes(),
+            format!("{:?}", cfg.limits).as_bytes(),
+            format!("{}-{symbol}", cfg.strategy_name),
+        ),
+        &instrument,
+        books.realized_net(),
+        shadow.model_pnl(),
+        // Funding stays `None`: the venue reports it on an endpoint this
+        // adapter does not read, and zero is a measurement nobody took.
+        // Fees are asked for, and an adapter that does not report them
+        // says so rather than answering zero — either way `attribution`
+        // renders the component honestly and the residual carries what
+        // is missing.
+        &shadow.evidence(None, venue_fees.map(|v| (v, shadow_fees))),
+    );
+    print!("{}", attribution.render());
 
     // What a monitoring system would have read, and what it would have
     // woken somebody for. Printed at the end because this build has no
@@ -1166,5 +1301,72 @@ mod warm_up {
     #[test]
     fn no_bars_is_no_ticks() {
         assert!(warm_ticks(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shape_of;
+    use oq_strategy::Intent;
+    use oq_types::{Offset, OrderId, PriceTicks, QtyLots, Side};
+
+    /// What is **not** covered here, said rather than left to be
+    /// assumed: that `run` calls `books.on_submit` and `shadow.apply`
+    /// at all. That was the defect — `Books` has tested `working`
+    /// since it was written and those tests passed the whole time,
+    /// because the unit was always right and nothing invoked it.
+    /// Reaching the call site needs a venue, and there is no way to
+    /// build one in a test.
+    fn market(id: u64, side: Side, qty: i64) -> Intent {
+        Intent::Market {
+            id: OrderId(id),
+            side,
+            qty: QtyLots(qty),
+            offset: Offset::Open,
+        }
+    }
+
+    #[test]
+    fn an_outcome_is_matched_back_to_what_was_asked_for() {
+        let intents = vec![
+            market(1, Side::Buy, 3),
+            market(2, Side::Sell, 7),
+            Intent::Cancel(OrderId(1)),
+        ];
+        assert_eq!(
+            shape_of(&intents, OrderId(2)),
+            Some((Side::Sell, QtyLots(7), Offset::Open))
+        );
+    }
+
+    /// A limit order carries its shape too, and the price is not part
+    /// of it: what the books need from a submission is that an order
+    /// exists, and a live order's resting price is the venue's.
+    #[test]
+    fn a_limit_order_is_matched_by_id_and_not_by_price() {
+        let intents = vec![Intent::Limit {
+            id: OrderId(9),
+            side: Side::Buy,
+            price: PriceTicks(6_000_000),
+            qty: QtyLots(2),
+            offset: Offset::Close,
+        }];
+        assert_eq!(
+            shape_of(&intents, OrderId(9)),
+            Some((Side::Buy, QtyLots(2), Offset::Close))
+        );
+    }
+
+    /// A cancel submits nothing, and an id nobody asked for is not
+    /// invented.
+    ///
+    /// Returning a default here would tell the kernel an order exists
+    /// with a side and a size that came from nowhere, which is worse
+    /// than the zero this replaces.
+    #[test]
+    fn a_cancel_and_an_unknown_id_produce_nothing() {
+        let intents = vec![Intent::Cancel(OrderId(4)), Intent::CancelAll];
+        assert_eq!(shape_of(&intents, OrderId(4)), None);
+        assert_eq!(shape_of(&intents, OrderId(99)), None);
     }
 }
