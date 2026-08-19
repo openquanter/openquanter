@@ -126,9 +126,10 @@ impl Assumptions {
         Self {
             tier: "L1".to_string(),
             latency: format!(
-                "entry {} ns, response {} ns — assumed, not measured. Feed latency is \
+                "entry {}, response {} — assumed, not measured. Feed latency is \
                  not modelled here: it belongs to the event producer.",
-                policy.latency.entry.0, policy.latency.response.0
+                policy.latency.entry.describe(),
+                policy.latency.response.describe()
             ),
             impact: format!(
                 "square-root penalty, coefficient {}.{:02} — assumed, not calibrated",
@@ -621,7 +622,7 @@ mod tests {
 #[cfg(test)]
 mod tier_tests {
     use super::*;
-    use oq_engine::{Impact, Latency, Policy, QueueAhead};
+    use oq_engine::{Delay, Impact, Latency, Policy, QueueAhead};
     use oq_types::Nanos;
 
     fn nothing() -> RunResult {
@@ -654,8 +655,8 @@ mod tier_tests {
         let policy = Policy {
             queue: QueueAhead::Fixed(oq_types::QtyLots(250)),
             latency: Latency {
-                entry: Nanos(3_000_000),
-                response: Nanos(9_000_000),
+                entry: Delay::Fixed(Nanos(3_000_000)),
+                response: Delay::Fixed(Nanos(9_000_000)),
             },
             impact: Impact { coefficient: 175 },
         };

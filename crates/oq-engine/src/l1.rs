@@ -77,6 +77,153 @@ pub enum QueueAhead {
     VolumeMultiple(u32),
 }
 
+/// One latency segment: a constant, or the shape a caller measured.
+///
+/// # Why a distribution and not a mean
+///
+/// A resting order's fate is decided by its tail, not its middle. A
+/// constant models the median and then claims, silently, that the slow
+/// tenth of orders behaved the same way — which is the tenth that
+/// misses the queue, arrives after the price moved, and turns a maker
+/// fill into no fill at all. Reporting one number for a segment whose
+/// dispersion is the whole story is the same error as reporting a mean
+/// drawdown.
+///
+/// # Why four quantiles and not a fitted distribution
+///
+/// Because four quantiles are what anybody actually has. A latency
+/// measurement produces a p50, a p90, a p99 and a p999; nobody measures
+/// a lognormal's σ. Asking for a fitted shape would make every caller
+/// convert what they have into what the type wants, and a conversion
+/// with a choice in it is a number this crate would then be reporting
+/// as a measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delay {
+    /// Every order waits the same.
+    Fixed(Nanos),
+    /// Drawn from four measured quantiles, nearest-rank.
+    ///
+    /// Half the orders get `p50`, four in ten get `p90`, nine in a
+    /// hundred get `p99`, one in a hundred gets `p999`. Nearest-rank
+    /// and never interpolated, which is this workspace's convention
+    /// everywhere a quantile appears: an interpolated quantile is a
+    /// value nothing was observed at.
+    ///
+    /// The consequence is worth stating rather than discovering: the
+    /// middle is **overstated**, because forty percent of orders are
+    /// given the ninetieth-percentile delay. That makes it pessimistic,
+    /// which is the direction L1 is deliberately wrong in — a
+    /// conservative queue model and an optimistic latency model would
+    /// cancel, and the cancelling is what makes a fidelity tier stop
+    /// meaning anything.
+    Measured {
+        p50: Nanos,
+        p90: Nanos,
+        p99: Nanos,
+        p999: Nanos,
+    },
+}
+
+impl Delay {
+    /// The delay this order waits.
+    ///
+    /// `key` decides the draw and nothing else does. Same key, same
+    /// answer, on every machine and every replay — a matcher that read
+    /// a clock or a thread-local generator would produce a run that
+    /// cannot be reproduced, and reproducibility is the anchor
+    /// everything else in this workspace is checked against.
+    #[must_use]
+    pub const fn at(&self, key: u64) -> Nanos {
+        match self {
+            Self::Fixed(n) => *n,
+            Self::Measured {
+                p50,
+                p90,
+                p99,
+                p999,
+            } => {
+                // Thousandths, so the bands below are exact rather than
+                // a rounding of a float.
+                let u = mix(key) % 1000;
+                if u < 500 {
+                    *p50
+                } else if u < 900 {
+                    *p90
+                } else if u < 990 {
+                    *p99
+                } else {
+                    *p999
+                }
+            }
+        }
+    }
+
+    /// One segment, for the assumptions line of a fidelity report.
+    ///
+    /// A distribution prints all four points. Collapsing it to a median
+    /// would put the same sentence on a run that modelled dispersion
+    /// and a run that did not, which is the difference the caller
+    /// chose to make.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Fixed(n) => format!("{} ns fixed", n.0),
+            Self::Measured {
+                p50,
+                p90,
+                p99,
+                p999,
+            } => format!(
+                "p50 {} / p90 {} / p99 {} / p999 {} ns",
+                p50.0, p90.0, p99.0, p999.0
+            ),
+        }
+    }
+
+    /// Whether this segment delays anything.
+    #[must_use]
+    pub const fn is_zero(&self) -> bool {
+        match self {
+            Self::Fixed(n) => n.0 == 0,
+            Self::Measured {
+                p50,
+                p90,
+                p99,
+                p999,
+            } => p50.0 == 0 && p90.0 == 0 && p99.0 == 0 && p999.0 == 0,
+        }
+    }
+
+    /// The longest this segment can be, for a report.
+    #[must_use]
+    pub const fn worst(&self) -> Nanos {
+        match self {
+            Self::Fixed(n) => *n,
+            Self::Measured { p999, .. } => *p999,
+        }
+    }
+}
+
+impl Default for Delay {
+    fn default() -> Self {
+        Self::Fixed(Nanos(0))
+    }
+}
+
+/// SplitMix64, so a draw needs no state and no dependency.
+///
+/// Counter-based rather than a generator carried in the matcher: a
+/// stateful stream makes the delay of one order depend on how many
+/// orders came before it, so replaying from a snapshot — which starts
+/// mid-sequence — would produce different fills from the same events.
+const fn mix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut x = z;
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
 /// The three-segment latency L1 enforces.
 ///
 /// Feed latency is deliberately absent; see the module documentation.
@@ -84,9 +231,9 @@ pub enum QueueAhead {
 pub struct Latency {
     /// From the strategy's decision to the order being live at the
     /// venue.
-    pub entry: Nanos,
+    pub entry: Delay,
     /// From the fill happening to the strategy being told.
-    pub response: Nanos,
+    pub response: Delay,
 }
 
 /// How much a taker order moves the price against itself.
@@ -126,8 +273,8 @@ impl Policy {
     pub const TRANSPARENT: Self = Self {
         queue: QueueAhead::None,
         latency: Latency {
-            entry: Nanos(0),
-            response: Nanos(0),
+            entry: Delay::Fixed(Nanos(0)),
+            response: Delay::Fixed(Nanos(0)),
         },
         impact: Impact { coefficient: 0 },
     };
@@ -156,11 +303,11 @@ impl Policy {
             ),
         };
         format!(
-            "queue: {queue}; entry latency {} ns, response latency {} ns; \
+            "queue: {queue}; entry latency {}, response latency {}; \
              impact coefficient {}.{:02}. Every figure is an assumption about this \
              market, not a measurement of it.",
-            self.latency.entry.0,
-            self.latency.response.0,
+            self.latency.entry.describe(),
+            self.latency.response.describe(),
             self.impact.coefficient / 100,
             self.impact.coefficient % 100,
         )
@@ -239,9 +386,9 @@ impl L1Engine {
     /// venue cannot trade — and holding it outside L0 is what keeps L0
     /// unaware that L1 exists.
     pub fn submit(&mut self, order: Working, now: Nanos) {
-        if self.policy.latency.entry.0 > 0 {
+        if !self.policy.latency.entry.is_zero() {
             self.pending.push(Pending {
-                live_at: Nanos(now.0 + self.policy.latency.entry.0),
+                live_at: Nanos(now.0 + self.policy.latency.entry.at(order.id().0).0),
                 order,
             });
             return;
@@ -338,10 +485,10 @@ impl L1Engine {
         //    fill has happened; the account has it; the strategy does
         //    not yet know.
         self.released.clear();
-        if self.policy.latency.response.0 > 0 {
+        if !self.policy.latency.response.is_zero() {
             for fill in adjusted {
                 self.delayed.push(Delayed {
-                    known_at: Nanos(now.0 + self.policy.latency.response.0),
+                    known_at: Nanos(now.0 + self.policy.latency.response.at(fill.fill.order.0).0),
                     fill,
                 });
             }
@@ -459,6 +606,118 @@ pub fn fills_of(fills: &[L0Fill]) -> Vec<Fill> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A drawn delay depends on the key and on nothing else.
+    ///
+    /// This is the property replay rests on. A generator carried in the
+    /// matcher would make one order's delay depend on how many came
+    /// before it, so a run resumed from a snapshot — which starts
+    /// mid-sequence — would fill differently from the same events.
+    #[test]
+    fn the_same_key_draws_the_same_delay() {
+        let d = Delay::Measured {
+            p50: Nanos(1),
+            p90: Nanos(2),
+            p99: Nanos(3),
+            p999: Nanos(4),
+        };
+        for key in [0, 1, 7, 12_345, u64::MAX] {
+            assert_eq!(d.at(key), d.at(key));
+        }
+    }
+
+    /// Every draw is one of the four measured points.
+    ///
+    /// Nearest-rank, never interpolated — the convention everywhere a
+    /// quantile appears in this workspace. An interpolated quantile is
+    /// a value nothing was observed at, and a latency nobody measured
+    /// is exactly what this type exists to avoid inventing.
+    #[test]
+    fn a_draw_is_always_a_measured_point() {
+        let d = Delay::Measured {
+            p50: Nanos(10),
+            p90: Nanos(20),
+            p99: Nanos(30),
+            p999: Nanos(40),
+        };
+        for key in 0..5_000 {
+            let n = d.at(key).0;
+            assert!(
+                [10, 20, 30, 40].contains(&n),
+                "drew {n}, which nothing measured"
+            );
+        }
+    }
+
+    /// And the four appear at roughly the frequencies they name.
+    ///
+    /// Loose bounds on purpose: the point is that the bands are wired
+    /// to the right points, not that a hash is uniform to three
+    /// decimals. A tight bound here would fail on a future hash change
+    /// that was not a defect.
+    #[test]
+    fn the_bands_have_roughly_the_frequencies_they_claim() {
+        let d = Delay::Measured {
+            p50: Nanos(1),
+            p90: Nanos(2),
+            p99: Nanos(3),
+            p999: Nanos(4),
+        };
+        let mut count = [0u32; 5];
+        for key in 0..100_000u64 {
+            count[d.at(key).0 as usize] += 1;
+        }
+        assert!((45_000..55_000).contains(&count[1]), "p50: {}", count[1]);
+        assert!((35_000..45_000).contains(&count[2]), "p90: {}", count[2]);
+        assert!((7_000..11_000).contains(&count[3]), "p99: {}", count[3]);
+        assert!((500..1_500).contains(&count[4]), "p999: {}", count[4]);
+    }
+
+    /// A distribution of zeroes delays nothing, so the transparent
+    /// policy stays transparent however it is written.
+    #[test]
+    fn a_distribution_of_zeroes_is_zero() {
+        assert!(Delay::Fixed(Nanos(0)).is_zero());
+        assert!(
+            Delay::Measured {
+                p50: Nanos(0),
+                p90: Nanos(0),
+                p99: Nanos(0),
+                p999: Nanos(0),
+            }
+            .is_zero()
+        );
+        assert!(
+            !Delay::Measured {
+                p50: Nanos(0),
+                p90: Nanos(0),
+                p99: Nanos(0),
+                p999: Nanos(1),
+            }
+            .is_zero(),
+            "a tail that delays is not no delay"
+        );
+    }
+
+    /// The assumptions line shows all four points.
+    ///
+    /// Collapsing to a median would print the same sentence for a run
+    /// that modelled dispersion and one that did not, and the
+    /// difference is the choice the caller made.
+    #[test]
+    fn the_report_line_distinguishes_a_distribution_from_a_constant() {
+        let fixed = Delay::Fixed(Nanos(5)).describe();
+        let drawn = Delay::Measured {
+            p50: Nanos(5),
+            p90: Nanos(50),
+            p99: Nanos(500),
+            p999: Nanos(5_000),
+        }
+        .describe();
+        assert_ne!(fixed, drawn);
+        assert!(drawn.contains("5000"), "the tail must be visible: {drawn}");
+    }
+
     use super::*;
     use oq_types::{InstrumentId, Offset, Stamp};
 
@@ -623,8 +882,8 @@ mod tests {
         let policy = Policy {
             queue: QueueAhead::Fixed(QtyLots(10_000)),
             latency: Latency {
-                entry: Nanos(10 * SEC),
-                response: Nanos(0),
+                entry: Delay::Fixed(Nanos(10 * SEC)),
+                response: Delay::Fixed(Nanos(0)),
             },
             ..Policy::TRANSPARENT
         };
@@ -661,8 +920,8 @@ mod tests {
     fn entry_latency_keeps_an_order_out_of_a_market_it_has_not_reached() {
         let policy = Policy {
             latency: Latency {
-                entry: Nanos(4 * SEC),
-                response: Nanos(0),
+                entry: Delay::Fixed(Nanos(4 * SEC)),
+                response: Delay::Fixed(Nanos(0)),
             },
             ..Policy::TRANSPARENT
         };
@@ -684,8 +943,8 @@ mod tests {
     fn response_latency_holds_a_fill_back_and_says_how_many() {
         let policy = Policy {
             latency: Latency {
-                entry: Nanos(0),
-                response: Nanos(2 * SEC),
+                entry: Delay::Fixed(Nanos(0)),
+                response: Delay::Fixed(Nanos(2 * SEC)),
             },
             ..Policy::TRANSPARENT
         };
@@ -804,8 +1063,8 @@ mod tests {
         let p = Policy {
             queue: QueueAhead::VolumeMultiple(150),
             latency: Latency {
-                entry: Nanos(3_000_000),
-                response: Nanos(7_000_000),
+                entry: Delay::Fixed(Nanos(3_000_000)),
+                response: Delay::Fixed(Nanos(7_000_000)),
             },
             impact: Impact { coefficient: 250 },
         };
