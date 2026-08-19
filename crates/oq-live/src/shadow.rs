@@ -400,6 +400,17 @@ impl Shadow {
         }
     }
 
+    /// Fees the model charged itself.
+    ///
+    /// The other half of the fee component: the venue's number comes
+    /// from its own trade records, this one from the kernel's fee
+    /// schedule, and the difference is what a wrong fee tier costs.
+    /// Deriving either from the other would make that difference zero.
+    #[must_use]
+    pub fn model_fees(&self) -> Cash {
+        self.kernel.state().fees
+    }
+
     /// The model's realized result, for the decomposition's other side.
     ///
     /// The gap `attribute` decomposes is the venue's P&L minus this one,

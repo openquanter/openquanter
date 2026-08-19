@@ -114,6 +114,16 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         out
     }
 
+    /// The venue, for the questions a run asks once it is over.
+    ///
+    /// Reading only. Everything that places or cancels goes through the
+    /// session's own methods, so the gate cannot be walked around by
+    /// holding this.
+    #[must_use]
+    pub const fn venue(&self) -> &E {
+        self.session.venue()
+    }
+
     /// The intents the strategy produced on the last call.
     ///
     /// Held so a caller can pair an [`Outcome::Sent`] back to what was
