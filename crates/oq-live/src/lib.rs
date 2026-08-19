@@ -38,6 +38,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod belief;
 pub mod book;
 pub mod books;
 pub mod feed;
