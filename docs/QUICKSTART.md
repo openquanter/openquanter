@@ -72,7 +72,8 @@ lowest equity            61.53    -30302.14
 fills                        4                6
 liquidations                 1                0
 
-martingale-ladder: LIQUIDATED 1x, margin-free equity 20908.11 vs real 61.53
+martingale-ladder: LIQUIDATED 1x, first at t=114750000000; margin-free equity
+20908.11 vs real 61.53
 (overstated by 20846.58); 2 fills in the margin-free run happened after the
 account was already closed
 ```
@@ -335,5 +336,5 @@ with liquidation modelled and without, and prints both — because a curve
 that never gets liquidated is a curve about an account no venue offers.
 Unlevered the two columns agree for all six, which is itself the finding:
 **a margin model is invisible until leverage is real.** Levered, the grid
-ends at 4.06 with the venue having closed the account twice, and the
-margin-free arm reports −513.74 for a position it kept holding.
+ends at 4.46 with the venue having closed the account twice, and the
+margin-free arm reports −508.12 for a position it kept holding.
