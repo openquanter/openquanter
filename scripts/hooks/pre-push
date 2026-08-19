@@ -22,7 +22,18 @@ overlay=$(git config --get oq.overlay 2>/dev/null)
 [ -n "$overlay" ] || exit 0
 
 check="$overlay/tools/check_public_leak.py"
-[ -f "$check" ] || exit 0
+if [ ! -f "$check" ]; then
+  # Configured and unable to check. Not silence: an operator who set
+  # `oq.overlay` asked for this protection, and passing quietly hands
+  # them a push that looks checked and was not. The overlay moving or
+  # renaming the script is the likely cause and the likeliest moment
+  # for it to matter.
+  echo "pre-push: oq.overlay is set to $overlay" >&2
+  echo "          but $check is not there, so nothing was checked." >&2
+  echo "          Fix the path, or unset it with:" >&2
+  echo "              git config --unset oq.overlay" >&2
+  exit 1
+fi
 
 if ! python3 "$check" "$(git rev-parse --show-toplevel)"; then
   echo ""
