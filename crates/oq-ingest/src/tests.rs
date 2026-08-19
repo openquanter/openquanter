@@ -184,7 +184,11 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
         .into_bytes(),
     }
     };
-    let records = vec![
+    // A trade opens the stream. Without one there is no price to
+    // publish and no tick is produced at all — which is the subject of
+    // `depth_alone_publishes_nothing` below, not of this test.
+    let records = [
+        trade(T0, "100.00", "1.000"),
         depth(T0, 1, 1, "99.00", "101.00"),
         depth(T0 + SECOND, 2, 2, "99.50", "100.50"),
         Record::control(
@@ -195,10 +199,16 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
     ];
     let (ticks, report) = to_ticks(
         &BinancePerp::new(),
-        &[Source {
-            records: &records,
-            stream: "depth",
-        }],
+        &[
+            Source {
+                records: &records[..1],
+                stream: "trade",
+            },
+            Source {
+                records: &records[1..],
+                stream: "depth",
+            },
+        ],
         scales(),
         SECOND,
     )
@@ -220,4 +230,51 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
 #[test]
 fn a_zero_window_is_rejected_rather_than_dividing_by_it() {
     assert!(to_ticks(&BinancePerp::new(), &[], scales(), 0).is_err());
+}
+
+/// Depth alone publishes nothing.
+///
+/// A tick's `last` becomes the kernel's mark price with no guard, so a
+/// book-only stream would set the mark to zero on every window. The
+/// reference implementation reaches the same conclusion from the other
+/// direction: its depth branch never calls `on_tick` at all, and each of
+/// its four publish sites is guarded by `last_price > 0`.
+///
+/// This is a real limitation rather than a workaround. A capture with no
+/// trades has no traded price in it, and inventing one from the book
+/// would put a number in the mark that no trade produced.
+#[test]
+fn depth_alone_publishes_nothing() {
+    let depth = |at: i64, first: u64, last: u64, bid: &str, ask: &str| {
+        Record {
+        kind: Kind::Payload,
+        local_ts: at,
+        exch_ts: at,
+        payload: format!(
+            r#"{{"e":"depthUpdate","E":{at},"U":{first},"u":{last},"b":[["{bid}","1.000"]],"a":[["{ask}","1.000"]]}}"#
+        )
+        .into_bytes(),
+    }
+    };
+    let records = vec![
+        depth(T0, 1, 1, "99.00", "101.00"),
+        depth(T0 + SECOND, 2, 2, "99.50", "100.50"),
+        depth(T0 + 2 * SECOND, 3, 3, "99.75", "100.25"),
+    ];
+    let (ticks, report) = to_ticks(
+        &BinancePerp::new(),
+        &[Source {
+            records: &records,
+            stream: "depth",
+        }],
+        scales(),
+        SECOND,
+    )
+    .expect("convert");
+
+    assert!(report.depth_applied >= 3, "the book was still built");
+    assert!(
+        ticks.is_empty(),
+        "no trade means no price; publishing would set the mark to zero: {ticks:?}"
+    );
 }

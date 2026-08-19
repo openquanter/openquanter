@@ -53,8 +53,18 @@ pub struct Report {
     pub unparseable: u64,
     /// Gap markers seen. The book is dropped at each one.
     pub gaps: u64,
-    /// Windows with no trade, carrying only book state.
+    /// Windows with no trade, carrying the previous price forward.
     pub quiet_windows: u64,
+    /// Windows that closed before this symbol had ever traded.
+    ///
+    /// These publish nothing: there is no price to carry, and a tick
+    /// whose price is zero becomes a mark price of zero in the kernel.
+    pub windows_before_first_trade: u64,
+    /// Events whose exchange timestamp went backwards.
+    ///
+    /// Large here means the streams are reordering against each other,
+    /// which is worth knowing before the numbers are believed.
+    pub out_of_order: u64,
 }
 
 /// One source file, and what kind of records it holds.
@@ -99,6 +109,8 @@ pub fn to_ticks(
     report.depth_applied = counts.depth_applied;
     report.trades = counts.trades;
     report.quiet_windows = counts.quiet_windows;
+    report.windows_before_first_trade = counts.windows_before_first_trade;
+    report.out_of_order = counts.out_of_order;
     report.ticks = ticks.len() as u64;
     Ok((ticks, report))
 }
