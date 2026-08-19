@@ -529,7 +529,7 @@ openquanter/
 
 Two things are deliberately *not* in this tree. There is no top-level
 `examples/` or `data/`: runnable examples are a crate, so they compile
-under `cargo test --workspace` and cannot rot, and the sample market is
+under `cargo test` and cannot rot, and the sample market is
 **generated from a seed** rather than stored, which is why golden tests
 can pin exact numbers without shipping a dataset or inheriting anyone's
 redistribution terms.

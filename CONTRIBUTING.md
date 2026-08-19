@@ -33,10 +33,17 @@ Rust 2024 edition; minimum supported Rust version is 1.85.
 
 ```bash
 cargo build --workspace
-cargo test --workspace
+cargo test
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`cargo test` and not `--workspace`: the workspace variant also builds
+`oq-py`, whose tests link against a CPython shared library and fail on
+a machine whose Python does not match. The bindings have their own CI
+job with a pinned interpreter — `cargo clippy -p oq-py` and
+`cargo test -p oq-py` — and running them locally needs that interpreter
+present.
 
 Documentation is authored in English and mirrored in Chinese (`*.zh-CN.md`).
 English is the source of truth; update both sides in the same pull request.
