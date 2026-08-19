@@ -169,7 +169,7 @@ input this project cannot reach, the second has not been written.
 | Adoption | **Classic-strategy catalogue** (RSI, MACD, Bollinger, Donchian, grid, dual-thrust) | Built — teaching references, each one documenting where it breaks rather than claiming an edge |
 | Gate | **G3 throughput ≥8× the interpreted baseline** | **Blocked** — needs a multi-year window and a same-machine predecessor run; the data is on production hosts and the capture is days old |
 | Gate | **G7 re-passing parity after conversion** | **Half blocked** — the mode half is met and tested; the parity half shares G3's blocker |
-| Gate | **G11 external cold start ≤ 30 minutes** | **Blocked** — needs a person who has not seen this repository |
+| Gate | **G11 external cold start ≤ 30 minutes** | **Blocked** — needs a person who has not seen this repository. A prior blocker was found and removed: the quickstart's first instruction was `cargo install oq-cli`, and every published `oq-*` is a `0.0.1` name placeholder, so the trial would have failed in its first minute for a reason that had nothing to do with the reader |
 
 ### M3 — Live trading
 

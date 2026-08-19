@@ -296,10 +296,15 @@ Rust crate 尚未发布。等 API 不再变动时会发；在那之前 `cargo ad
 
 ```bash
 cargo build --workspace
-cargo test --workspace
+cargo test
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+是 `cargo test` 而不是 `--workspace`：带 `--workspace` 会一并构建 `oq-py`，
+它的测试要链接 CPython 的共享库，在 Python 版本对不上的机器上会失败。绑定有
+自己的 CI job 和钉住的解释器——`cargo clippy -p oq-py` 与 `cargo test -p oq-py`
+——在本地跑它们需要那个解释器在场。
 
 ## 许可证
 
