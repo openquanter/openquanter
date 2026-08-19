@@ -49,6 +49,14 @@ pub struct Snapshot {
     /// Reports carrying no trade id, which cannot be deduplicated and
     /// are therefore not booked.
     pub unidentifiable_fills: u64,
+    /// Reports this build could not read at all, and did not book.
+    ///
+    /// A price or quantity that is absent, unparseable, or not positive.
+    /// Distinct from [`Snapshot::unidentifiable_fills`], which is about a
+    /// missing trade id: the consequence is the same but the cause is
+    /// not, and a run that sees one of these is looking at a venue whose
+    /// reports this build does not understand.
+    pub unbookable_reports: u64,
     /// Orders resting at the venue that this process did not send.
     pub foreign_orders: u64,
     /// Times the account stream dropped.
@@ -224,6 +232,17 @@ pub fn alerts(s: &Snapshot, rules: AlertRules) -> Vec<Alert> {
             urgent: true,
         });
     }
+    if s.unbookable_reports > 0 {
+        out.push(Alert {
+            name: "unbookable_reports",
+            detail: format!(
+                "{} fill report(s) could not be read and were not booked; the position this \
+                 process believes it holds is smaller than the account's",
+                s.unbookable_reports
+            ),
+            urgent: true,
+        });
+    }
     if s.unidentifiable_fills > 0 {
         out.push(Alert {
             name: "unbookable_fills",
@@ -361,5 +380,57 @@ mod tests {
             text.contains("not the venue round trip"),
             "the boundary must be named: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod unbookable {
+    use super::{Snapshot, alerts};
+
+    /// A report the venue sent and this build could not read is urgent.
+    ///
+    /// The position this process believes it holds is then smaller than
+    /// the account's, and every order it sizes afterwards is sized
+    /// against a picture that is wrong. Before this counter existed the
+    /// report was discarded with no line, no count and no record — a
+    /// fill that happened and left no trace anywhere in this process.
+    #[test]
+    fn an_unreadable_report_is_urgent_and_says_what_it_costs() {
+        let s = Snapshot {
+            unbookable_reports: 2,
+            ..Snapshot::default()
+        };
+        let a = alerts(&s, super::AlertRules::default());
+        let it = a
+            .iter()
+            .find(|x| x.name == "unbookable_reports")
+            .expect("an unreadable report must be reported");
+        assert!(it.urgent);
+        assert!(
+            it.detail.contains("smaller than the account's"),
+            "the alert has to say what it costs: {}",
+            it.detail
+        );
+    }
+
+    /// Distinct from a missing trade id: same consequence, different
+    /// cause, and a run that sees one is looking at a venue whose
+    /// reports this build does not understand.
+    #[test]
+    fn it_is_not_the_same_alert_as_a_missing_trade_id() {
+        let s = Snapshot {
+            unbookable_reports: 1,
+            unidentifiable_fills: 1,
+            ..Snapshot::default()
+        };
+        let a = alerts(&s, super::AlertRules::default());
+        assert!(a.iter().any(|x| x.name == "unbookable_reports"));
+        assert!(a.iter().any(|x| x.name == "unbookable_fills"));
+    }
+
+    #[test]
+    fn none_is_silent() {
+        let a = alerts(&Snapshot::default(), super::AlertRules::default());
+        assert!(!a.iter().any(|x| x.name == "unbookable_reports"));
     }
 }
