@@ -394,10 +394,38 @@ broken. **A MainEngine and "every cent accounted for" are structurally in
 conflict.** That is not a preference.
 
 **Dynamic dispatch is still used where it belongs**: which venue to connect to
-is a configuration question answered at runtime, and `Box<dyn Execution>` is the
+is a configuration question answered at runtime, and `Box<dyn Account>` is the
 right tool. **Which one is a runtime question; what the graph looks like is a
 compile-time one** — the problem with a MainEngine was never that it used
 dynamic dispatch, but that it made the whole graph mutable at runtime.
+
+The trait is `Account` rather than `Execution` for a reason worth recording,
+because the first attempt got it wrong. `Execution` says how to send an order,
+and that is not enough to run: before the first order there is a clock to agree
+on, an instrument whose precision and grid come from the deployment, a position
+mode to discover, a balance and a book of resting orders to read, and a stream
+to hear the answers on. Those were reached for on a concrete `Binance`, in nine
+places inside the runner, so an adapter could implement `Execution` in full and
+still be unusable — which is what happened: an OKX client existed, could not be
+run, and **nothing said what it still owed**, because the missing part had no
+name.
+
+One of those nine is worth naming on its own. The runner built client order ids
+to `IdRules::BINANCE`, a compiled-in constant — 36 characters with punctuation.
+OKX allows 32, alphanumeric. An OKX adapter would therefore have been rejected
+at submission, *after* the strategy had already decided to trade, by a rule the
+runner had no business holding an opinion about.
+
+`Account` is that list, and the list is now checkable: `oq-gateway` carries a
+test venue implementing the trait against nothing but the trait. If a method
+arrives whose only sensible implementation is Binance's, it stops compiling
+there rather than six months later in somebody's half-finished adapter.
+
+Market data is deliberately *not* folded in — it has its own seam,
+`oq_l2feed::Venue`, and merging them would couple a capture tool to an account
+credential. The two are tied by identity instead: the runner opens its feed with
+`venue.id()`, so the account side and the market side cannot disagree about
+which venue is being traded.
 
 ## 3. Technology choices
 

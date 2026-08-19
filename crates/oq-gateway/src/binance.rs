@@ -823,6 +823,101 @@ impl Execution for Binance {
     }
 }
 
+impl crate::account::Account for Binance {
+    fn id(&self) -> &'static str {
+        // Matches the market-data side's identifier for the same venue,
+        // so a run's records and its archive file under one name.
+        "binance-perp"
+    }
+
+    fn id_rules(&self) -> crate::broker::IdRules {
+        crate::broker::IdRules::BINANCE
+    }
+
+    fn sync_clock(&mut self) -> Result<i64, VenueError> {
+        Self::sync_clock(self)
+    }
+
+    fn round_trip_ms(&self) -> i64 {
+        Self::round_trip_ms(self)
+    }
+
+    fn instrument(&self, symbol: &str) -> Result<Instrument, String> {
+        let body = self.exchange_info(symbol).map_err(|e| e.to_string())?;
+        let price_scale = integer_field(&body, "pricePrecision").ok_or("no pricePrecision")?;
+        let qty_scale = integer_field(&body, "quantityPrecision").ok_or("no quantityPrecision")?;
+        let price_scale = u8::try_from(price_scale).map_err(|_| "implausible price precision")?;
+        let qty_scale = u8::try_from(qty_scale).map_err(|_| "implausible quantity precision")?;
+        let tick = decimal_field(&body, "tickSize", price_scale).unwrap_or(1);
+        let step = decimal_field(&body, "stepSize", qty_scale).unwrap_or(1);
+        // The venue also refuses orders below a notional floor, and its
+        // message names the floor without naming what the order was worth.
+        // Carried on the instrument so a strategy does not learn it by
+        // being refused.
+        let floor = decimal_field(&body, "notional", 8).unwrap_or(0);
+        Ok(oq_types::Instrument::linear(price_scale, qty_scale)
+            .with_grid(tick, step)
+            .with_min_notional(oq_types::Cash(floor)))
+    }
+
+    fn is_hedged(&self) -> Result<bool, VenueError> {
+        self.is_hedged_account()
+    }
+
+    fn positions(&self, symbol: &str) -> Result<Vec<PositionSnapshot>, VenueError> {
+        Self::positions(self, symbol)
+    }
+
+    fn balances(&self) -> Result<AccountSnapshot, VenueError> {
+        self.account()
+    }
+
+    fn open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>, VenueError> {
+        Self::open_orders(self, symbol)
+    }
+
+    fn open_user_stream(&self) -> Result<UserStream, VenueError> {
+        Self::open_user_stream(self)
+    }
+
+    fn keepalive_user_stream(&self) -> Result<(), VenueError> {
+        Self::keepalive_user_stream(self)
+    }
+
+    fn close_user_stream(&self) -> Result<(), VenueError> {
+        Self::close_user_stream(self)
+    }
+}
+
+/// Parsing helpers for the instrument description, kept beside the only
+/// thing that reads that venue's shape.
+fn integer_field(body: &str, key: &str) -> Option<i64> {
+    let needle = format!("\"{key}\":");
+    let start = body.find(&needle)? + needle.len();
+    let rest = &body[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+fn decimal_field(body: &str, key: &str, scale: u8) -> Option<i64> {
+    let needle = format!("\"{key}\":\"");
+    let start = body.find(&needle)? + needle.len();
+    let rest = &body[start..];
+    let text = &rest[..rest.find('"')?];
+    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+    let mut digits = String::from(whole);
+    let width = usize::from(scale);
+    let mut frac = frac.to_string();
+    frac.truncate(width);
+    while frac.len() < width {
+        frac.push('0');
+    }
+    digits.push_str(&frac);
+    digits.parse().ok()
+}
+
 #[cfg(test)]
 mod order_entry {
     use super::*;
