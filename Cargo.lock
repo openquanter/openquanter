@@ -748,9 +748,11 @@ version = "2.0.0-alpha.1"
 name = "oq-ingest"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "oq-backtest",
  "oq-data",
  "oq-engine",
  "oq-l2feed",
+ "oq-margin",
  "oq-types",
 ]
 
