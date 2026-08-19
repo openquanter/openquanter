@@ -595,8 +595,14 @@ where
 
         if last_tick_report.elapsed() >= Duration::from_secs(30) {
             last_tick_report = Instant::now();
+            // Sampled and recorded together, so what a reader sees in
+            // the terminal and what a replay sees in the journal are the
+            // same observation rather than two that happen to agree.
+            let now_ns = Nanos(now_ns());
+            trader.record_waiting(now_ns);
+            let waiting = trader.waiting_summary();
             println!(
-                "heartbeat        {ticks} ticks, {} resting",
+                "heartbeat        {ticks} ticks, {} resting{waiting}",
                 trader.working()
             );
         }
@@ -678,6 +684,10 @@ trait TraderLike {
     fn duplicates(&self) -> u64;
     fn foreign(&self) -> u64;
     fn record_tick(&mut self, tick: &oq_engine::Tick);
+    /// Sample what the strategy is waiting for, and record it.
+    fn record_waiting(&mut self, at: Nanos);
+    /// The same conditions, rendered for the terminal.
+    fn waiting_summary(&self) -> String;
     fn latency(&self) -> String;
     fn cancel_all(&mut self, symbol: &str);
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
@@ -699,6 +709,25 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn foreign(&self) -> u64 {
         self.session().book().foreign()
     }
+    fn waiting_summary(&self) -> String {
+        let w = self.strategy().waiting_on();
+        if w.is_empty() {
+            return String::new();
+        }
+        let body: Vec<String> = w.iter().map(|(k, v)| format!("{k} {v}")).collect();
+        format!(", waiting on {}", body.join(", "))
+    }
+
+    fn record_waiting(&mut self, at: Nanos) {
+        let entries: Vec<(String, i64)> = self
+            .strategy()
+            .waiting_on()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        self.session_mut().record_waiting(at, entries);
+    }
+
     fn record_tick(&mut self, tick: &oq_engine::Tick) {
         self.session_mut().record_tick(tick);
     }

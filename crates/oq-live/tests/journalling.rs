@@ -342,3 +342,98 @@ fn taking_over_nothing_is_not_recorded_as_an_event() {
         "nothing was taken over, so nothing may claim to have been: {all:?}"
     );
 }
+
+/// What the strategy was waiting for is in the record.
+///
+/// Every other record in a journal is something that happened. A run
+/// that places no orders produces almost none of them, and is therefore
+/// the run hardest to explain — which is backwards, because it is also
+/// the one most likely to be wrong.
+///
+/// This was not hypothetical. A twelve-hour run placed nothing, and the
+/// reason — a volume threshold calibrated for a busier venue, and a
+/// warm-up of two hundred bars — was reachable only by reading the
+/// strategy's source. That is the worst tool to reach for while
+/// something is going wrong on a venue.
+#[test]
+fn what_the_strategy_waits_for_is_recorded() {
+    let path = temp("waiting.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.record_waiting(
+        Nanos(5),
+        vec![("bars".into(), 15), ("volume_gate".into(), 0)],
+    );
+
+    let all = records(&path);
+    match all
+        .iter()
+        .find(|r| matches!(r, Record::Waiting { .. }))
+        .unwrap_or_else(|| panic!("the wait must be in the journal: {all:?}"))
+    {
+        Record::Waiting { entries, .. } => {
+            // By name and value, because "3 conditions" explains nothing.
+            assert_eq!(entries.len(), 2, "{entries:?}");
+            assert_eq!(entries[0], ("bars".to_string(), 15));
+            assert_eq!(entries[1], ("volume_gate".to_string(), 0));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A strategy that names no conditions writes no record.
+///
+/// An empty one would claim the question was asked and answered, when
+/// it was asked and declined — and a reader counting them would see a
+/// run that reported its state throughout and said nothing.
+#[test]
+fn a_strategy_that_names_nothing_writes_nothing() {
+    let path = temp("waiting-empty.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.record_waiting(Nanos(5), Vec::new());
+
+    let all = records(&path);
+    assert!(
+        !all.iter().any(|r| matches!(r, Record::Waiting { .. })),
+        "nothing was named, so nothing may claim to have been: {all:?}"
+    );
+}
