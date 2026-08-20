@@ -317,6 +317,13 @@ impl Policy {
 /// An order waiting to become live at the venue.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
+    /// Queue ahead measured from a venue book, when a caller had one.
+    ///
+    /// Carried through the latency delay rather than recomputed on
+    /// arrival: the measurement belongs to the moment the order was
+    /// *sent*, and the book has moved by the time it lands. Recomputing
+    /// would silently answer a different question.
+    measured_ahead: Option<i64>,
     live_at: Nanos,
     order: Working,
 }
@@ -386,14 +393,26 @@ impl L1Engine {
     /// venue cannot trade — and holding it outside L0 is what keeps L0
     /// unaware that L1 exists.
     pub fn submit(&mut self, order: Working, now: Nanos) {
+        self.submit_with_queue(order, now, None);
+    }
+
+    /// Submit with the queue ahead **measured** rather than assumed.
+    ///
+    /// `L2Engine` supplies this from a reconstructed venue book, which
+    /// is the whole difference between the two tiers: L1's `QueueAhead`
+    /// is the caller's claim about their market, and this is a reading
+    /// of it. `None` falls back to the policy, so every existing caller
+    /// is unaffected.
+    pub fn submit_with_queue(&mut self, order: Working, now: Nanos, ahead: Option<i64>) {
         if !self.policy.latency.entry.is_zero() {
             self.pending.push(Pending {
                 live_at: Nanos(now.0 + self.policy.latency.entry.at(order.id().0).0),
                 order,
+                measured_ahead: ahead,
             });
             return;
         }
-        self.admit(order, None);
+        self.admit(order, None, ahead);
     }
 
     /// Withdraw an order, wherever it currently is.
@@ -430,17 +449,21 @@ impl L1Engine {
         // 1. Orders whose entry latency has elapsed reach the venue. An
         //    order becomes live at the observation on or after its
         //    arrival time, never before it.
-        let mut arriving: Vec<Working> = Vec::new();
+        // The measurement travels with the order. Dropping it here
+        // would make entry latency silently downgrade an L2 order to an
+        // L1 one — the tier would change without the report changing,
+        // which is the failure the ladder exists to prevent.
+        let mut arriving: Vec<(Working, Option<i64>)> = Vec::new();
         self.pending.retain(|p| {
             if p.live_at.0 <= now.0 {
-                arriving.push(p.order);
+                arriving.push((p.order, p.measured_ahead));
                 false
             } else {
                 true
             }
         });
-        for order in arriving {
-            self.admit(order, Some(traded));
+        for (order, measured) in arriving {
+            self.admit(order, Some(traded), measured);
         }
 
         // 2. Queues deplete against the volume that traded at or through
@@ -512,6 +535,17 @@ impl L1Engine {
     ///
     /// A run that ends must account for these: they are the account's
     /// and the strategy has not seen them, which is precisely the state
+    /// Orders waiting behind a queue rather than resting in L0.
+    ///
+    /// The count a caller needs to tell "not filled because the price
+    /// never came" from "not filled because the queue never cleared" —
+    /// two different statements about the same empty fill list, and
+    /// only one of them says the queue model did anything.
+    #[must_use]
+    pub fn queued(&self) -> usize {
+        self.queued.len()
+    }
+
     /// a restart has to reconcile.
     #[must_use]
     pub fn unreported(&self) -> usize {
@@ -519,16 +553,17 @@ impl L1Engine {
     }
 
     /// Put an order into the book, or into a queue in front of it.
-    fn admit(&mut self, order: Working, arrival_volume: Option<i64>) {
-        let ahead = match (self.policy.queue, order.price()) {
-            // A market order queues for nothing; it is the thing the
-            // queue is waiting for.
-            (_, None) | (QueueAhead::None, _) => 0,
-            (QueueAhead::Fixed(q), _) => q.0,
-            (QueueAhead::VolumeMultiple(m), _) => {
-                let base = arrival_volume.unwrap_or(0);
-                i64::from(m) * base / 100
-            }
+    fn admit(&mut self, order: Working, arrival_volume: Option<i64>, measured: Option<i64>) {
+        let ahead = match (measured, order.price()) {
+            // A market order queues for nothing whatever anyone
+            // measured; it is the thing the queue is waiting for.
+            (_, None) => 0,
+            // A measurement wins over a policy. It is not an assumption
+            // this engine is entitled to override, and a tier that
+            // second-guessed its own data would be reporting L1's answer
+            // under L2's name.
+            (Some(m), _) => m.max(0),
+            (None, _) => Self::assumed_ahead(self.policy.queue, arrival_volume),
         };
         if ahead > 0 {
             self.queued.push(Queued {
@@ -537,6 +572,21 @@ impl L1Engine {
             });
         } else {
             self.inner.submit(order);
+        }
+    }
+
+    /// What the policy claims is queued ahead, when nothing measured it.
+    const fn assumed_ahead(queue: QueueAhead, arrival_volume: Option<i64>) -> i64 {
+        match queue {
+            QueueAhead::None => 0,
+            QueueAhead::Fixed(q) => q.0,
+            QueueAhead::VolumeMultiple(m) => {
+                let base = match arrival_volume {
+                    Some(v) => v,
+                    None => 0,
+                };
+                m as i64 * base / 100
+            }
         }
     }
 

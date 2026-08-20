@@ -5,6 +5,7 @@ resolver = "3"
 # `cargo test` skip `oq-py`, and CI builds it explicitly.
 default-members = [
     "crates/oq-backtest",
+    "crates/oq-book",
     "crates/oq-cli",
     "crates/oq-core",
     "crates/oq-data",
@@ -27,6 +28,7 @@ default-members = [
 ]
 members = [
     "crates/oq-backtest",
+    "crates/oq-book",
     "crates/oq-cli",
     "crates/oq-core",
     "crates/oq-data",
@@ -62,6 +64,7 @@ repository = "https://github.com/openquanter/openquanter"
 # Internal dependencies are declared once here so a version bump is a
 # single edit and cannot drift between crates.
 [workspace.dependencies]
+oq-book = { path = "crates/oq-book", version = "2.0.0-alpha.1" }
 oq-backtest = { path = "crates/oq-backtest", version = "2.0.0-alpha.1" }
 oq-cli = { path = "crates/oq-cli", version = "2.0.0-alpha.1" }
 oq-core = { path = "crates/oq-core", version = "2.0.0-alpha.1" }
