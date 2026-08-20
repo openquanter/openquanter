@@ -1203,13 +1203,21 @@ fn fill_of(
         } else {
             Side::Sell
         },
-        // The venue tells us what it filled, not whether this process
-        // considered it an opening trade. Reduce-only would say so and
-        // this build does not read it, so the safe reading is that it
-        // opens — a close mistaken for an open overstates the position,
-        // which the reconciler then catches, while the reverse would
-        // quietly cancel a position that is still there.
-        offset: oq_types::Offset::Open,
+        // Which leg the fill belongs to decides whether it opened or
+        // closed. A sell on the long leg reduces it; the same sell on
+        // the short leg opens. Reading every fill as opening leaves a
+        // position that never goes away, which a strategy will keep
+        // trying to close: on a live account that ran seven times in
+        // forty seconds, leaving a leg at seven times its intended size,
+        // and it stopped only because the account stream died.
+        //
+        // `BOTH` is a one-way account, where the venue nets and the
+        // engine can infer the effect from the sign. Opening is the
+        // reading there for the reason the comment this replaces gave:
+        // a close mistaken for an open overstates the position and the
+        // reconciler catches it, while the reverse quietly forgets one
+        // that is still there.
+        offset: offset_of(&u.position_side, &u.side),
         price: oq_types::PriceTicks(price),
         qty: QtyLots(qty),
         liquidity: if u.maker {
@@ -1622,5 +1630,64 @@ mod tests {
         let intents = vec![Intent::Cancel(OrderId(4)), Intent::CancelAll];
         assert_eq!(shape_of(&intents, OrderId(4)), None);
         assert_eq!(shape_of(&intents, OrderId(99)), None);
+    }
+}
+
+/// Whether a fill opened or closed, from the leg it landed on.
+///
+/// On a hedged account the venue names the leg and the answer follows:
+/// a sell reduces the long and opens the short. On a one-way account it
+/// says `BOTH`, and the engine reads the effect from the sign instead.
+fn offset_of(position_side: &str, side: &str) -> oq_types::Offset {
+    let sell = side.eq_ignore_ascii_case("SELL");
+    if position_side.eq_ignore_ascii_case("LONG") {
+        if sell {
+            oq_types::Offset::Close
+        } else {
+            oq_types::Offset::Open
+        }
+    } else if position_side.eq_ignore_ascii_case("SHORT") {
+        if sell {
+            oq_types::Offset::Open
+        } else {
+            oq_types::Offset::Close
+        }
+    } else {
+        oq_types::Offset::Open
+    }
+}
+
+#[cfg(test)]
+mod which_leg {
+    use super::offset_of;
+    use oq_types::Offset;
+
+    /// A sell reduces the long leg and opens the short one.
+    ///
+    /// Reading both as opening is what left a position the books never
+    /// let go of, and a strategy trying to close it over and over.
+    #[test]
+    fn a_sell_closes_the_long_and_opens_the_short() {
+        assert_eq!(offset_of("LONG", "SELL"), Offset::Close);
+        assert_eq!(offset_of("SHORT", "SELL"), Offset::Open);
+    }
+
+    #[test]
+    fn a_buy_opens_the_long_and_closes_the_short() {
+        assert_eq!(offset_of("LONG", "BUY"), Offset::Open);
+        assert_eq!(offset_of("SHORT", "BUY"), Offset::Close);
+    }
+
+    /// A one-way account nets, and the engine reads the sign.
+    #[test]
+    fn a_netting_account_is_read_as_opening() {
+        assert_eq!(offset_of("BOTH", "SELL"), Offset::Open);
+        assert_eq!(offset_of("BOTH", "BUY"), Offset::Open);
+    }
+
+    /// Case is the venue's business, not this build's.
+    #[test]
+    fn the_venues_spelling_does_not_matter() {
+        assert_eq!(offset_of("long", "sell"), Offset::Close);
     }
 }
