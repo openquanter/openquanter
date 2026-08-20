@@ -787,6 +787,34 @@ where
                 for action in supervisor.on_disconnect() {
                     act(&action, &mut trader, &symbol);
                 }
+                // Reconnect here, where the reader is. `act` cannot: it
+                // is handed a trader and a symbol, and a stream is
+                // neither — so `Action::Reconnect` reached it and did
+                // nothing at all.
+                //
+                // The cost of that was not a warning. The reader is
+                // deliberately not self-healing — the module says so,
+                // because a caller has to reconcile before trusting its
+                // books again — so a dropped stream stayed dropped, and
+                // a run went three hours reporting the loss thousands of
+                // times while receiving no account events. It held a
+                // position and could not have learned that it closed.
+                match trader.venue().open_user_stream() {
+                    Ok(fresh) => {
+                        match UserStreamReader::connect(&fresh, Duration::from_millis(200)) {
+                            Ok(r) => {
+                                reader = r;
+                                // Said out loud. A log that reports every
+                                // loss and no recovery leaves a reader
+                                // unable to tell whether it is still down,
+                                // which is the question they opened it for.
+                                println!("user stream      reconnected");
+                            }
+                            Err(e) => eprintln!("user stream      reconnect FAILED: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("user stream      reopen FAILED: {e}"),
+                }
             }
             StreamOutcome::Idle | StreamOutcome::Ignored => {}
         }
@@ -1046,6 +1074,12 @@ fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
         // Reconnection of the account stream is left to the next
         // iteration's read, which opens one when it finds none. What
         // matters here is that the reconcile that follows it happens.
+        // Reconnect is handled where the reader is, in the loop. It
+        // cannot be done here: `act` is given a trader and a symbol, and
+        // a stream is neither. Left as a no-op rather than removed
+        // because the supervisor is right to emit it — the arm below is
+        // the acknowledgement that this function is the wrong place, and
+        // for a long time it was the whole of the handling.
         Action::Reconnect => {}
         Action::Halt(why) => trader.halt(why),
     }
