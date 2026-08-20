@@ -47,7 +47,7 @@ commitments.
 | **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
 | **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | **Mostly built; G3, G7's parity half and G11 are blocked on inputs this project cannot reach** |
 | **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Half built, entry triggers unmet** |
-| **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered (a first L1 exists, uncalibrated) |
+| **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered (a first L1 exists, uncalibrated). Its depth requirement was a bare "6 months" with no argument behind it; now stated by what the data is for |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
 | **2.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
 
@@ -511,7 +511,24 @@ not in the matching kernel.
 
 1. A concrete maker or high-frequency strategy candidate exists whose edge is
    limited by simulation fidelity — not a hypothetical one.
-2. At least 6 months of incremental depth data has been captured.
+2. Enough incremental depth has been captured for the question being
+   asked. **Not a fixed number of months**, which is what this said and
+   could not justify: the figure appeared once, with no argument, next
+   to an unrelated "≥ 6 months" about how long the core has been
+   released. What L2 needs depends on what it is being used to answer:
+
+   | To answer | Needs | Why |
+   |---|---|---|
+   | Does the matcher reconstruct and match? | days | only that sequencing, gaps and snapshot reconciliation hold on real data |
+   | Is the queue model calibrated? | weeks | enough liquidity states, not enough to span seasons |
+   | Does a maker strategy's edge survive? | months | this is where a multi-month window is actually the argument |
+   | Is the result statistically significant? | longer still | and this project's position is that one run is not evidence |
+
+   Only the third row was ever six months. The first two are reachable
+   now, and were unreachable for a different reason until the archive
+   pull was deployed — the staging bucket expires after seven days, so
+   the retained window had a hard ceiling regardless of how long capture
+   ran.
 
 **Scope.**
 
