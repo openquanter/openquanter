@@ -291,10 +291,33 @@ impl RiskGate {
                 ));
             }
         }
-        if order.qty.0 > self.limits.max_order_qty.0 {
+        // The per-order cap is about opening. It exists so a runaway
+        // strategy cannot put one enormous order into the market, and
+        // that risk is an opening risk.
+        //
+        // A reduce-only order cannot exceed the position it reduces, and
+        // the position is already capped by `max_position_qty`. Applying
+        // the opening cap to it produces a position that cannot be
+        // closed in one order — a limit that binds only in the direction
+        // of danger, and refuses the one action that makes an account
+        // safer.
+        //
+        // Measured: a ladder grew a position past this cap and every
+        // take-profit for it was refused, so the position sat with
+        // nothing able to close it.
+        if !order.reduce_only && order.qty.0 > self.limits.max_order_qty.0 {
             return Decision::Refuse(Breach::OrderTooLarge {
                 qty: order.qty,
                 limit: self.limits.max_order_qty,
+            });
+        }
+        // A close still may not exceed what is held. Without this the
+        // exemption above would let a reduce-only order of any size
+        // through, and an order larger than the position is not a close.
+        if order.reduce_only && order.qty.0 > account.position.0.abs() {
+            return Decision::Refuse(Breach::OrderTooLarge {
+                qty: order.qty,
+                limit: QtyLots(account.position.0.abs()),
             });
         }
 
@@ -899,5 +922,97 @@ mod versioning {
     #[test]
     fn limits_start_at_version_one() {
         assert_eq!(VersionedLimits::new(limits()).version(), 1);
+    }
+}
+
+#[cfg(test)]
+mod closing {
+    use super::{AccountState, Decision, Limits, ProposedOrder, RiskGate};
+    use oq_types::{Cash, Instrument, Nanos, PriceTicks, QtyLots, Ratio, Side};
+
+    fn limits() -> Limits {
+        Limits {
+            max_order_qty: QtyLots(20),
+            max_position_qty: QtyLots(10_000),
+            max_order_notional: Cash(1_000_000_000 * oq_types::CASH_SCALE),
+            price_band: Ratio(1_000_000_000),
+            max_working: 100,
+            max_rate: 1_000,
+            rate_window: Nanos(60 * 1_000_000_000),
+        }
+    }
+
+    fn account(position: i64) -> AccountState {
+        AccountState {
+            position: QtyLots(position),
+            mark: PriceTicks(6_800_000),
+            working: 0,
+        }
+    }
+
+    fn order(qty: i64, reduce_only: bool) -> ProposedOrder {
+        ProposedOrder {
+            side: Side::Sell,
+            limit_price: Some(PriceTicks(6_800_000)),
+            qty: QtyLots(qty),
+            reduce_only,
+        }
+    }
+
+    /// A position larger than the per-order cap can still be closed.
+    ///
+    /// The cap is about opening: it exists so a runaway strategy cannot
+    /// put one enormous order into the market. Applied to a close it
+    /// produces a position nothing can exit in one order — a limit that
+    /// binds only in the direction of danger.
+    ///
+    /// Measured on a live account: a ladder grew a position past the
+    /// cap, every take-profit for it was refused, and the position sat
+    /// with nothing able to close it.
+    #[test]
+    fn a_close_larger_than_the_per_order_cap_is_allowed() {
+        let mut gate = RiskGate::new(limits());
+        let d = gate.check(
+            &order(30, true),
+            &account(30),
+            &Instrument::linear(2, 4),
+            Nanos(1),
+        );
+        assert!(d.is_permitted(), "{d:?}");
+    }
+
+    /// And an open of the same size is not.
+    #[test]
+    fn an_open_of_the_same_size_is_still_refused() {
+        let mut gate = RiskGate::new(limits());
+        let d = gate.check(
+            &order(30, false),
+            &account(30),
+            &Instrument::linear(2, 4),
+            Nanos(1),
+        );
+        assert!(
+            matches!(d, Decision::Refuse(super::Breach::OrderTooLarge { .. })),
+            "{d:?}"
+        );
+    }
+
+    /// A close may not exceed what is held.
+    ///
+    /// Without this the exemption would pass a reduce-only order of any
+    /// size, and an order larger than the position is not a close.
+    #[test]
+    fn a_close_larger_than_the_position_is_refused() {
+        let mut gate = RiskGate::new(limits());
+        let d = gate.check(
+            &order(50, true),
+            &account(30),
+            &Instrument::linear(2, 4),
+            Nanos(1),
+        );
+        assert!(
+            matches!(d, Decision::Refuse(super::Breach::OrderTooLarge { .. })),
+            "{d:?}"
+        );
     }
 }
