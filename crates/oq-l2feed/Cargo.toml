@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 oq-hash.workspace = true
 oq-types.workspace = true
+ruzstd = "0.8.2"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = "3.4"
 # For SIGTERM only. std has no signal API, and a capture that cannot

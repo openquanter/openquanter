@@ -212,7 +212,7 @@ input this project cannot reach, the second has not been written.
 | L1 | **Latency as distributions rather than constants** | Built — `Delay::Measured` takes p50/p90/p99/p999, which is what a latency measurement produces; nearest-rank and never interpolated, drawn deterministically from the order id so a replay from a snapshot fills the same way |
 | L1 | **Feed latency** | Deliberately not in the engine — it belongs to the event producer |
 | L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
-| L2 | Book reconstruction, snapshot reconciliation, gap handling | **Not built** |
+| L2 | Book reconstruction, snapshot reconciliation, gap handling | Reconstruction is built and now **measured on a real archive**: 133,910 depth updates, 0 sequence errors, 0 gaps, 0 crossed books, 10,286 levels deep — `RECONSTRUCTS CLEANLY`. Matching against that book is **not built** |
 | Validation | Stylized-facts test set | Built for the **generated** markets — `oq_stats::StylizedFacts` measures four facts, the fixtures are pinned against them, and the finding is that most do not hold (see QUICKSTART). Order-flow autocorrelation and the real-data half need a capture and are not done |
 | Validation | L0 / L0+margin / L1 comparative report | Built — `tiers` covers all three, and shows the rungs are **not** ordered by pessimism |
 

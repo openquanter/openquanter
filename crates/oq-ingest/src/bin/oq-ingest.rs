@@ -144,7 +144,7 @@ fn main() -> ExitCode {
                 if path.file_stem().and_then(|s| s.to_str()) != Some(hour.as_str()) {
                     continue;
                 }
-                match std::fs::read(&path) {
+                match oq_l2feed::archive::read(&path) {
                     Ok(b) => bytes.extend_from_slice(&b),
                     Err(e) => {
                         eprintln!("oq-ingest: cannot read {}: {e}", path.display());
