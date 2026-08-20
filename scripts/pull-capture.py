@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import os
 import sys
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
@@ -131,6 +132,43 @@ def list_all(cos, prefix):
     return out
 
 
+# Idle seconds before a transfer is treated as stalled.
+#
+# `http.client`'s timeout is per socket operation, not per transfer, so
+# this is "no bytes for two minutes" and not "finish within two
+# minutes" — a 93 MB object is unaffected. The default is 1800, which on
+# a link that stalls turns every blip into half an hour of a process
+# sitting in `poll` with a zero-byte `.part` beside it. Measured: that
+# is exactly what happened on the first backfill.
+STALL_SECONDS = 120
+
+# A stalled object is retried rather than counted out. The link this
+# runs over drops packets; one attempt is a coin toss, and giving up
+# after one leaves the object for the next scheduled run, which inherits
+# the same coin toss against a seven-day expiry.
+ATTEMPTS = 4
+
+
+def fetch(cos, key, local):
+    """Download with a stall timeout, retrying a few times."""
+    last = None
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return cos.get_file(key, local, timeout=STALL_SECONDS)
+        except OSError as e:
+            last = e
+            # The partial file is the previous attempt's, not this one's.
+            try:
+                os.remove(local + ".part")
+            except OSError:
+                pass
+            if attempt < ATTEMPTS:
+                print(f"pull: retry {attempt}/{ATTEMPTS - 1} {key}: {e}",
+                      file=sys.stderr)
+                time.sleep(2 * attempt)
+    raise last
+
+
 def md5_of(path):
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -178,7 +216,7 @@ def pull(cos, args):
 
         os.makedirs(os.path.dirname(local), exist_ok=True)
         try:
-            ok, detail = cos.get_file(key, local)
+            ok, detail = fetch(cos, key, local)
         except OSError as e:
             # One object must not end the run. The staging bucket expires
             # after seven days, so a crash on object 97 of 4144 is not an
