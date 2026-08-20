@@ -75,7 +75,7 @@ fn main() -> ExitCode {
     };
     println!("venue           {venue_id}");
 
-    let bytes = std::fs::read(&path).expect("read");
+    let bytes = oq_l2feed::archive::read(&path).expect("read");
     let (records, torn) = decode_all(&bytes).expect("decode");
 
     let mut ids: Vec<u64> = records
