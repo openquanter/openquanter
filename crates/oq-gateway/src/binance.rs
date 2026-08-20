@@ -1281,6 +1281,10 @@ pub fn parse_user_event(payload: &str) -> Option<UserEvent> {
                 cumulative_qty: field_str(inner, "z").unwrap_or_else(|| "0".into()),
                 last_price: field_str(inner, "L").unwrap_or_else(|| "0".into()),
                 side: field_str(inner, "S").unwrap_or_default(),
+                // `BOTH` when the venue does not say, which is what a
+                // one-way account reports and the right default: it
+                // means "the only leg there is".
+                position_side: field_str(inner, "ps").unwrap_or_else(|| "BOTH".into()),
                 // Absent means taker: the venue sets it only when the
                 // fill made liquidity, and defaulting the other way
                 // would credit a maker rebate to an order that paid.
