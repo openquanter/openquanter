@@ -342,6 +342,14 @@ pub struct OrderUpdate {
     /// "we sent a buy" is a different fact from "the venue filled a
     /// buy".
     pub side: String,
+    /// Which leg, on a hedged account: `LONG`, `SHORT`, or `BOTH`.
+    ///
+    /// Without it a fill cannot be read as opening or closing. A sell on
+    /// the long leg reduces it; the same sell on the short leg opens.
+    /// Assuming every fill opens leaves a position that never goes away
+    /// in the books, which is a position a strategy will keep trying to
+    /// close — and did, seven times in forty seconds on a live account.
+    pub position_side: String,
     /// Whether this fill made liquidity.
     ///
     /// Decides the fee, which is the difference between a rebate and a
