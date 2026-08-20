@@ -576,6 +576,12 @@ where
     let mut refused = 0_u64;
     let mut unresolved = 0_u64;
     let mut last_tick_report = Instant::now();
+    // The last observation, kept so a fill arriving between ticks can be
+    // handed a context. A strategy sizing a ladder needs a price, and the
+    // most recent one is the honest answer: the alternative is telling it
+    // nothing happened until the next tick, by which time the position it
+    // is managing has been unmanaged for however long that took.
+    let mut last_tick: Option<oq_engine::Tick> = None;
 
     while Instant::now() < deadline && !shutdown_requested() {
         let now = Nanos(now_ns());
@@ -613,6 +619,7 @@ where
                             // silence.
                             println!("books            {output:?}");
                         }
+                        last_tick = Some(tick);
                         let ctx = books.context(tick);
                         for outcome in trader.on_tick(&ctx, now) {
                             if let Outcome::Sent { local, .. } = &outcome {
@@ -658,8 +665,11 @@ where
                     "fill/update      {} {} qty {} @ {}",
                     u.client_id, u.status, u.cumulative_qty, u.last_price
                 );
+                // Before `apply`, which may end the order and forget the
+                // association the translation depends on.
+                let local = trader.local_id(&u.client_id).unwrap_or(OrderId(0));
                 trader.apply(&u);
-                let parsed = fill_of(&u, &instrument);
+                let parsed = fill_of(&u, &instrument, local);
                 if let Err(why) = &parsed {
                     // A report the venue sent and this process did not
                     // book. Said out loud and counted, because the
@@ -686,6 +696,29 @@ where
                         crate::books::Booked::Applied(outputs) => {
                             for output in outputs {
                                 println!("books            {output:?}");
+                            }
+                            // And tell the strategy, which is the whole
+                            // reason it has an `on_fill`. Until this line
+                            // existed a strategy could open a position
+                            // live and never learn that it had: a run
+                            // opened two and placed neither a ladder nor
+                            // a take-profit against them, because nothing
+                            // ever called the callback that would have.
+                            //
+                            // After the books, so the context the
+                            // strategy reads already contains this fill.
+                            if let Some(t) = last_tick {
+                                let ctx = books.context(t);
+                                for outcome in trader.on_fill(&fill, &ctx, now) {
+                                    match &outcome {
+                                        Outcome::Sent { .. } => sent += 1,
+                                        Outcome::Cancelled { .. } => cancelled += 1,
+                                        Outcome::Refused { .. } => refused += 1,
+                                        Outcome::Unresolved { .. } => unresolved += 1,
+                                        Outcome::UnknownOrder(_) => {}
+                                    }
+                                    report(&outcome);
+                                }
                             }
                         }
                         // Routine after a reconnect, and worth a line:
@@ -1046,6 +1079,7 @@ pub fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
 fn fill_of(
     u: &oq_gateway::OrderUpdate,
     instrument: &Instrument,
+    order: OrderId,
 ) -> Result<oq_types::Fill, &'static str> {
     let scaled = |text: &str, scale: u8| -> Option<i64> {
         let (int, frac) = text.split_once('.').unwrap_or((text, ""));
@@ -1074,7 +1108,12 @@ fn fill_of(
     Ok(oq_types::Fill {
         stamp: oq_types::Stamp::new(now_ns(), now_ns()),
         instrument: oq_types::InstrumentId::new(1),
-        order: OrderId(0),
+        // The strategy's own id, translated from the client id the venue
+        // reports against. Zero when this process did not send the order
+        // — another system on the same account, or one from a previous
+        // run — and a strategy that looks for its own id will correctly
+        // find nothing.
+        order,
         // The deduplication key. Without it the fill cannot be
         // booked at all, which `Books` enforces rather than trusting.
         trade: oq_types::TradeId(u.trade_id.unwrap_or(0).unsigned_abs()),
@@ -1237,7 +1276,7 @@ mod adoption {
 #[cfg(test)]
 mod unreadable_reports {
     use super::fill_of;
-    use oq_types::Instrument;
+    use oq_types::{Instrument, OrderId};
 
     fn update(price: &str, qty: &str) -> oq_gateway::OrderUpdate {
         oq_gateway::OrderUpdate {
@@ -1263,34 +1302,61 @@ mod unreadable_reports {
     /// zero prices the position at nothing.
     #[test]
     fn a_zero_price_is_refused_by_name() {
-        let e = fill_of(&update("0", "0.001"), &Instrument::linear(2, 3)).expect_err("must refuse");
+        let e = fill_of(&update("0", "0.001"), &Instrument::linear(2, 3), OrderId(1))
+            .expect_err("must refuse");
         assert!(e.contains("price"), "{e}");
     }
 
     #[test]
     fn a_negative_price_is_refused() {
-        assert!(fill_of(&update("-100.0", "0.001"), &Instrument::linear(2, 3)).is_err());
+        assert!(
+            fill_of(
+                &update("-100.0", "0.001"),
+                &Instrument::linear(2, 3),
+                OrderId(1)
+            )
+            .is_err()
+        );
     }
 
     /// A quantity of zero is a report about no trade.
     #[test]
     fn a_zero_quantity_is_refused_by_name() {
-        let e = fill_of(&update("100.0", "0"), &Instrument::linear(2, 3)).expect_err("must refuse");
+        let e = fill_of(&update("100.0", "0"), &Instrument::linear(2, 3), OrderId(1))
+            .expect_err("must refuse");
         assert!(e.contains("quantity"), "{e}");
     }
 
     /// Text this build cannot read is refused rather than guessed at.
     #[test]
     fn an_unparseable_price_is_refused() {
-        assert!(fill_of(&update("not a number", "0.001"), &Instrument::linear(2, 3)).is_err());
+        assert!(
+            fill_of(
+                &update("not a number", "0.001"),
+                &Instrument::linear(2, 3),
+                OrderId(1)
+            )
+            .is_err()
+        );
     }
 
     /// And a report that is fine comes through unchanged.
     #[test]
     fn a_readable_report_is_booked() {
-        let f = fill_of(&update("65432.10", "0.002"), &Instrument::linear(2, 3)).expect("reads");
+        let f = fill_of(
+            &update("65432.10", "0.002"),
+            &Instrument::linear(2, 3),
+            OrderId(7),
+        )
+        .expect("reads");
         assert_eq!(f.price.0, 6_543_210);
         assert_eq!(f.qty.0, 2);
+        assert_eq!(
+            f.order,
+            OrderId(7),
+            "the strategy's own id travels with the fill, or it cannot \
+             recognise its own order filling"
+        );
     }
 }
 

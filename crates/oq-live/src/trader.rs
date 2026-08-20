@@ -187,6 +187,22 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         self.live.retain(|_, v| v != client_id);
     }
 
+    /// The strategy's own id for an order the venue is talking about.
+    ///
+    /// A venue reports fills against the client id it was given, and a
+    /// strategy recognises its orders by the id it issued. Without this
+    /// translation a strategy cannot tell that its own entry filled —
+    /// which is not theoretical: a live run opened two positions and
+    /// managed neither, because every fill arrived carrying an id that
+    /// matched nothing it had sent.
+    #[must_use]
+    pub fn local_id(&self, client_id: &str) -> Option<OrderId> {
+        self.live
+            .iter()
+            .find(|(_, v)| v.as_str() == client_id)
+            .map(|(k, _)| OrderId(*k))
+    }
+
     /// Client ids this process believes are resting.
     #[must_use]
     pub fn resting(&self) -> Vec<&str> {
