@@ -34,6 +34,13 @@ pub struct UserStreamReader {
 
 /// What came out of the socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// The event variant is much larger than the others, and boxing it would
+// trade a stack copy on every quiet poll for a heap allocation on every
+// event. A quiet poll copies a couple of hundred bytes and an event
+// allocates; on a stream read every two hundred milliseconds the copy is
+// the cheaper of the two, and it does not put an allocator on the path
+// that carries fills.
+#[allow(clippy::large_enum_variant)]
 pub enum StreamOutcome {
     /// The venue said something about the account.
     Event(UserEvent),

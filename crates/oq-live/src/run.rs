@@ -1372,6 +1372,7 @@ mod unreadable_reports {
             client_id: "oq-1".into(),
             status: "FILLED".into(),
             side: "BUY".into(),
+            position_side: "BOTH".into(),
             last_qty: qty.into(),
             last_price: price.into(),
             cumulative_qty: qty.into(),
