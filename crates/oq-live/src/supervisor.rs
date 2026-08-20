@@ -189,6 +189,8 @@ mod tests {
         vec![PositionSnapshot {
             symbol: "BTCUSDT".into(),
             position_side: "BOTH".into(),
+            amount_text: String::new(),
+            entry_text: String::new(),
             amount,
             entry_price: 0.0,
             unrealized: 0.0,

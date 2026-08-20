@@ -85,7 +85,25 @@ pub struct PositionSnapshot {
     /// `BOTH` under one-way netting, `LONG` or `SHORT` under hedging.
     pub position_side: String,
     /// Signed: positive long, negative short.
+    ///
+    /// For comparing against zero and for reading. **Not** for
+    /// converting to lots — see [`PositionSnapshot::amount_text`].
     pub amount: f64,
+    /// The quantity exactly as the venue wrote it.
+    ///
+    /// Kept because the float above cannot hold it. A venue reports
+    /// decimal text, and 0.0058 becomes 57.999999999999993 the moment it
+    /// is scaled by ten thousand — so a conversion through the float
+    /// adopts fifty-seven of fifty-eight lots, and the one left over is
+    /// held by the account and managed by nobody.
+    ///
+    /// Rounding instead of truncating repairs that case and not the
+    /// class: the digits are right here, and reading them is exact for
+    /// every size rather than for the ones somebody thought to test.
+    pub amount_text: String,
+    /// The entry price exactly as the venue wrote it, for the same
+    /// reason.
+    pub entry_text: String,
     pub entry_price: f64,
     pub unrealized: f64,
 }
@@ -325,7 +343,11 @@ impl Binance {
             if amount == 0.0 {
                 continue;
             }
+            let amount_text = need_str(&o, "positionAmt")?;
+            let entry_text = need_str(&o, "entryPrice")?;
             out.push(PositionSnapshot {
+                amount_text,
+                entry_text,
                 symbol: need_str(&o, "symbol")?,
                 // One-way accounts omit the side, and `BOTH` is what the
                 // venue calls that. A default here is a translation, not
