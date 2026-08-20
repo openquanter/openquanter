@@ -66,6 +66,20 @@ impl Strategy for Scripted {
     }
 }
 
+/// Answers a fill the way a real one does: an entry filling is what a
+/// ladder and a take-profit are placed on.
+struct Answers(Vec<Intent>);
+
+impl Strategy for Answers {
+    fn on_tick(&mut self, _ctx: &Context, _out: &mut Vec<Intent>) {}
+    fn on_fill(&mut self, _fill: &oq_types::Fill, _ctx: &Context, out: &mut Vec<Intent>) {
+        out.append(&mut self.0);
+    }
+    fn name(&self) -> &str {
+        "answers"
+    }
+}
+
 fn ctx() -> Context {
     Context {
         tick: oq_engine::Tick {
@@ -105,6 +119,32 @@ fn trader(intents: Vec<Intent>) -> Trader<Scripted, Accepting> {
     )
     .expect("clean venue");
     Trader::new(Scripted(intents), session)
+}
+
+fn answering(intents: Vec<Intent>) -> Trader<Answers, Accepting> {
+    let session = Session::start(
+        Accepting::new(),
+        RiskGate::new(Limits {
+            max_order_qty: QtyLots(100),
+            max_position_qty: QtyLots(1000),
+            max_order_notional: Cash(1_000_000 * oq_types::CASH_SCALE),
+            price_band: Ratio(500_000_000),
+            max_working: 10,
+            max_rate: 100,
+            rate_window: Nanos(60 * 1_000_000_000),
+        }),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("clean venue");
+    Trader::new(Answers(intents), session)
 }
 
 fn limit(id: u64) -> Intent {
@@ -341,5 +381,72 @@ fn the_strategy_is_not_told_an_unanswered_order_was_refused() {
         told.borrow().is_empty(),
         "the strategy was told {:?} about an order nobody has an answer for",
         told.borrow()
+    );
+}
+
+/// A venue reports against the client id it was given; a strategy knows
+/// its orders by the id it issued. Without the translation between them
+/// a strategy cannot tell that its own order filled.
+///
+/// This is not theoretical. A live run opened two positions and managed
+/// neither: every fill arrived carrying an id that matched nothing the
+/// strategy had sent, so it placed no ladder and no take-profit against
+/// positions it was holding.
+#[test]
+fn a_venues_client_id_translates_back_to_the_strategys_own() {
+    let mut t = trader(vec![limit(7)]);
+    let outcomes = t.on_tick(&ctx(), Nanos(1));
+
+    let client = match outcomes.first().expect("one order") {
+        Outcome::Sent { client_id, .. } => client_id.clone(),
+        other => panic!("{other:?}"),
+    };
+
+    assert_eq!(
+        t.local_id(&client),
+        Some(OrderId(7)),
+        "the venue's id must lead back to the one the strategy issued"
+    );
+}
+
+/// An order this process did not send translates to nothing.
+///
+/// Another system on the same account, or one left by a previous run.
+/// Answering with an id would hand a strategy somebody else's fill.
+#[test]
+fn an_id_this_process_never_sent_translates_to_nothing() {
+    let mut t = trader(vec![limit(7)]);
+    t.on_tick(&ctx(), Nanos(1));
+    assert_eq!(t.local_id("someone-elses-order"), None);
+}
+
+/// The strategy is told, and what it says is acted on.
+///
+/// The callback existed, was implemented, and was tested — and the live
+/// runner never called it. That is the defect this covers from the side
+/// a test can reach: given the call, an intent returned by the strategy
+/// reaches the venue.
+#[test]
+fn a_fill_reaches_the_strategy_and_its_answer_reaches_the_venue() {
+    let mut t = answering(vec![limit(11)]);
+    let fill = oq_types::Fill {
+        stamp: oq_types::Stamp::new(1, 1),
+        instrument: oq_types::InstrumentId::new(1),
+        order: OrderId(7),
+        trade: oq_types::TradeId(1),
+        side: Side::Buy,
+        offset: oq_types::Offset::Open,
+        price: PriceTicks(6_000_000),
+        qty: QtyLots(1),
+        liquidity: oq_types::Liquidity::Taker,
+    };
+
+    let outcomes = t.on_fill(&fill, &ctx(), Nanos(2));
+
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Sent { local, .. } if *local == OrderId(11))),
+        "the intent the strategy returned on the fill was not sent: {outcomes:?}"
     );
 }
