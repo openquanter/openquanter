@@ -311,13 +311,20 @@ impl RiskGate {
                 limit: self.limits.max_order_qty,
             });
         }
-        // A close still may not exceed what is held. Without this the
-        // exemption above would let a reduce-only order of any size
-        // through, and an order larger than the position is not a close.
-        if order.reduce_only && order.qty.0 > account.position.0.abs() {
+        // A close is still bounded, by the largest position this account
+        // may hold: nothing it can legitimately be closing is bigger
+        // than that.
+        //
+        // Not by the position itself, which was the first attempt and
+        // was wrong. `AccountState::position` is one signed number and
+        // knows nothing about legs, so on a hedged account holding
+        // twenty long and twenty short it reads zero — and closing
+        // either leg would have been refused for exceeding a position of
+        // nothing. A test caught it; the reasoning had looked sound.
+        if order.reduce_only && order.qty.0 > self.limits.max_position_qty.0 {
             return Decision::Refuse(Breach::OrderTooLarge {
                 qty: order.qty,
-                limit: QtyLots(account.position.0.abs()),
+                limit: self.limits.max_position_qty,
             });
         }
 
@@ -997,15 +1004,18 @@ mod closing {
         );
     }
 
-    /// A close may not exceed what is held.
+    /// A close is bounded by the largest position the account may hold.
     ///
-    /// Without this the exemption would pass a reduce-only order of any
-    /// size, and an order larger than the position is not a close.
+    /// Not by the position itself: `AccountState::position` is one
+    /// signed number and knows nothing about legs, so a hedged account
+    /// holding twenty long and twenty short reads zero, and bounding a
+    /// close by that refuses closing either leg. That was the first
+    /// attempt, and a test caught it.
     #[test]
-    fn a_close_larger_than_the_position_is_refused() {
+    fn a_close_beyond_the_largest_allowed_position_is_refused() {
         let mut gate = RiskGate::new(limits());
         let d = gate.check(
-            &order(50, true),
+            &order(10_001, true),
             &account(30),
             &Instrument::linear(2, 4),
             Nanos(1),
@@ -1014,5 +1024,19 @@ mod closing {
             matches!(d, Decision::Refuse(super::Breach::OrderTooLarge { .. })),
             "{d:?}"
         );
+    }
+
+    /// A hedged account reads flat when its legs are equal, and either
+    /// leg must still be closable.
+    #[test]
+    fn a_close_is_allowed_when_the_legs_net_to_nothing() {
+        let mut gate = RiskGate::new(limits());
+        let d = gate.check(
+            &order(20, true),
+            &account(0),
+            &Instrument::linear(2, 4),
+            Nanos(1),
+        );
+        assert!(d.is_permitted(), "{d:?}");
     }
 }
