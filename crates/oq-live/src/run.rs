@@ -1248,7 +1248,22 @@ fn adopted_lots(
             #[allow(clippy::cast_possible_truncation)]
             let entry =
                 PriceTicks((p.entry_price * 10f64.powi(i32::from(instrument.price_scale))) as i64);
-            let side = if p.amount > 0.0 {
+            // The leg the venue named, not the sign of the amount. On a
+            // hedged account they are different questions, and a venue
+            // can report a leg whose amount has a sign the leg should
+            // not have — one did, reporting a LONG leg at a negative
+            // quantity after a defect elsewhere let sells run past zero.
+            // Reading the sign there adopts onto the opposite leg, and a
+            // takeover onto the opposite leg opens where it meant to
+            // close.
+            //
+            // `BOTH` is a one-way account: one leg, and the sign is the
+            // only thing that can say which way it points.
+            let side = if p.position_side.eq_ignore_ascii_case("LONG") {
+                Side::Buy
+            } else if p.position_side.eq_ignore_ascii_case("SHORT") {
+                Side::Sell
+            } else if p.amount > 0.0 {
                 Side::Buy
             } else {
                 Side::Sell
@@ -1318,6 +1333,36 @@ mod adoption {
         let i = Instrument::linear(2, 4);
         assert_eq!(adopted_lots(&[leg(0.016, 1.0)], &i)[0].0, Side::Buy);
         assert_eq!(adopted_lots(&[leg(-0.016, 1.0)], &i)[0].0, Side::Sell);
+    }
+
+    /// On a hedged account the leg the venue named wins over the sign.
+    ///
+    /// A venue can report a leg whose amount has a sign the leg should
+    /// not have — one did, reporting a LONG leg at a negative quantity
+    /// after sells were allowed to run past zero. Reading the sign there
+    /// adopts the position onto the *opposite* leg, and a takeover onto
+    /// the opposite leg is one that opens where it meant to close.
+    #[test]
+    fn a_named_leg_wins_over_the_sign() {
+        let mut long_gone_negative = leg(-0.014, 69_544.2);
+        long_gone_negative.position_side = "LONG".into();
+        assert_eq!(
+            adopted_lots(&[long_gone_negative], &Instrument::linear(2, 4))[0].0,
+            Side::Buy,
+            "the venue said LONG; the sign is the anomaly, not the answer"
+        );
+    }
+
+    /// A one-way account has one leg, and only the sign can say which
+    /// way it points.
+    #[test]
+    fn a_netting_account_still_reads_the_sign() {
+        let mut netted = leg(-0.016, 1.0);
+        netted.position_side = "BOTH".into();
+        assert_eq!(
+            adopted_lots(&[netted], &Instrument::linear(2, 4))[0].0,
+            Side::Sell
+        );
     }
 
     /// A flat leg is not a position, and recording it as one would put a
