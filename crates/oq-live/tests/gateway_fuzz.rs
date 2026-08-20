@@ -47,6 +47,7 @@ fn books() -> Books {
         Contract::new(10_000),
         TierTable::example_btcusdt(),
         Cash::from_units(1_000_000),
+        oq_core::PositionMode::OneWay,
     )
 }
 

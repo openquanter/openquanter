@@ -358,13 +358,41 @@ where
     let limits = oq_risk::VersionedLimits::new(cfg.limits);
     println!("limits           version {}", limits.version());
 
+    // Derived from the instrument the venue just described, not written
+    // down here. A hand-written scale stays plausible while being wrong:
+    // prices parse, quantities parse, and every notional is off by a
+    // factor nothing reports. The constant this replaces was 10_000 for
+    // a contract whose real figure is 100 at four decimal places of
+    // quantity and 1000 at three — so exposure was overstated by two
+    // orders of magnitude on one deployment and one on the other.
+    //
+    // It went unnoticed because a second defect hid it: the books netted
+    // a hedged account, both legs cancelled, and a flat position is never
+    // measured. Fixing the netting without this would have started
+    // measuring, at a hundred times the real size.
+    let Some(contract) = oq_margin::Contract::of(&instrument) else {
+        eprintln!(
+            "contract         FAILED: this instrument's tick is worth less than              the smallest cash unit; margin cannot be computed for it"
+        );
+        return ExitCode::FAILURE;
+    };
+    println!("contract         {} cash per tick-lot", contract.tick_cash);
     let mut books = crate::books::Books::new(
         oq_types::InstrumentId::new(1),
-        oq_margin::Contract::new(10_000),
+        contract,
         oq_margin::TierTable::example_btcusdt(),
         // The venue's number, not a configured one. Books opened at a
         // balance nobody read would report an account that is not this.
         starting_balance,
+        // As the venue reports it, asked above. A hedged account whose
+        // books net is one where two equal legs cancel and everything
+        // downstream reads a flat account the venue is charging margin
+        // on twice.
+        if hedged {
+            oq_core::PositionMode::Hedge
+        } else {
+            oq_core::PositionMode::OneWay
+        },
     );
 
     // The same events, matched by the model instead of by the venue.
