@@ -13,9 +13,20 @@ That is what the heartbeat is for.
 
 Idempotent by construction. An object already present locally at the
 same size is skipped, so re-running is free and a partial run resumes
-where it stopped. Downloads land on a .part file and are renamed only
-after the MD5 matches the ETag COS reported, so an interrupted transfer
-can never be mistaken for a complete one.
+where it stopped. Downloads land on a .part file inside `get_file` and
+are renamed once the body is written; the MD5-against-ETag check happens
+after that, and a file failing it is removed. So an interrupted transfer
+leaves a .part nobody will mistake for a complete object, and a corrupted
+one leaves nothing.
+
+Two things this learned the hard way, both on a Synology:
+
+- **It takes a lock.** Two pullers race on the same .part: one renames
+  it, the other's rename raises `FileNotFoundError` and ends the run.
+- **One object cannot end the run.** An `OSError` on object 97 of 4144
+  used to take the remaining 4047 with it, and the next scheduled run
+  inherited the same object and the same crash. With a staging bucket
+  that expires after seven days, that is how a week of capture is lost.
 """
 
 import argparse
@@ -29,6 +40,49 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cos
 from cos_client import from_env, _sign  # noqa: E402
 
 CHUNK = 1 << 20
+
+
+class OnlyOne:
+    """Refuse to run beside another puller.
+
+    Two instances race on the same `.part` file: one renames it, the
+    other's `os.replace` raises `FileNotFoundError` and takes the whole
+    run down. That happened — a scheduled run and a manual one, and the
+    manual one appeared to have exited because the check used `pgrep`,
+    which does not exist on the Synology this runs on. A liveness test
+    that silently reports "not running" is worse than none.
+
+    So the lock is a file, not a process check. `O_EXCL` is atomic on
+    every filesystem this touches, and a stale one names the pid that
+    left it rather than being cleared automatically: this cannot tell a
+    crash from a slow run, and pid reuse makes the obvious check wrong
+    rather than merely unreliable.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.write(self.fd, f"pid {os.getpid()}\n".encode())
+        except FileExistsError:
+            try:
+                held = open(self.path).read().strip()
+            except OSError:
+                held = "nothing about itself"
+            raise SystemExit(
+                f"pull: another puller holds {self.path} ({held}).\n"
+                f"      If that process is gone, remove the file."
+            )
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)
+            os.unlink(self.path)
+        return False
 
 
 def list_all(cos, prefix):
@@ -100,9 +154,14 @@ def main():
     # in the same region, so there is no internal path to use.
     cos = from_env(args.env, internal=False)
 
-    objects = list_all(cos, args.prefix)
+    with OnlyOne(os.path.join(args.dest, ".pull.lock")):
+        return pull(cos, args)
+
+
+def pull(cos, args):
     have = new = failed = 0
     bytes_pulled = 0
+    objects = list_all(cos, args.prefix)
 
     for key, size, etag in sorted(objects):
         rel = key[len(args.prefix):] if key.startswith(args.prefix) else key
@@ -118,7 +177,23 @@ def main():
             continue
 
         os.makedirs(os.path.dirname(local), exist_ok=True)
-        ok, detail = cos.get_file(key, local)
+        try:
+            ok, detail = cos.get_file(key, local)
+        except OSError as e:
+            # One object must not end the run. The staging bucket expires
+            # after seven days, so a crash on object 97 of 4144 is not an
+            # inconvenience — it is the rest of the week's data, and the
+            # next scheduled run inherits the same object and the same
+            # crash. Counted, named, and stepped over; the summary says
+            # how many, and a non-zero exit still reports the failure.
+            print(f"pull: error {rel}: {e}", file=sys.stderr)
+            for leftover in (local + ".part", local):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+            failed += 1
+            continue
         if not ok:
             print(f"pull: failed {rel}: {detail}", file=sys.stderr)
             failed += 1
