@@ -437,3 +437,78 @@ fn a_strategy_that_names_nothing_writes_nothing() {
         "nothing was named, so nothing may claim to have been: {all:?}"
     );
 }
+
+/// A fill is written with the id the strategy knew it by.
+///
+/// `Record::Fill` had an encoder, a decoder, a round-trip test, a line
+/// in `oq-replay` that counted it and a reconstruction in `belief` that
+/// read it — and nothing in the tree wrote one. The journal contained
+/// no fills at all, so nothing could be replayed from it.
+///
+/// The order id is the half that makes a replay worth doing. A position
+/// can be recovered from the venue; which of a ladder's rungs had
+/// filled cannot, because only this strategy ever knew.
+#[test]
+fn a_fill_is_recorded_with_the_id_the_strategy_knew_it_by() {
+    let path = temp("fills.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"));
+
+    s.record_fill(
+        &oq_types::Fill {
+            stamp: oq_types::Stamp::new(9, 9),
+            instrument: oq_types::InstrumentId::new(1),
+            order: oq_types::OrderId(7),
+            trade: oq_types::TradeId(481_923),
+            side: Side::Sell,
+            offset: oq_types::Offset::Close,
+            price: PriceTicks(6_000_000),
+            qty: QtyLots(8),
+            liquidity: oq_types::Liquidity::Maker,
+        },
+        "oq-1",
+    );
+
+    let all = records(&path);
+    match all
+        .iter()
+        .find(|r| matches!(r, Record::Fill { .. }))
+        .unwrap_or_else(|| panic!("the fill must be in the journal: {all:?}"))
+    {
+        Record::Fill {
+            order,
+            side,
+            qty,
+            price,
+            client_id,
+            ..
+        } => {
+            assert_eq!(*order, 7, "the strategy's own id, not the venue's");
+            assert_eq!(side, "Sell");
+            assert_eq!(client_id, "oq-1");
+            // At the instrument's precision, so a reader parses back the
+            // number that was booked rather than one off by a factor.
+            assert_eq!(qty, "0.008");
+            assert_eq!(price, "60000.00");
+        }
+        other => panic!("{other:?}"),
+    }
+}

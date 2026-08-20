@@ -218,6 +218,24 @@ pub trait Strategy {
     /// that decides from the current book — is not made to say so.
     fn on_history(&mut self, _ctx: &Context) {}
 
+    /// One of this strategy's own fills, from a previous run.
+    ///
+    /// **No intents can be produced here**, for the same reason as
+    /// [`Strategy::on_history`]: replaying is not trading, and a
+    /// callback that cannot emit is that rule enforced by the compiler
+    /// rather than by a flag every path has to check.
+    ///
+    /// The fill carries the id this strategy issued for the order, so
+    /// an implementation recognises its own the same way it does live.
+    /// A strategy that folds this with the code it already runs ends in
+    /// the state it was in — which is the whole of what determinism
+    /// buys, spent on recovery instead of on testing.
+    ///
+    /// Without it a run can recover a *position* and not a *ladder*:
+    /// how many rungs had filled is the difference between resuming and
+    /// starting over on top of one.
+    fn on_history_fill(&mut self, _fill: &Fill, _ctx: &Context) {}
+
     /// What this strategy is waiting for, named, for the record.
     ///
     /// A run that does nothing is the hardest one to explain, because

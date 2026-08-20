@@ -116,6 +116,8 @@ fn fills_are_applied_in_the_direction_of_their_submission() {
                 trade_id: 1,
                 qty: "2".into(),
                 price: "100.00".into(),
+                order: 1,
+                side: "Buy".into(),
             },
             Record::Submitted {
                 at: Nanos(4),
@@ -137,6 +139,8 @@ fn fills_are_applied_in_the_direction_of_their_submission() {
                 trade_id: 2,
                 qty: "1".into(),
                 price: "150.00".into(),
+                order: 1,
+                side: "Buy".into(),
             },
         ],
     );

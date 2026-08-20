@@ -184,8 +184,10 @@ fn render(record: &Record) -> String {
             trade_id,
             qty,
             price,
+            order,
+            side,
         } => format!(
-            "fill {}  {client_id} trade {trade_id} {qty} @ {price}",
+            "fill {}  {client_id} #{order} {side} trade {trade_id} {qty} @ {price}",
             at.0
         ),
         Record::Refused { at, breach } => format!("refused {}  {breach}", at.0),
@@ -306,8 +308,18 @@ mod readout {
                 trade_id: 2_222,
                 qty: "3.333".into(),
                 price: "4444.4".into(),
+                order: 5_555,
+                side: "zzSell".into(),
             },
-            &["1111", "zz-client", "2222", "3.333", "4444.4"],
+            &[
+                "1111",
+                "zz-client",
+                "2222",
+                "3.333",
+                "4444.4",
+                "5555",
+                "zzSell",
+            ],
         );
     }
 

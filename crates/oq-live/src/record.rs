@@ -119,6 +119,16 @@ pub enum Record {
         trade_id: i64,
         qty: String,
         price: String,
+        /// The strategy's own id for the order that filled.
+        ///
+        /// Recorded so a later run can replay this fill back into the
+        /// strategy and have it recognise the order as its own. Without
+        /// it a replay can rebuild a *position* but not a *ladder*: how
+        /// many rungs had filled is the difference between resuming and
+        /// starting over on top of a position.
+        order: u64,
+        /// `Buy` or `Sell`, as the venue reported it.
+        side: String,
     },
     Refused {
         at: Nanos,
@@ -235,12 +245,21 @@ impl Record {
                 trade_id,
                 qty,
                 price,
+                order,
+                side,
             } => {
                 put_i64(&mut out, at.0);
                 put_str(&mut out, client_id);
                 put_i64(&mut out, *trade_id);
                 put_str(&mut out, qty);
                 put_str(&mut out, price);
+                // Appended, not inserted. A record written before these
+                // existed is shorter, so decoding it runs out and the
+                // reader counts it undecodable rather than reading the
+                // next field's bytes as this one's — a shape the format
+                // already reports and a reader already sees.
+                put_i64(&mut out, i64::try_from(*order).unwrap_or(0));
+                put_str(&mut out, side);
             }
             Self::Refused { at, breach } => {
                 put_i64(&mut out, at.0);
@@ -313,6 +332,8 @@ impl Record {
                 trade_id: take_i64(&mut p)?,
                 qty: take_str(&mut p)?,
                 price: take_str(&mut p)?,
+                order: take_i64(&mut p)?.unsigned_abs(),
+                side: take_str(&mut p)?,
             },
             kind::REFUSED => Self::Refused {
                 at: Nanos(take_i64(&mut p)?),
@@ -426,6 +447,8 @@ mod tests {
             detail: "timed out".into(),
         });
         roundtrip(&Record::Fill {
+            order: 7,
+            side: "Buy".into(),
             at: Nanos(9),
             client_id: "oq123-1".into(),
             trade_id: 481_923,
