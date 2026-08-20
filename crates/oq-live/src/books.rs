@@ -122,12 +122,21 @@ impl Books {
         contract: Contract,
         table: TierTable,
         starting_balance: Cash,
+        mode: oq_core::PositionMode,
     ) -> Self {
         let mut state = State::new(instrument, contract, table, starting_balance);
         // The venue is matching. Not a configuration choice — it is what
         // makes these books the live account's rather than a simulation
         // running alongside it.
         state.matching = Matching::Venue;
+        // Whether the account keeps long and short apart, as the venue
+        // reports it. Defaulting to netting on an account that does not
+        // net is not a small error: two legs of equal size cancel, the
+        // books report a flat account, and the margin the venue charges
+        // for both is charged against a position this side believes is
+        // zero. Everything downstream reads that zero — the liquidation
+        // check, the equity, and any strategy that asks what it holds.
+        state.mode = mode;
         Self {
             kernel: Kernel::new(state),
             instrument,
@@ -294,6 +303,9 @@ mod tests {
             Contract::new(10_000),
             TierTable::example_btcusdt(),
             Cash::from_units(100_000),
+            // These exercise the netting path, which is what they were
+            // written against.
+            oq_core::PositionMode::OneWay,
         )
     }
 
