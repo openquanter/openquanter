@@ -80,6 +80,8 @@ fn held(symbol: &str, side: &str, amount: f64) -> PositionSnapshot {
     PositionSnapshot {
         symbol: symbol.into(),
         position_side: side.into(),
+        amount_text: String::new(),
+        entry_text: String::new(),
         amount,
         entry_price: 0.0,
         unrealized: 0.0,

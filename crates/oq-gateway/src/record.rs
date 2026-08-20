@@ -229,6 +229,8 @@ mod tests {
                     .map(|(side, amount, entry)| PositionSnapshot {
                         symbol: "BTCUSDT".to_string(),
                         position_side: (*side).to_string(),
+                        amount_text: String::new(),
+                        entry_text: String::new(),
                         amount: *amount,
                         entry_price: *entry,
                         unrealized: 0.0,

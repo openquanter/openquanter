@@ -298,6 +298,8 @@ mod health {
         PositionSnapshot {
             symbol: symbol.to_string(),
             position_side: side.to_string(),
+            amount_text: String::new(),
+            entry_text: String::new(),
             amount,
             entry_price: 0.0,
             unrealized: 0.0,

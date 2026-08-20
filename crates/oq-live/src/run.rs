@@ -1300,12 +1300,23 @@ fn adopted_lots(
         .iter()
         .filter(|p| p.amount != 0.0)
         .map(|p| {
-            #[allow(clippy::cast_possible_truncation)]
-            let lots =
-                QtyLots((p.amount.abs() * 10f64.powi(i32::from(instrument.qty_scale))) as i64);
-            #[allow(clippy::cast_possible_truncation)]
+            // From the venue's own digits, not from a float made of
+            // them. 0.0058 becomes 57.999999999999993 the moment it is
+            // scaled by ten thousand, and a conversion through that
+            // float adopts fifty-seven of fifty-eight lots — the one
+            // left over held by the account and managed by nobody, and
+            // still there after the position closes.
+            //
+            // Rounding rather than truncating repairs that case and not
+            // the class. Reading the digits is exact for every size,
+            // rather than for the ones somebody thought to test.
+            let lots = QtyLots(
+                scaled_decimal(&p.amount_text, instrument.qty_scale)
+                    .unwrap_or(0)
+                    .abs(),
+            );
             let entry =
-                PriceTicks((p.entry_price * 10f64.powi(i32::from(instrument.price_scale))) as i64);
+                PriceTicks(scaled_decimal(&p.entry_text, instrument.price_scale).unwrap_or(0));
             // The leg the venue named, not the sign of the amount. On a
             // hedged account they are different questions, and a venue
             // can report a leg whose amount has a sign the leg should
@@ -1365,6 +1376,10 @@ mod adoption {
         PositionSnapshot {
             symbol: "BTCUSDT".into(),
             position_side: if amount > 0.0 { "LONG" } else { "SHORT" }.into(),
+            // The venue's own digits, which is what the conversion reads.
+            // Written here at the precision these tests use.
+            amount_text: format!("{amount:.4}"),
+            entry_text: format!("{entry:.2}"),
             amount,
             entry_price: entry,
             unrealized: 0.0,
@@ -1811,4 +1826,61 @@ fn scaled_decimal(text: &str, scale: u8) -> Option<i64> {
         digits.push('0');
     }
     digits.parse::<i64>().ok()
+}
+
+#[cfg(test)]
+mod adoption_rounding {
+    use super::adopted_lots;
+    use oq_gateway::binance::PositionSnapshot;
+    use oq_types::Instrument;
+
+    fn leg(amount: &str, entry: &str) -> PositionSnapshot {
+        PositionSnapshot {
+            symbol: "BTCUSDT".into(),
+            position_side: "LONG".into(),
+            amount: amount.parse().unwrap_or(0.0),
+            amount_text: amount.into(),
+            entry_text: entry.into(),
+            entry_price: entry.parse().unwrap_or(0.0),
+            unrealized: 0.0,
+        }
+    }
+
+    /// A size that a float cannot hold exactly is still adopted whole.
+    ///
+    /// The venue reports decimal text and the float that comes back is
+    /// short of the number by a hair: 0.0058 at four places is
+    /// 57.999999999999993. Truncating adopts fifty-seven of fifty-eight
+    /// lots, and the one left over is held by the account and managed by
+    /// nobody — still there after the position closes.
+    ///
+    /// Seen on a live takeover, which reported `adopted long 57 lots`
+    /// against a venue holding 0.0058.
+    #[test]
+    fn a_size_a_float_cannot_hold_exactly_is_adopted_whole() {
+        let got = adopted_lots(&[leg("0.0058", "71774.66")], &Instrument::linear(2, 4));
+        assert_eq!(got[0].1.0, 58, "0.0058 at four decimal places is 58 lots");
+    }
+
+    /// And the entry price the same way.
+    #[test]
+    fn an_entry_price_is_rounded_and_not_truncated() {
+        let got = adopted_lots(&[leg("0.0020", "70097.90")], &Instrument::linear(2, 4));
+        assert_eq!(got[0].2.0, 7_009_790);
+    }
+
+    /// Every size at this precision, not the ones somebody tested.
+    ///
+    /// The float path was right for most and wrong for some, which is
+    /// the hardest kind of wrong to find. Reading the digits has no
+    /// "some".
+    #[test]
+    fn every_size_at_this_precision_converts_exactly() {
+        let i = Instrument::linear(2, 4);
+        for lots in 1..=2_000 {
+            let text = format!("{}.{:04}", lots / 10_000, lots % 10_000);
+            let got = adopted_lots(&[leg(&text, "70097.90")], &i);
+            assert_eq!(got[0].1.0, lots, "{text} should be {lots} lots");
+        }
+    }
 }
