@@ -698,7 +698,9 @@ where
                 let local = trader.local_id(&u.client_id).unwrap_or(OrderId(0));
                 trader.apply(&u);
                 let parsed = fill_of(&u, &instrument, local);
-                if let Err(why) = &parsed {
+                if let Err(why) = &parsed
+                    && *why != NOT_A_FILL
+                {
                     // A report the venue sent and this process did not
                     // book. Said out loud and counted, because the
                     // consequence is that the position believed here is
@@ -1104,6 +1106,14 @@ pub fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
 /// So the quantity taken is `last_qty`, the amount *this* update filled,
 /// and an update whose `last_qty` is zero is not a fill however
 /// promising its status looks.
+/// An update that reports no traded quantity, which is ordinary.
+///
+/// Distinguished from a report that could not be read, because the
+/// difference is whether anyone should be told: one is every order's
+/// acknowledgement and the other means this build and the venue disagree
+/// about what a fill looks like.
+const NOT_A_FILL: &str = "no traded quantity";
+
 fn fill_of(
     u: &oq_gateway::OrderUpdate,
     instrument: &Instrument,
@@ -1121,8 +1131,17 @@ fn fill_of(
     };
 
     let qty = scaled(&u.last_qty, instrument.qty_scale).ok_or("quantity is not a number")?;
-    if qty <= 0 {
-        return Err("quantity is not positive");
+    if qty == 0 {
+        // Not a fill. A venue reports an order's whole life on this
+        // channel — accepted, cancelled, expired — and those carry no
+        // traded quantity because nothing traded. Reporting them as
+        // reports that could not be read would fire an urgent alert on
+        // every order placed, and an alert that fires on ordinary
+        // operation is one nobody reads when it means something.
+        return Err(NOT_A_FILL);
+    }
+    if qty < 0 {
+        return Err("quantity is negative");
     }
     let price = scaled(&u.last_price, instrument.price_scale).ok_or("price is not a number")?;
     if price <= 0 {
@@ -1347,12 +1366,31 @@ mod unreadable_reports {
         );
     }
 
-    /// A quantity of zero is a report about no trade.
+    /// An acknowledgement is not a dropped fill.
+    ///
+    /// A venue reports an order's whole life on this channel: accepted,
+    /// cancelled, expired. None of them carries a traded quantity,
+    /// because nothing traded. Counting them as reports that could not
+    /// be read fires an urgent alert on every order placed — which was
+    /// visible on a live run within seconds of the first order.
     #[test]
-    fn a_zero_quantity_is_refused_by_name() {
+    fn an_acknowledgement_is_not_a_dropped_fill() {
         let e = fill_of(&update("100.0", "0"), &Instrument::linear(2, 3), OrderId(1))
-            .expect_err("must refuse");
-        assert!(e.contains("quantity"), "{e}");
+            .expect_err("not a fill");
+        assert_eq!(e, super::NOT_A_FILL, "and it is distinguishable by name");
+    }
+
+    /// A negative quantity is not ordinary, and is still reported.
+    #[test]
+    fn a_negative_quantity_is_refused_by_name() {
+        let e = fill_of(
+            &update("100.0", "-1"),
+            &Instrument::linear(2, 3),
+            OrderId(1),
+        )
+        .expect_err("must refuse");
+        assert!(e.contains("negative"), "{e}");
+        assert_ne!(e, super::NOT_A_FILL);
     }
 
     /// Text this build cannot read is refused rather than guessed at.
