@@ -69,6 +69,19 @@ pub struct Recovered {
     /// process that died mid-write. Counted rather than treated as
     /// corruption: it is the normal shape of a crash.
     pub undecodable: u64,
+    /// The quantity and price of each fill, as written.
+    ///
+    /// Parallel to `fills`. Kept as text because converting to ticks
+    /// needs the instrument's precision, which this function does not
+    /// have — and a scale guessed here is a position wrong by a factor.
+    pub fill_decimals: Vec<(String, String)>,
+    /// This strategy's own fills, oldest first.
+    ///
+    /// Replayed into it so it rebuilds the state it was in. A position
+    /// can be recovered from the venue; a ladder cannot — how many rungs
+    /// had filled is this strategy's own history and nothing else holds
+    /// it.
+    pub fills: Vec<oq_types::Fill>,
 }
 
 /// Read a journal and report what it leaves unresolved.

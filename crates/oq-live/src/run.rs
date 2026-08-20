@@ -431,6 +431,11 @@ where
     // and starting to trade beside it is the same failure as starting
     // beside an unknown position — which the startup check already
     // refuses.
+    // Kept so the strategy can be walked back through its own fills once
+    // it exists. A position comes from the venue; a ladder does not —
+    // how many rungs had filled is this strategy's own history and only
+    // its own journal holds it.
+    let mut prior_fills: Vec<(oq_types::Fill, String, String)> = Vec::new();
     if !no_journal && std::path::Path::new(&journal_path).exists() {
         match crate::recover(&journal_path) {
             Ok(prior) => {
@@ -470,6 +475,13 @@ where
                         return ExitCode::FAILURE;
                     }
                 }
+                prior_fills = prior
+                    .fills
+                    .iter()
+                    .cloned()
+                    .zip(prior.fill_decimals.iter().cloned())
+                    .map(|(f, (q, p))| (f, q, p))
+                    .collect();
                 if let Some(prefix) = prior.prefix {
                     if prefix != config_prefix {
                         println!(
@@ -582,6 +594,34 @@ where
             }
             println!("warm-up          {n} bar(s) of history replayed");
         }
+    }
+
+    // And then its own fills, in order, through a callback that cannot
+    // send anything. The strategy folds them with the code it runs live,
+    // so it arrives at the state it was in rather than at a summary of
+    // it — which is what a snapshot would have given, and a snapshot is
+    // a second record of the same thing that can disagree with the
+    // first.
+    if !prior_fills.is_empty() {
+        let n = prior_fills.len();
+        for (mut fill, qty, price) in prior_fills {
+            let Some(q) = scaled_decimal(&qty, instrument.qty_scale) else {
+                continue;
+            };
+            let Some(p) = scaled_decimal(&price, instrument.price_scale) else {
+                continue;
+            };
+            fill.qty = QtyLots(q);
+            fill.price = PriceTicks(p);
+            // The context a replayed fill is handed is the books as
+            // they stand, with a tick that carries no price: nothing in
+            // a replay should be pricing anything, and a stale price
+            // offered here would be a number a strategy could act on if
+            // it forgot it was replaying.
+            let ctx = books.context(oq_engine::Tick::default());
+            trader.on_history_fill(&fill, &ctx);
+        }
+        println!("recovery         {n} of this strategy's own fill(s) replayed");
     }
 
     // Stamped before the loop so the fee query at the end covers exactly
@@ -727,6 +767,12 @@ where
                             for output in outputs {
                                 println!("books            {output:?}");
                             }
+                            // Written after the books accept it, so the
+                            // journal holds what was believed rather
+                            // than what arrived: a redelivered fill is
+                            // discarded above and must not be recorded
+                            // twice, or a replay would count it twice.
+                            trader.record_fill(&fill, &u.client_id);
                             // And tell the strategy, which is the whole
                             // reason it has an `on_fill`. Until this line
                             // existed a strategy could open a position
@@ -983,6 +1029,10 @@ trait TraderLike {
     fn record_tick(&mut self, tick: &oq_engine::Tick);
     /// Sample what the strategy is waiting for, and record it.
     fn record_waiting(&mut self, at: Nanos);
+    /// A fill the books accepted, for the journal.
+    fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str);
+    /// One of this strategy's own fills, replayed. Cannot send.
+    fn on_history_fill(&mut self, fill: &oq_types::Fill, ctx: &Context);
     /// One historical observation. Cannot produce intents.
     fn on_history(&mut self, ctx: &Context);
     /// The same conditions, rendered for the terminal.
@@ -1012,6 +1062,10 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
         self.strategy_mut().on_history(ctx);
     }
 
+    fn on_history_fill(&mut self, fill: &oq_types::Fill, ctx: &Context) {
+        self.strategy_mut().on_history_fill(fill, ctx);
+    }
+
     fn waiting_summary(&self) -> String {
         let w = self.strategy().waiting_on();
         if w.is_empty() {
@@ -1029,6 +1083,10 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
             .map(|(k, v)| (k.to_string(), v))
             .collect();
         self.session_mut().record_waiting(at, entries);
+    }
+
+    fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str) {
+        self.session_mut().record_fill(fill, client_id);
     }
 
     fn record_tick(&mut self, tick: &oq_engine::Tick) {
@@ -1736,4 +1794,21 @@ mod which_leg {
     fn the_venues_spelling_does_not_matter() {
         assert_eq!(offset_of("long", "sell"), Offset::Close);
     }
+}
+
+/// A decimal string as an integer count at `scale`.
+///
+/// The journal writes prices and quantities as text, at the precision
+/// the instrument had when they were written. Reading them back needs
+/// that precision, which is why this is not done where the records are
+/// decoded: a scale guessed there is a position wrong by a factor.
+fn scaled_decimal(text: &str, scale: u8) -> Option<i64> {
+    let (int, frac) = text.split_once('.').unwrap_or((text, ""));
+    let mut digits = String::from(int.trim_start_matches('+'));
+    let frac: String = frac.chars().take(usize::from(scale)).collect();
+    digits.push_str(&frac);
+    for _ in frac.len()..usize::from(scale) {
+        digits.push('0');
+    }
+    digits.parse::<i64>().ok()
 }

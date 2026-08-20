@@ -299,6 +299,29 @@ impl<E: Execution> Session<E> {
         self.write(&Record::Waiting { at, entries });
     }
 
+    /// A fill the venue reported and this process booked.
+    ///
+    /// Written after the books accept it, so the journal contains what
+    /// was believed rather than what arrived — a redelivered fill is
+    /// discarded by the books and must not appear here twice, or a
+    /// replay would count it twice.
+    ///
+    /// The strategy's own order id travels with it. Without that a
+    /// replay can rebuild a *position* but not a *ladder*: which rungs
+    /// had filled is the difference between resuming and starting over
+    /// on top of one.
+    pub fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str) {
+        self.write(&Record::Fill {
+            at: fill.stamp.exch,
+            client_id: client_id.to_string(),
+            trade_id: i64::try_from(fill.trade.0).unwrap_or(0),
+            qty: oq_gateway::exec::decimal(fill.qty.0, self.instrument.qty_scale),
+            price: oq_gateway::exec::decimal(fill.price.0, self.instrument.price_scale),
+            order: fill.order.0,
+            side: format!("{:?}", fill.side),
+        });
+    }
+
     /// A tick the strategy is about to see.
     pub fn record_tick(&mut self, tick: &oq_engine::Tick) {
         self.write(&Record::Tick {
