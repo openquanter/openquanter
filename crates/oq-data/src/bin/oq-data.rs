@@ -122,6 +122,47 @@ fn main() -> ExitCode {
         .count();
     println!("crossed book     {crossed}");
 
+    // The reason both timestamps are in the format at all. A dataset
+    // whose arrival times equal its exchange times carries no latency
+    // information — captured without them, or synthesized — and that is
+    // worth knowing *before* somebody calibrates a latency model
+    // against it, which is what M4 is waiting on.
+    // Rebuilt rather than carried: the stream was decoded above into a
+    // plain vector, and re-wrapping is cheaper than threading it through
+    // every check between here and there. A construction failure here
+    // means the ticks that already decoded no longer form a stream,
+    // which is worth saying rather than skipping the line.
+    let feed = match oq_data::TickStream::new(header.instrument, ticks.clone()) {
+        Ok(stream) => Some(stream.feed_latency_summary()),
+        Err(e) => {
+            println!("feed latency     unavailable: {e:?}");
+            None
+        }
+    };
+    if let Some(feed) = feed {
+        if feed.carries_latency {
+            println!(
+                "feed latency     min {} / mean {} / max {} ns",
+                feed.min, feed.mean, feed.max
+            );
+            if feed.negative > 0 {
+                // Not an error. It bounds how far the figures above can be
+                // trusted, which is why it prints beside them rather than
+                // in a footnote nobody reaches.
+                println!(
+                    "  arrived early  {} record(s) — the capture host's clock ran behind \
+                 the venue's, so the latencies above are understated by that much",
+                    feed.negative
+                );
+            }
+        } else {
+            println!(
+                "feed latency     none carried: every arrival time equals its exchange \
+             time, so this file cannot support latency-aware work"
+            );
+        }
+    }
+
     println!();
     let mut problems = Vec::new();
     if backwards > 0 {
