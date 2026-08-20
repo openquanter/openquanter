@@ -199,7 +199,7 @@ fn read_records(path: &Path) -> std::io::Result<Vec<Record>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let bytes = std::fs::read(path)?;
+    let bytes = oq_l2feed::archive::read(path)?;
     let (records, torn) = decode_all(&bytes).map_err(std::io::Error::other)?;
     if torn > 0 {
         eprintln!(

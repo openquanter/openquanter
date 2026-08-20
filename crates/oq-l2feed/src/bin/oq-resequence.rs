@@ -97,7 +97,7 @@ fn main() -> ExitCode {
         qty: u32::from(instrument.qty_scale),
     };
 
-    let bytes = match std::fs::read(&file) {
+    let bytes = match oq_l2feed::archive::read(&file) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("oq-resequence: cannot read {file}: {e}");
