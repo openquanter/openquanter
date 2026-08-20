@@ -74,6 +74,10 @@ BUDGETS=(
   "oq-examples:0"
   # Speaks WebSocket and HTTP to a venue, so it carries a TLS stack.
   # Isolated here on purpose: the engine must not inherit it.
+  # The order book, reconstructed from incremental depth. Zero, and it
+  # has to be: the capture side and the matcher both use it, and the
+  # matcher must not inherit a TLS stack to look at a price level.
+  "oq-book:0"
   "oq-l2feed:60"
   # Reads an account over HTTPS, so it carries a TLS stack for the same
   # reason oq-l2feed does — and the same ureq, so this adds no tree the

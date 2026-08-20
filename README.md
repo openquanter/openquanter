@@ -316,8 +316,8 @@ both times a person reading the code found it. So they are no longer written.
 <!-- begin generated: workspace facts (scripts/doc-facts.sh) -->
 
 ```text
-crates (21)
-  oq-backtest oq-cli oq-core oq-data oq-engine oq-examples
+crates (22)
+  oq-backtest oq-book oq-cli oq-core oq-data oq-engine oq-examples
   oq-features oq-gateway oq-hash oq-ingest oq-journal oq-l2feed
   oq-live oq-margin oq-parity oq-py oq-risk oq-sim oq-stats
   oq-strategy oq-types

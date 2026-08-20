@@ -676,6 +676,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oq-book"
+version = "2.0.0-alpha.1"
+
+[[package]]
 name = "oq-cli"
 version = "2.0.0-alpha.1"
 
@@ -705,6 +709,7 @@ dependencies = [
 name = "oq-engine"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "oq-book",
  "oq-types",
  "proptest",
 ]
@@ -770,6 +775,7 @@ name = "oq-l2feed"
 version = "2.0.0-alpha.1"
 dependencies = [
  "libc",
+ "oq-book",
  "oq-hash",
  "oq-types",
  "ruzstd",
