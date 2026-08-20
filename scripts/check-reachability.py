@@ -32,8 +32,14 @@ of a silence.
 What it looks for
 -----------------
 - `pub enum` variants that are matched but never constructed
-- `pub fn` in a crate's own modules that nothing else calls
 - `pub struct` fields that nothing reads
+
+**Not** `pub fn` that nothing calls. That was tried: fifty-two findings,
+almost all of them library functions a consumer is supposed to call, to
+surface one real gap. A check whose output nobody triages is a check
+somebody disables, and the two kept here run at about one real finding
+in four — `windows_before_first_trade`, `PboReport::performance_degradation`,
+`FeedLatency::negative` and `Trade::commission` would each have shown.
 
 What it deliberately does not look for: anything needing type resolution.
 This is text. It over-reports, it says so, and every entry it prints is
@@ -130,6 +136,32 @@ def constructed(text, enum, variant):
     return False
 
 
+def fields(src):
+    """`pub` fields of `pub struct`s."""
+    for f, s in src.items():
+        for m in re.finditer(r"pub struct (\w+)\s*\{(.*?)\n\}", s, re.S):
+            name, body = m.group(1), m.group(2)
+            for fm in re.finditer(r"^\s*pub (\w+):", body, re.M):
+                yield f, name, fm.group(1)
+
+
+def read(text, field):
+    """Whether the field is ever read as `.field`.
+
+    Written-only counts as unread on purpose. `windows_before_first_trade`
+    was assigned on one path and printed by nobody, and
+    `PboReport::performance_degradation` was computed on every sweep and
+    dropped at the call site — both would have shown here.
+    """
+    for line in text.split("\n"):
+        for m in re.finditer(r"\." + field + r"(?![A-Za-z0-9_])", line):
+            after = line[m.end():].lstrip()
+            if after.startswith("=") and not after.startswith("=="):
+                continue  # a write
+            return True
+    return False
+
+
 def main():
     check = "--check" in sys.argv
     src = sources()
@@ -142,6 +174,10 @@ def main():
         key = f"{enum}::{v}"
         if not constructed(joined, enum, v):
             findings.append((key, f, "matched but never constructed outside tests"))
+
+    for f, st, fld in fields(src):
+        if not read(joined, fld):
+            findings.append((f"{st}.{fld}", f, "written or computed and never read outside tests"))
 
     unexplained = [x for x in findings if x[0] not in allow]
 

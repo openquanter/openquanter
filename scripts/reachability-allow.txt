@@ -14,3 +14,20 @@ Timeline::Event              # the other axis of a bitemporal read; same
 QueueAhead::VolumeMultiple   # an L1 queue model a caller configures; `l1.rs:381` matches on it
 TimeInForce::ImmediateOrCancel  # both adapters map it — okx.rs:479, and binance formats {tif}
 TimeInForce::FillOrKill      # same, okx.rs:480
+
+# Fields. Same rule: a reason, or it is a finding.
+#
+# Most of these are a struct faithfully carrying what a venue or a
+# format sent. Not reading a field here is a library exposing what it
+# received, and the one that was a real defect — `Trade.commission` —
+# differed by having an attribution component depend on it.
+
+Fidelity.terminal_overstatement  # the same quantity the run summary already prints; the field spares a consumer re-deriving it
+ReplayResult.events              # the replayed events themselves, which is what a caller replays *for*
+Trade.realized_pnl               # the venue's own P&L per fill; kept for a consumer, and unlike `commission` nothing here needs it
+Trade.time_ms                    # the venue's fill timestamp, same
+OrderUpdate.event_ms             # the venue's stamp on an account event; the process uses its own clock deliberately
+DepthUpdate.event_ms             # same, on a depth message
+Listing.inst_id                  # OKX's own instrument id, carried so a caller can round-trip it
+PboReport.logits                 # the per-split distribution; its doc says it is more informative than the headline, and that is a consumer's call
+MacdValue.histogram              # the third MACD line; a strategy reads it, the catalogue's MACD happens not to
