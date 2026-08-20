@@ -10,7 +10,9 @@
 //! | L1   | queue position, latency, taker impact | moderate | pre-deployment validation, first look at maker strategies |
 //! | L2   | reconstructed order book | high | market making, anything whose edge is in the microstructure |
 //!
-//! L0 and L1 are implemented here; L2 is not. L1 wraps L0 rather than
+//! L0, L1 and L2's queue are implemented here. Each wraps the one
+//! below rather than replacing it, so `FR-MATCH-2`'s freeze on L0 holds
+//! by construction rather than by test. L1 wraps L0 rather than
 //! replacing it, which is how `FR-MATCH-2`'s promise that L0 is frozen
 //! is kept — by construction rather than by vigilance. A transparent L1
 //! policy reproduces L0's fills exactly, and a test asserts it.
@@ -42,9 +44,11 @@
 pub mod book;
 pub mod l0;
 pub mod l1;
+pub mod l2;
 pub mod tick;
 
 pub use book::{Book, Resting};
 pub use l0::{FillReason, L0Engine, L0Fill};
 pub use l1::{Delay, Impact, L1Engine, Latency, Policy, QueueAhead};
+pub use l2::L2Engine;
 pub use tick::Tick;
