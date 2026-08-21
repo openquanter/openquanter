@@ -409,7 +409,10 @@ where
             }
         };
         tick_count += 1;
-        let event = Event::Tick(tick);
+        let event = Event::Tick {
+            instrument: None,
+            tick,
+        };
         let mut tick_fills: Vec<Fill> = Vec::new();
         let outputs: Vec<Output> = kernel.apply(&event).to_vec();
         note_endings(&outputs, kernel.working(), &mut ended);

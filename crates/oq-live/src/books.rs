@@ -178,7 +178,12 @@ impl Books {
     /// Returns anything the kernel decided — which under venue matching
     /// is a liquidation and nothing else, since it does not fill.
     pub fn on_tick(&mut self, tick: &Tick) -> Vec<Output> {
-        self.kernel.apply(&Event::Tick(*tick)).to_vec()
+        self.kernel
+            .apply(&Event::Tick {
+                instrument: None,
+                tick: *tick,
+            })
+            .to_vec()
     }
 
     /// Record that an order was sent.

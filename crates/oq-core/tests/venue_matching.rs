@@ -78,14 +78,23 @@ fn submit(id: u64, ns: i64) -> Event {
 #[test]
 fn a_matched_fill_and_a_venue_fill_leave_the_same_account() {
     let mut sim = Kernel::new(state(Matching::Simulated));
-    sim.apply(&Event::Tick(tick(SEC, 6_000_000)));
+    sim.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(SEC, 6_000_000),
+    });
     sim.apply(&submit(1, SEC));
-    sim.apply(&Event::Tick(tick(2 * SEC, 6_000_000)));
+    sim.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(2 * SEC, 6_000_000),
+    });
     let after_sim = sim.summary();
     assert!(!after_sim.qty.is_zero(), "the fixture must actually fill");
 
     let mut live = Kernel::new(state(Matching::Venue));
-    live.apply(&Event::Tick(tick(SEC, 6_000_000)));
+    live.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(SEC, 6_000_000),
+    });
     live.apply(&submit(1, SEC));
     live.apply(&Event::VenueFill(venue_fill(
         2 * SEC,
@@ -93,7 +102,10 @@ fn a_matched_fill_and_a_venue_fill_leave_the_same_account() {
         after_sim.entry.0,
         after_sim.qty.0,
     )));
-    live.apply(&Event::Tick(tick(2 * SEC, 6_000_000)));
+    live.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(2 * SEC, 6_000_000),
+    });
     let after_live = live.summary();
 
     assert_eq!(after_live.qty, after_sim.qty, "position");
@@ -109,10 +121,16 @@ fn a_matched_fill_and_a_venue_fill_leave_the_same_account() {
 #[test]
 fn the_matcher_does_not_fill_when_the_venue_is_matching() {
     let mut k = Kernel::new(state(Matching::Venue));
-    k.apply(&Event::Tick(tick(SEC, 6_000_000)));
+    k.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(SEC, 6_000_000),
+    });
     k.apply(&submit(1, SEC));
     for i in 2..10 {
-        let outputs = k.apply(&Event::Tick(tick(i * SEC, 6_000_000 + i * 100)));
+        let outputs = k.apply(&Event::Tick {
+            instrument: None,
+            tick: tick(i * SEC, 6_000_000 + i * 100),
+        });
         assert!(
             !outputs.iter().any(|o| matches!(o, Output::Filled(_))),
             "the matcher filled at tick {i}, and the venue had not said so"
@@ -126,7 +144,10 @@ fn the_matcher_does_not_fill_when_the_venue_is_matching() {
 #[test]
 fn a_venue_fill_is_refused_by_a_kernel_that_is_matching_for_itself() {
     let mut k = Kernel::new(state(Matching::Simulated));
-    k.apply(&Event::Tick(tick(SEC, 6_000_000)));
+    k.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(SEC, 6_000_000),
+    });
     let outputs = k.apply(&Event::VenueFill(venue_fill(SEC, 1, 6_000_000, 3)));
     assert!(
         outputs.iter().any(|o| matches!(
@@ -147,7 +168,10 @@ fn a_venue_fill_is_refused_by_a_kernel_that_is_matching_for_itself() {
 #[test]
 fn a_filled_order_leaves_the_book_so_a_replay_cannot_match_it_again() {
     let mut k = Kernel::new(state(Matching::Venue));
-    k.apply(&Event::Tick(tick(SEC, 6_000_000)));
+    k.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(SEC, 6_000_000),
+    });
     k.apply(&Event::Submit {
         id: OrderId(7),
         side: Side::Buy,
@@ -160,7 +184,10 @@ fn a_filled_order_leaves_the_book_so_a_replay_cannot_match_it_again() {
     let after = k.summary().qty;
 
     for i in 3..8 {
-        k.apply(&Event::Tick(tick(i * SEC, 5_800_000)));
+        k.apply(&Event::Tick {
+            instrument: None,
+            tick: tick(i * SEC, 5_800_000),
+        });
     }
     assert_eq!(k.summary().qty, after, "the position must not have moved");
 }
@@ -174,7 +201,10 @@ fn a_venue_fill_that_breaches_maintenance_is_noticed_at_once() {
     // account holds in its settlement currency, not a field to poke.
     s.credit(Cash::from_units(50).sub(s.balance()));
     let mut k = Kernel::new(s);
-    k.apply(&Event::Tick(tick(SEC, 6_000_000)));
+    k.apply(&Event::Tick {
+        instrument: None,
+        tick: tick(SEC, 6_000_000),
+    });
 
     let outputs = k
         .apply(&Event::VenueFill(venue_fill(2 * SEC, 1, 6_000_000, 10_000)))

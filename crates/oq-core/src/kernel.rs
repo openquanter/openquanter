@@ -95,6 +95,14 @@ pub enum RejectReason {
     /// would double the position silently — in the one mode where
     /// nobody is watching for that.
     NotVenueMatched,
+    /// An observation that could not be matched to a holding.
+    ///
+    /// Either it names an instrument this account does not hold, or it
+    /// names none while the account holds more than one. The second is
+    /// the interesting case: an unnamed tick was unambiguous for as
+    /// long as there was one holding, and stops being so without any
+    /// record changing.
+    UnroutableObservation,
 }
 
 /// What the venue charges per fill.
@@ -770,7 +778,21 @@ impl Kernel {
         }
 
         match *event {
-            Event::Tick(tick) => self.on_tick(&tick),
+            Event::Tick { instrument, tick } => {
+                // An observation has to reach the holding it is of. A
+                // kernel with one holding accepts an unnamed tick,
+                // because that is what a single-instrument journal
+                // means; one with several refuses it, since marking a
+                // position at another instrument's price is a wrong
+                // number rather than a missing one.
+                match self.route(instrument) {
+                    Some(_) => self.on_tick(&tick),
+                    None => self.outputs.push(Output::Rejected {
+                        id: OrderId::new(0),
+                        reason: RejectReason::UnroutableObservation,
+                    }),
+                }
+            }
             Event::Submit {
                 id,
                 side,
@@ -959,6 +981,23 @@ impl Kernel {
             let out = self.state.liquidate(mark);
             self.working.clear();
             self.outputs.push(out);
+        }
+    }
+
+    /// Which holding an observation is for, if the account has one.
+    ///
+    /// `None` names the only holding, and is an error when there is
+    /// more than one.
+    fn route(&self, instrument: Option<InstrumentId>) -> Option<InstrumentId> {
+        match instrument {
+            Some(id) => self.state.holding_of(id).map(|h| h.instrument),
+            None => {
+                let mut it = self.state.holdings();
+                match (it.next(), it.next()) {
+                    (Some(only), None) => Some(only.instrument),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -1165,7 +1204,10 @@ mod tests {
     }
 
     fn tick(n: i64, last: i64) -> Event {
-        Event::Tick(Tick::trades_only(Stamp::synthetic(n), last, last, last))
+        Event::Tick {
+            instrument: None,
+            tick: Tick::trades_only(Stamp::synthetic(n), last, last, last),
+        }
     }
 
     fn buy(id: u64, price: i64, qty: i64, n: i64) -> Event {
@@ -1669,6 +1711,78 @@ mod hedge_tests {
         assert!(
             both > one.maintenance(),
             "holding a second instrument requires more margin, not the same"
+        );
+    }
+
+    /// An unnamed observation stops being unambiguous the moment the
+    /// account holds two instruments.
+    ///
+    /// Nothing about the record changes — it was true when it was
+    /// written and is not any more. Guessing would mark one
+    /// instrument's position at another's price, which is a wrong
+    /// number rather than a missing one, so it is refused.
+    #[test]
+    fn an_unnamed_tick_is_refused_once_a_second_instrument_is_held() {
+        let mut s = state();
+        let mut k = Kernel::new(s);
+        let unnamed = Event::Tick {
+            instrument: None,
+            tick: oq_engine::Tick::trades_only(oq_types::Stamp::synthetic(1_000), 6_000_000, 0, 0),
+        };
+
+        // One holding: unambiguous, and accepted.
+        assert!(
+            !k.apply(&unnamed)
+                .iter()
+                .any(|o| matches!(o, Output::Rejected { .. })),
+            "with one holding there is nothing to disambiguate"
+        );
+
+        // Two: refused.
+        s = state();
+        s.open_holding(
+            InstrumentId::new(2),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+        );
+        let mut k = Kernel::new(s);
+        assert!(
+            k.apply(&unnamed).iter().any(|o| matches!(
+                o,
+                Output::Rejected {
+                    reason: RejectReason::UnroutableObservation,
+                    ..
+                }
+            )),
+            "with two, an unnamed tick names neither"
+        );
+    }
+
+    /// A named observation reaches its holding, and an instrument the
+    /// account does not hold is refused rather than approximated.
+    #[test]
+    fn a_named_tick_routes_and_an_unheld_one_is_refused() {
+        let mut s = state();
+        let second = InstrumentId::new(2);
+        s.open_holding(second, Contract::new(1_000), TierTable::example_btcusdt());
+        let mut k = Kernel::new(s);
+
+        let named = |id: InstrumentId| Event::Tick {
+            instrument: Some(id),
+            tick: oq_engine::Tick::trades_only(oq_types::Stamp::synthetic(1_000), 6_000_000, 0, 0),
+        };
+
+        assert!(
+            !k.apply(&named(second))
+                .iter()
+                .any(|o| matches!(o, Output::Rejected { .. })),
+            "an instrument the account holds is routable"
+        );
+        assert!(
+            k.apply(&named(InstrumentId::new(99)))
+                .iter()
+                .any(|o| matches!(o, Output::Rejected { .. })),
+            "one it does not hold is not"
         );
     }
 

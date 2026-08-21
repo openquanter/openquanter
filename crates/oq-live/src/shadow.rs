@@ -261,7 +261,10 @@ impl Shadow {
         // before the kernel sees the observation, because a fill the
         // kernel makes from *this* tick happened at this price.
         self.last = Some(tick.last);
-        self.apply(&Event::Tick(tick));
+        self.apply(&Event::Tick {
+            instrument: None,
+            tick,
+        });
     }
 
     /// Tell the shadow what the venue actually did.
