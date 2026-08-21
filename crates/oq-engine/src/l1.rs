@@ -431,6 +431,18 @@ impl L1Engine {
         self.inner.cancel(id)
     }
 
+    /// Withdraw every order, in flight and resting alike.
+    ///
+    /// The in-flight ones have to go first and explicitly: they are
+    /// held here rather than in L0, so clearing only the book would
+    /// leave orders that arrive afterwards and fill against a state
+    /// nobody expects them in.
+    pub fn cancel_all(&mut self) {
+        self.pending.clear();
+        self.queued.clear();
+        self.inner.cancel_all();
+    }
+
     /// Orders that exist but are not yet in the book.
     ///
     /// Reported because a risk gate counting resting orders must count
@@ -438,6 +450,41 @@ impl L1Engine {
     #[must_use]
     pub fn shadowed(&self) -> usize {
         self.pending.len() + self.queued.len()
+    }
+
+    /// The instrument this engine matches.
+    #[must_use]
+    pub const fn instrument(&self) -> oq_types::InstrumentId {
+        self.inner.instrument()
+    }
+
+    /// The last traded price seen.
+    #[must_use]
+    pub const fn last_price(&self) -> Option<PriceTicks> {
+        self.inner.last_price()
+    }
+
+    /// Orders resting in the book.
+    ///
+    /// **Not every order this engine holds.** An order still serving its
+    /// entry latency, or still behind a queue, is in neither the book
+    /// nor here -- [`shadowed`](Self::shadowed) counts those. A caller
+    /// fingerprinting state for recovery needs both numbers, because an
+    /// order in flight is an order that can fill.
+    #[must_use]
+    pub const fn book(&self) -> &crate::book::Book {
+        self.inner.book()
+    }
+
+    /// Snapshot the identifier watermark, for recovery.
+    #[must_use]
+    pub const fn id_watermark(&self) -> (u64, u64) {
+        self.inner.id_watermark()
+    }
+
+    /// Restore the identifier watermark after recovery.
+    pub fn restore_ids(&mut self, watermark: (u64, u64)) {
+        self.inner.restore_ids(watermark);
     }
 
     /// The fills the last observation released to the strategy.
