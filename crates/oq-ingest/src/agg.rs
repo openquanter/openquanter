@@ -314,7 +314,11 @@ mod tests {
     const SEC: i64 = 1_000_000_000;
 
     fn trade(price: i64, qty: i64) -> Trade {
-        Trade { price, qty }
+        Trade {
+            price,
+            qty,
+            aggressor: None,
+        }
     }
 
     #[test]
@@ -400,7 +404,11 @@ mod batching {
     const SEC: i64 = 1_000_000_000;
 
     fn trade(price: i64, qty: i64) -> Trade {
-        Trade { price, qty }
+        Trade {
+            price,
+            qty,
+            aggressor: None,
+        }
     }
 
     /// Feed a sequence through one aggregator, in `chunks` pieces.
@@ -474,7 +482,11 @@ mod carried_price {
     const SEC: i64 = 1_000_000_000;
 
     fn trade(price: i64, qty: i64) -> Trade {
-        Trade { price, qty }
+        Trade {
+            price,
+            qty,
+            aggressor: None,
+        }
     }
 
     /// A quiet window publishes the last price, not zero.

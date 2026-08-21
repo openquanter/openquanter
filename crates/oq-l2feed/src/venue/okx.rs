@@ -156,9 +156,17 @@ impl Venue for OkxSwap {
         if !text.contains(r#""channel":"trades"#) {
             return None;
         }
+        // This venue names the aggressor directly, where the other says
+        // which side was the maker. Same fact, opposite spelling.
+        let aggressor = match quoted(text, r#""side":"#).as_deref() {
+            Some("buy") => Some(oq_types::Side::Buy),
+            Some("sell") => Some(oq_types::Side::Sell),
+            _ => None,
+        };
         let trade = Trade {
             price: parse_fixed(&quoted(text, r#""px":"#)?, scales.price).ok()?,
             qty: parse_fixed(&quoted(text, r#""sz":"#)?, scales.qty).ok()?,
+            aggressor,
         };
         // The contract every adapter holds to: a message declaring a
         // zero price or size is not a trade. Whether this venue emits
