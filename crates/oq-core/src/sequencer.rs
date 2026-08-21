@@ -241,12 +241,10 @@ mod tests {
     /// show up somewhere.
     fn scenario() -> Vec<Event> {
         vec![
-            Event::Tick(Tick::trades_only(
-                Stamp::synthetic(1),
-                1_000_000,
-                1_000_000,
-                1_000_000,
-            )),
+            Event::Tick {
+                instrument: None,
+                tick: Tick::trades_only(Stamp::synthetic(1), 1_000_000, 1_000_000, 1_000_000),
+            },
             Event::Submit {
                 id: OrderId::new(1),
                 side: Side::Buy,
@@ -255,12 +253,10 @@ mod tests {
                 stamp: Stamp::synthetic(1),
                 offset: oq_types::Offset::Open,
             },
-            Event::Tick(Tick::trades_only(
-                Stamp::synthetic(2),
-                985_000,
-                1_000_000,
-                980_000,
-            )),
+            Event::Tick {
+                instrument: None,
+                tick: Tick::trades_only(Stamp::synthetic(2), 985_000, 1_000_000, 980_000),
+            },
             Event::Funding {
                 at: Nanos::from_secs(28_800),
                 rate: Ratio::from_ppm(100),
@@ -274,14 +270,17 @@ mod tests {
                 stamp: Stamp::synthetic(3),
                 offset: oq_types::Offset::Open,
             },
-            Event::Tick(Tick::quoted(
-                Stamp::synthetic(4),
-                1_010_000,
-                1_012_000,
-                1_000_000,
-                1_009_000,
-                1_011_000,
-            )),
+            Event::Tick {
+                instrument: None,
+                tick: Tick::quoted(
+                    Stamp::synthetic(4),
+                    1_010_000,
+                    1_012_000,
+                    1_000_000,
+                    1_009_000,
+                    1_011_000,
+                ),
+            },
             Event::Time(Nanos::from_secs(30_000)),
             // Deliberately left resting at the end of the scenario. An
             // earlier version of this test filled every order, so the
@@ -344,12 +343,15 @@ mod tests {
             let step = rng.below(20_001) as i64 - 10_000;
             price = (price + step).max(1_000);
             let spread = rng.below(5_000) as i64;
-            events.push(Event::Tick(Tick::trades_only(
-                Stamp::synthetic(i as i64),
-                price,
-                price + spread,
-                (price - spread).max(1),
-            )));
+            events.push(Event::Tick {
+                instrument: None,
+                tick: Tick::trades_only(
+                    Stamp::synthetic(i as i64),
+                    price,
+                    price + spread,
+                    (price - spread).max(1),
+                ),
+            });
             match rng.below(10) {
                 0..=3 => {
                     next_id += 1;
@@ -513,12 +515,10 @@ mod tests {
         {
             let mut seq =
                 Sequencer::open(thin(), &path, SyncPolicy::EveryRecordNoFsync).expect("open");
-            seq.submit(&Event::Tick(Tick::trades_only(
-                Stamp::synthetic(1),
-                1_200_000,
-                1_200_000,
-                1_200_000,
-            )))
+            seq.submit(&Event::Tick {
+                instrument: None,
+                tick: Tick::trades_only(Stamp::synthetic(1), 1_200_000, 1_200_000, 1_200_000),
+            })
             .expect("submit");
             seq.submit(&Event::Submit {
                 id: OrderId::new(1),
@@ -529,21 +529,17 @@ mod tests {
                 offset: oq_types::Offset::Open,
             })
             .expect("submit");
-            seq.submit(&Event::Tick(Tick::trades_only(
-                Stamp::synthetic(2),
-                1_200_000,
-                1_200_000,
-                1_200_000,
-            )))
+            seq.submit(&Event::Tick {
+                instrument: None,
+                tick: Tick::trades_only(Stamp::synthetic(2), 1_200_000, 1_200_000, 1_200_000),
+            })
             .expect("submit");
             // Deep enough to trigger the venue.
             let outs = seq
-                .submit(&Event::Tick(Tick::trades_only(
-                    Stamp::synthetic(3),
-                    1_000_000,
-                    1_200_000,
-                    1_000_000,
-                )))
+                .submit(&Event::Tick {
+                    instrument: None,
+                    tick: Tick::trades_only(Stamp::synthetic(3), 1_000_000, 1_200_000, 1_000_000),
+                })
                 .expect("submit")
                 .to_vec();
             assert!(
@@ -732,15 +728,18 @@ mod tests {
             offset: oq_types::Offset::Open,
         });
         for i in 1..=6 {
-            events.push(Event::Tick(oq_engine::Tick {
-                stamp: Stamp::synthetic(i * 1_000_000),
-                last: PriceTicks(100),
-                high: PriceTicks(100),
-                low: PriceTicks(100),
-                bid: PriceTicks(100),
-                ask: PriceTicks(100),
-                volume: QtyLots(10 * i),
-            }));
+            events.push(Event::Tick {
+                instrument: None,
+                tick: oq_engine::Tick {
+                    stamp: Stamp::synthetic(i * 1_000_000),
+                    last: PriceTicks(100),
+                    high: PriceTicks(100),
+                    low: PriceTicks(100),
+                    bid: PriceTicks(100),
+                    ask: PriceTicks(100),
+                    volume: QtyLots(10 * i),
+                },
+            });
         }
 
         let path = temp_path("l2-replay");
