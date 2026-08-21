@@ -148,6 +148,27 @@ for all six. Verified by putting 4.06 back, which fails with
   from `oq-l2feed` so a matcher does not inherit a TLS stack to look at
   a price level. `oq-l2feed` re-exports at the old paths, so no call site
   moved.
+- **A backtest can match against reconstructed depth.**
+  `RunConfig::at_tier` selects L0, L1 or L2, and `run_observations`
+  takes ticks and depth updates on one stream — one stream because two
+  means the caller writes the merge, and a merge in the wrong order
+  matches an order against a book from the future. The snapshot is its
+  own arrival: an incremental stream says what changed, and a book with
+  nothing to change refuses every update. `RunResult` gains `tier` and
+  the three depth counts, because fills without a named matcher are
+  numbers with no provenance and depth handed to a tier that ignores it
+  is a run reporting a lower tier's answer under a higher tier's name.
+  Two gaps stay open and are in the roadmap: converting an archive into
+  that stream is the caller's loop, and depth is not in the journal, so
+  an L2 run's journal replays its orders but not the book.
+- **`Matcher` in `oq-core`** — the kernel holds a tier rather than being
+  one. `State.engine` was an `L0Engine` by name, which is why nothing
+  could reach L2. An enum rather than a trait: the tiers are a closed
+  set, dispatch is on the hot path, and a snapshot has to name what it
+  restored into. Throughput on a clean runner is unchanged, 14.64 →
+  14.67 M ticks/s.
+- **`limit_order` and `market_order` as free functions**, so a tier
+  cannot construct an order differently from the tier below it.
 - **`oq-data` reports stylized facts** for any tick file, so "does this
   behave like a market" is a command rather than a study. Four days of
   captured BTCUSDT hold three of four per day at excess kurtosis 8–11,
