@@ -51,6 +51,17 @@ pub struct Report {
     pub trades: u64,
     /// Payloads this build could not read.
     pub unparseable: u64,
+    /// Payloads on the trade stream that declared no trade.
+    ///
+    /// Separate from `unparseable` because the two call for opposite
+    /// reactions: unreadable payloads mean this build disagrees with
+    /// the venue and something needs fixing, while these are the venue
+    /// saying nothing happened -- Binance publishes `"p":"0","q":"0"`
+    /// records among the real trades, thousands an hour. Counted
+    /// because a number that went from zero to thousands is worth
+    /// seeing, and silently dropping records is how a conversion loses
+    /// a third of a day without saying so.
+    pub non_trades: u64,
     /// Gap markers seen. The book is dropped at each one.
     pub gaps: u64,
     /// Windows with no trade, carrying the previous price forward.
@@ -192,6 +203,14 @@ pub fn fold_into(
                         local: record.local_ts,
                         kind: EventKind::Trade(t),
                     }),
+                    // An adapter returns `None` both for a payload it
+                    // cannot read and for one declaring no trade. The
+                    // trade id tells them apart: a venue's placeholder
+                    // record carries one, and a payload this build
+                    // cannot parse at all carries nothing it recognises.
+                    None if !venue.trade_ids(&record.payload).is_empty() => {
+                        report.non_trades += 1;
+                    }
                     None => report.unparseable += 1,
                 },
                 _ => {}

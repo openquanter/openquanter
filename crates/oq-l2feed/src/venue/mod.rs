@@ -247,6 +247,21 @@ pub trait Venue {
     /// nested under `"data"`. A reader written for either finds nothing
     /// in the other — which is not an error, just an empty result, so
     /// the conversion produces no ticks and says the archive was empty.
+    ///
+    /// # `None` means "no trade here", which is wider than "unreadable"
+    ///
+    /// An adapter must return `None` for a payload that **declares** no
+    /// trade as well as for one it cannot read. Binance publishes
+    /// `"p":"0","q":"0","X":"NA"` records among the real ones; they hold
+    /// trade ids and belong to the id chain, so a completeness check is
+    /// right to count them, and a price of zero is still not a price.
+    ///
+    /// So **the price and quantity of a returned `Trade` are positive**.
+    /// This is the adapter's job rather than its caller's because the
+    /// caller cannot know which of a venue's records mean nothing, and
+    /// every caller would otherwise have to guard separately — the
+    /// backtest conversion, the live loop, and whatever is written next.
+    /// `conformance` holds every adapter to it.
     fn parse_trade(&self, payload: &[u8], scales: crate::depth::Scales) -> Option<Trade>;
 
     /// Every trade id carried by a payload, in the order they appear.

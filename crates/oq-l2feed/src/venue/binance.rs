@@ -164,13 +164,30 @@ impl Venue for BinancePerp {
     }
 
     /// Price and size sit at the top level as `"p"` and `"q"`.
+    /// A zero price on this stream is a placeholder, not a trade.
+    ///
+    /// Binance publishes records shaped
+    /// `{"e":"trade",...,"p":"0","q":"0","X":"NA",...}` among the real
+    /// ones -- 6312 in one hour of BTCUSDT against 1.45 million real
+    /// trades. They carry trade ids and sit in the id chain, so
+    /// completeness checks are right to count them; they are not
+    /// trades, and anything that treats them as one takes a price of
+    /// zero.
+    ///
+    /// That is not a small error. A window's low is the minimum of the
+    /// prices in it, and one zero makes it zero -- 1355 of 1409 minutes
+    /// of real BTCUSDT, every one of them reporting a low of 0.00 while
+    /// its high was right. A resting buy is triggered by the low, so
+    /// the backtest that reads that file fills orders no venue would
+    /// have filled. The same parse runs in the live loop.
     fn parse_trade(&self, payload: &[u8], scales: Scales) -> Option<Trade> {
         let price = string_field(payload, br#""p":"#)?;
         let qty = string_field(payload, br#""q":"#)?;
-        Some(Trade {
+        let trade = Trade {
             price: parse_fixed(&price, scales.price).ok()?,
             qty: parse_fixed(&qty, scales.qty).ok()?,
-        })
+        };
+        (trade.price > 0 && trade.qty > 0).then_some(trade)
     }
 
     fn parse_depth(&self, payload: &[u8], scales: Scales) -> Result<DepthUpdate, ParseError> {

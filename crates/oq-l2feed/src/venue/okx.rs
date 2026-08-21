@@ -156,10 +156,16 @@ impl Venue for OkxSwap {
         if !text.contains(r#""channel":"trades"#) {
             return None;
         }
-        Some(Trade {
+        let trade = Trade {
             price: parse_fixed(&quoted(text, r#""px":"#)?, scales.price).ok()?,
             qty: parse_fixed(&quoted(text, r#""sz":"#)?, scales.qty).ok()?,
-        })
+        };
+        // The contract every adapter holds to: a message declaring a
+        // zero price or size is not a trade. Whether this venue emits
+        // such a record is not the point -- the rule cannot be one
+        // adapter's, or the pipeline's correctness depends on which
+        // venue it happens to be reading.
+        (trade.price > 0 && trade.qty > 0).then_some(trade)
     }
 
     /// The book arrives as `"bids"` and `"asks"` inside `"data"`, and

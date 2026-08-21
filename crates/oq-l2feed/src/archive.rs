@@ -27,12 +27,52 @@
 //! extension means a compressed file somebody renamed still opens, and
 //! a file called `.zst` that is not one fails with that sentence instead
 //! of a parse error two layers down.
+//!
+//! # Finding a capture file is the other half
+//!
+//! Opening one is no use to a tool that never offers it. Anything that
+//! walks a directory, groups files by hour, or reads a symbol out of a
+//! path is deciding what counts as a capture file **by its name**, and a
+//! name-based rule written before the archive was compressed rejects
+//! every file the archive actually holds -- `13.oqcap.zst` has the
+//! extension `zst` and the stem `13.oqcap`, so an hourly grouping finds
+//! no hours and a tool reports an empty directory rather than a
+//! mismatch. That failure looks exactly like "there is no data here".
+//!
+//! So the naming rule lives beside the reading rule, and both are here.
 
 use std::io::{self, Read};
 use std::path::Path;
 
 /// zstd's frame magic, little-endian `0xFD2FB528`.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// The capture extension, before any compression suffix.
+const CAPTURE_EXT: &str = ".oqcap";
+
+/// The part of a capture file's name before `.oqcap[.zst]`.
+///
+/// `13` from both `13.oqcap` and `13.oqcap.zst`; the hour under an
+/// hourly rotation and the day under a daily one, which is what every
+/// caller here wants and what `Path::file_stem` does not give for the
+/// compressed form.
+///
+/// `None` for anything that is not a capture file, so this doubles as
+/// the test for one -- a caller filtering a directory and a caller
+/// naming a window ask the same question, and answering it twice is how
+/// they come to disagree.
+#[must_use]
+pub fn stem(path: impl AsRef<Path>) -> Option<String> {
+    let name = path.as_ref().file_name()?.to_str()?;
+    let base = name.strip_suffix(".zst").unwrap_or(name);
+    base.strip_suffix(CAPTURE_EXT).map(str::to_string)
+}
+
+/// Whether a path names a capture file, compressed or not.
+#[must_use]
+pub fn is_capture(path: impl AsRef<Path>) -> bool {
+    stem(path).is_some()
+}
 
 /// Read a capture file, decompressing it if it is compressed.
 ///
@@ -137,5 +177,42 @@ mod tests {
             assert_eq!(read(&p).expect("read"), b"hello", "{name}");
             let _ = std::fs::remove_file(&p);
         }
+    }
+
+    /// The hour is `13` whether or not the file has been compressed.
+    ///
+    /// `Path::file_stem` gives `13.oqcap` for the compressed form, and
+    /// an hourly grouping keyed on that finds no hour matching `13` --
+    /// so a tool reports an empty directory for an archive full of
+    /// data, which reads as "nothing was captured".
+    #[test]
+    fn the_stem_is_the_same_compressed_or_not() {
+        assert_eq!(stem("a/b/13.oqcap").as_deref(), Some("13"));
+        assert_eq!(stem("a/b/13.oqcap.zst").as_deref(), Some("13"));
+        assert_eq!(stem("2026-08-19.oqcap.zst").as_deref(), Some("2026-08-19"));
+        assert_eq!(
+            std::path::Path::new("a/b/13.oqcap.zst")
+                .file_stem()
+                .and_then(|s| s.to_str()),
+            Some("13.oqcap"),
+            "the trap this exists to avoid"
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_capture_file_has_no_stem() {
+        for name in [
+            "13.json",
+            "13.manifest.json",
+            "13.oqcap.gz",
+            "oqcap",
+            "13.oqcapx",
+            "",
+        ] {
+            assert!(stem(name).is_none(), "{name} is not a capture file");
+            assert!(!is_capture(name), "{name}");
+        }
+        assert!(is_capture("13.oqcap"));
+        assert!(is_capture("13.oqcap.zst"));
     }
 }
