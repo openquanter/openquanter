@@ -218,16 +218,18 @@ where
         }
     };
 
-    let limits = Limits {
-        max_order_qty: cfg.limits.max_order_qty,
-        max_position_qty: cfg.limits.max_position_qty,
-        max_order_notional: cfg.limits.max_order_notional,
-        // Basis points to parts per billion.
-        price_band: cfg.limits.price_band,
-        max_working: 4,
-        max_rate: 10,
-        rate_window: Nanos(60 * 1_000_000_000),
-    };
+    // The caller's limits, all of them.
+    //
+    // This rebuilt the struct for a while, copying four fields across
+    // and writing two of them itself — a refactor carried the binary's
+    // old literals along and wired only the four that had names in the
+    // configuration. A caller that derived `max_working` from its ladder
+    // got the number 4 instead, and its ninth resting order was refused
+    // by a bound nothing had asked for and no message named.
+    //
+    // A host that edits the limits it was handed is not enforcing a
+    // policy, it is having one.
+    let limits = cfg.limits;
 
     // Stable across restarts unless overridden, so a recovered run
     // recognises its own previous orders on the account stream. A prefix

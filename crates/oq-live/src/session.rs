@@ -428,12 +428,22 @@ impl<E: Execution> Session<E> {
             detail,
         });
         match placed {
-            Placed::Accepted(a) => Submission::Sent(a.client_id),
+            Placed::Accepted(a) => {
+                // Believed resting now, not when the acknowledgement
+                // arrives. The bound on working orders is checked
+                // against this count, and a count that lags a burst is
+                // no bound at all.
+                self.book.on_sent(&a.client_id);
+                Submission::Sent(a.client_id)
+            }
             Placed::Rejected(r) => Submission::Rejected(r.message),
             // Ask, using the id chosen before sending. This is the
             // entire reason the id exists.
             Placed::Unknown(_) => match self.venue.order_status(&self.symbol, &client_id) {
-                Ok(Some(a)) => Submission::Sent(a.client_id),
+                Ok(Some(a)) => {
+                    self.book.on_sent(&a.client_id);
+                    Submission::Sent(a.client_id)
+                }
                 Ok(None) => Submission::Rejected(
                     "the order never reached the venue; it may be sent again".to_string(),
                 ),

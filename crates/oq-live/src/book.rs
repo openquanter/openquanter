@@ -140,6 +140,23 @@ impl Book {
         }
     }
 
+    /// An order the venue accepted, believed resting from now.
+    ///
+    /// The `NEW` event says the same thing and says it later. Waiting
+    /// for it means a burst of orders is counted as none of them: the
+    /// bound on resting orders is checked against a number that has not
+    /// caught up, and seven rungs go out under a limit of four because
+    /// each was measured before any of them had been acknowledged.
+    ///
+    /// Idempotent with `apply`, which inserts the same id when the
+    /// event does arrive.
+    pub fn on_sent(&mut self, client_id: &str) {
+        if self.working.iter().any(|w| w == client_id) {
+            return;
+        }
+        self.working.push(client_id.to_string());
+    }
+
     /// Replace the believed positions with the venue's own.
     ///
     /// Used after a reconciliation. The stream's view is discarded
