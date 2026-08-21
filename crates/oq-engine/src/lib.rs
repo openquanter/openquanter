@@ -48,7 +48,10 @@ pub mod l2;
 pub mod tick;
 
 pub use book::{Book, Resting};
+// The venue's depth, re-exported so a caller holding an engine does not
+// have to depend on the reconstruction crate to hand it an update.
 pub use l0::{FillReason, L0Engine, L0Fill, limit_order, market_order};
 pub use l1::{Delay, Impact, L1Engine, Latency, Policy, QueueAhead};
 pub use l2::L2Engine;
+pub use oq_book::{DepthUpdate, Level, SequenceError};
 pub use tick::Tick;

@@ -36,6 +36,7 @@
 
 pub mod event;
 pub mod kernel;
+pub mod matcher;
 pub mod sequencer;
 pub mod sink;
 

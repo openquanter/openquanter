@@ -437,10 +437,12 @@ impl L1Engine {
     /// held here rather than in L0, so clearing only the book would
     /// leave orders that arrive afterwards and fill against a state
     /// nobody expects them in.
-    pub fn cancel_all(&mut self) {
+    /// Returns how many were withdrawn, counting both.
+    pub fn cancel_all(&mut self) -> usize {
+        let in_flight = self.pending.len() + self.queued.len();
         self.pending.clear();
         self.queued.clear();
-        self.inner.cancel_all();
+        in_flight + self.inner.cancel_all()
     }
 
     /// Orders that exist but are not yet in the book.

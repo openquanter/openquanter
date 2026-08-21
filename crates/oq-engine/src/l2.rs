@@ -240,8 +240,10 @@ impl L2Engine {
     }
 
     /// Withdraw every order, in flight and resting alike.
-    pub fn cancel_all(&mut self) {
-        self.inner.cancel_all();
+    ///
+    /// Returns how many were withdrawn.
+    pub fn cancel_all(&mut self) -> usize {
+        self.inner.cancel_all()
     }
 
     /// Withdraw one order, wherever it currently is.
