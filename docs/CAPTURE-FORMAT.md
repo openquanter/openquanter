@@ -319,3 +319,25 @@ and the archive is silently short.
 **Consequence:** flush on a timer as well as a count. The capture
 process should also be observable from outside — a file that never grows
 must mean a fault, not a buffer.
+
+### Not every record on the trade stream is a trade
+
+Binance publishes `{"e":"trade",…,"p":"0","q":"0","X":"NA",…}` among the
+real ones — 19,725 in one day of BTCUSDT against 5.4 million trades.
+They carry trade ids and belong to the id chain, so a completeness check
+that follows those ids is right to count them; a price of zero is still
+not a price.
+
+The damage is not where it looks. Storing them costs nothing and they
+are part of the record. What breaks is the conversion: a window's low is
+the minimum of the prices in it, and one zero makes that zero. Real
+capture, before this was found, produced 1355 of 1409 minutes with a low
+of `0.00` and the high right beside it. A resting buy is triggered by
+the low, so a backtest reading it fills orders no venue would have
+filled — and the same parse runs in the live loop.
+
+**Consequence:** an adapter's parse must return "no trade" for a record
+declaring none, and callers must count those separately from records
+they could not read. The two look identical downstream and mean opposite
+things: one is the venue reporting nothing happened, the other is this
+build disagreeing with the venue about the format.

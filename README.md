@@ -268,10 +268,16 @@ Pre-alpha, and specific about it. **Built and tested today:**
   for all six — which is the finding, not a flaw in the fixture: a margin model
   is invisible until leverage is real. `cargo run --example classics`.
 
-**Designed but not built:** fidelity tier L2 (L0 and L1 are implemented; L1
-wraps L0 rather than replacing it, so L0 stays frozen by construction) and
-everything under *AI-native* above. The pillars section describes where this
-is going; this section describes where it is.
+**Built but not wired:** fidelity tier L2. The engine is there — `L2Engine`
+reads the queue ahead of an order from the venue's reconstructed book and
+walks the levels for taker fills, each tier wrapping the one below so L0
+stays frozen by construction. What does not exist is the path that feeds it:
+the tick file a backtest reads carries a best bid and a best ask, not a
+book, so nothing currently hands L2 the depth it was written to use. The
+parts are tested; the assembly is missing.
+
+**Designed but not built:** everything under *AI-native* above. The pillars
+section describes where this is going; this section describes where it is.
 
 **On live trading specifically,** because the pieces above make it easy to
 overstate. The whole loop has run against a real venue's testnet. It reads
@@ -361,9 +367,11 @@ So "every cent accounted for" still accounts for **none of them** — but
 what is missing is assembly rather than parts.
 
 One clarification, because the names collide: the order book reconstruction
-in `oq-l2feed` is a tool for **verifying an archive**, not the L2 fidelity
-tier. It rebuilds a book to prove captured data is usable; matching against
-a reconstructed book is M4 work and does not exist.
+in `oq-l2feed` is a tool for **verifying an archive**, and the L2 fidelity
+tier is a matcher. Both now exist and both use the same `oq-book` — the
+first replays an archive to prove captured data is usable, the second reads
+a book to decide where an order queues. What is still missing is the path
+between them, so no backtest today matches against reconstructed depth.
 
 Start with the [Quickstart](docs/QUICKSTART.md) — three examples, no data to
 download, a running backtest in a few minutes. See the
