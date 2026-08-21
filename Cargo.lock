@@ -701,6 +701,7 @@ dependencies = [
  "arrow-schema",
  "oq-engine",
  "oq-hash",
+ "oq-stats",
  "oq-types",
  "parquet",
 ]
