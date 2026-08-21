@@ -21,7 +21,9 @@
 //! does and what a backtest that only checks at settlement misses.
 
 use crate::event::Event;
-use oq_engine::{L0Engine, Tick};
+use oq_engine::Tick;
+
+use crate::matcher::Matcher;
 use oq_margin::{Contract, FundingRate, MarginedPosition, TierTable};
 use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Side, Working};
 
@@ -138,7 +140,13 @@ impl Fees {
 /// Account and market state for one instrument.
 #[derive(Debug)]
 pub struct State {
-    pub engine: L0Engine,
+    /// The matcher this run is using.
+    ///
+    /// An enum rather than a fixed type because the fidelity tier is a
+    /// property of the run, not of the code — see [`Matcher`]. Defaults
+    /// to L0, so a state built the old way matches the way it always
+    /// did.
+    pub engine: Matcher,
     pub contract: Contract,
     pub table: TierTable,
     /// How opposing exposure is accounted for.
@@ -200,7 +208,7 @@ impl State {
         starting_balance: Cash,
     ) -> Self {
         Self {
-            engine: L0Engine::new(instrument),
+            engine: Matcher::l0(instrument),
             contract,
             table,
             mode: PositionMode::OneWay,
@@ -543,18 +551,16 @@ impl Kernel {
                         reason: RejectReason::NoMargin,
                     });
                 } else {
-                    match price {
-                        Some(p) => {
-                            self.state
-                                .engine
-                                .submit_limit_with(id, side, p, qty, stamp, offset);
-                        }
-                        None => {
-                            self.state
-                                .engine
-                                .submit_market_with(id, side, qty, stamp, offset);
-                        }
-                    }
+                    // Built here rather than by the matcher, so every
+                    // tier receives the same order: a construction that
+                    // lived in three places is where a time-in-force
+                    // drifts and a tier produces fills the frozen
+                    // anchor never would.
+                    let order = match price {
+                        Some(p) => oq_engine::limit_order(id, side, p, qty, stamp, offset),
+                        None => oq_engine::market_order(id, side, qty, stamp, offset),
+                    };
+                    self.state.engine.submit(order, stamp.local);
                     self.working.push(id);
                 }
             }
@@ -713,9 +719,15 @@ impl Kernel {
     ///
     /// For tests and for adapters that have already validated the
     /// order; the event path is what a journal replays.
+    ///
+    /// The order's own stamp is when it was sent, which is what the
+    /// upper tiers measure entry latency from. Taking the kernel's
+    /// clock instead would date every order to whenever this happened
+    /// to be called.
     pub fn submit_raw(&mut self, order: Working) {
         self.working.push(order.id());
-        self.state.engine.submit(order);
+        let sent = order.placed().local;
+        self.state.engine.submit(order, sent);
     }
 
     /// Everything a replay must reproduce.
