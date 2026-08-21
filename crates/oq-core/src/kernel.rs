@@ -366,6 +366,39 @@ impl State {
         &mut self.holdings[0]
     }
 
+    /// Where an instrument's holding sits, for an operation that has to
+    /// reach the same one repeatedly.
+    ///
+    /// An index rather than a reference, because the operations that
+    /// need it also touch the account — a borrow of one holding would
+    /// stop the balance being credited in the same function.
+    #[must_use]
+    pub fn holding_index(&self, instrument: InstrumentId) -> Option<usize> {
+        self.holdings
+            .iter()
+            .position(|h| h.instrument == instrument)
+    }
+
+    /// The holding at an index, read-only.
+    ///
+    /// # Panics
+    /// As [`State::at`].
+    #[must_use]
+    pub fn holdings_at(&self, index: usize) -> &Holding {
+        &self.holdings[index]
+    }
+
+    /// The holding at an index from [`State::holding_index`].
+    ///
+    /// # Panics
+    /// If the index is out of range. Callers get one from
+    /// `holding_index` and holdings are never removed, so this is
+    /// unreachable through the public API.
+    #[must_use]
+    pub fn at(&mut self, index: usize) -> &mut Holding {
+        &mut self.holdings[index]
+    }
+
     /// The holding for one instrument, if the account has one.
     #[must_use]
     pub fn holding_of(&self, instrument: InstrumentId) -> Option<&Holding> {
@@ -595,45 +628,53 @@ impl State {
     /// position's entry price is the fill price rather than a blend of
     /// the two sides.
     fn apply_fill(&mut self, fill: &Fill) {
+        // The fill names its instrument, so the position it moves
+        // is that instrument's rather than whichever holding is
+        // first. Before this every fill landed on the first one,
+        // and two instruments netted against each other in a
+        // single position.
+        let h = self
+            .holding_index(fill.instrument)
+            .expect("a fill for an instrument this account does not hold");
         if matches!(self.mode, PositionMode::Hedge) {
             self.apply_fill_hedged(fill);
             return;
         }
         let signed = fill.position_delta();
-        let old = self.holding().qty;
+        let old = self.holdings[h].qty;
         let new = old.add(signed);
 
         let reduces = old.0 != 0 && (old.0 > 0) != (signed.0 > 0);
         if reduces {
             let closed = signed.0.abs().min(old.0.abs());
             let closed_signed = QtyLots(closed * if old.0 > 0 { 1 } else { -1 });
-            let pnl =
-                self.holding()
-                    .contract
-                    .unrealized(self.holding().entry, fill.price, closed_signed);
+            let pnl = self.holding().contract.unrealized(
+                self.holdings[h].entry,
+                fill.price,
+                closed_signed,
+            );
             self.realized = self.realized.add(pnl);
             self.credit(pnl);
         }
 
         if new.0 == 0 {
-            self.holding_mut().entry = PriceTicks::ZERO;
+            self.at(h).entry = PriceTicks::ZERO;
         } else if old.0 == 0 || (old.0 > 0) == (new.0 > 0) && !reduces {
             // Opening or adding: the entry price is the size-weighted
             // average, which is what the venue reports and what every
             // margin calculation is written against.
-            let old_notional = self.holding().entry.0 as i128 * old.0.abs() as i128;
+            let old_notional = self.holdings[h].entry.0 as i128 * old.0.abs() as i128;
             let add_notional = fill.price.0 as i128 * signed.0.abs() as i128;
             let total = old.0.abs() as i128 + signed.0.abs() as i128;
             if total > 0 {
-                self.holding_mut().entry =
-                    PriceTicks(((old_notional + add_notional) / total) as i64);
+                self.at(h).entry = PriceTicks(((old_notional + add_notional) / total) as i64);
             }
         } else if (old.0 > 0) != (new.0 > 0) {
             // Crossed through flat: the remainder is a new position at
             // the fill price, not a blend with the side just closed.
-            self.holding_mut().entry = fill.price;
+            self.at(h).entry = fill.price;
         }
-        self.holding_mut().qty = new;
+        self.at(h).qty = new;
     }
 
     /// Apply a fill to whichever leg it names.
@@ -651,6 +692,14 @@ impl State {
     /// side is a separate position with its own entry, and rolling into
     /// it would invent one.
     fn apply_fill_hedged(&mut self, fill: &Fill) {
+        // The fill names its instrument, so the position it moves
+        // is that instrument's rather than whichever holding is
+        // first. Before this every fill landed on the first one,
+        // and two instruments netted against each other in a
+        // single position.
+        let h = self
+            .holding_index(fill.instrument)
+            .expect("a fill for an instrument this account does not hold");
         let qty = fill.qty;
         let opens = matches!(fill.offset, oq_types::Offset::Open);
         let long_leg = match (fill.side, opens) {
@@ -660,28 +709,33 @@ impl State {
 
         if opens {
             if long_leg {
-                let (q, e) =
-                    Self::blend(self.holding().qty, self.holding().entry, qty, fill.price, 1);
-                self.holding_mut().qty = q;
-                self.holding_mut().entry = e;
+                let (q, e) = Self::blend(
+                    self.holdings[h].qty,
+                    self.holdings[h].entry,
+                    qty,
+                    fill.price,
+                    1,
+                );
+                self.at(h).qty = q;
+                self.at(h).entry = e;
             } else {
                 let (q, e) = Self::blend(
-                    self.holding().short_qty,
-                    self.holding().short_entry,
+                    self.holdings[h].short_qty,
+                    self.holdings[h].short_entry,
                     qty,
                     fill.price,
                     -1,
                 );
-                self.holding_mut().short_qty = q;
-                self.holding_mut().short_entry = e;
+                self.at(h).short_qty = q;
+                self.at(h).short_entry = e;
             }
             return;
         }
 
         let (held, entry) = if long_leg {
-            (self.holding().qty, self.holding().entry)
+            (self.holdings[h].qty, self.holdings[h].entry)
         } else {
-            (self.holding().short_qty, self.holding().short_entry)
+            (self.holdings[h].short_qty, self.holdings[h].short_entry)
         };
         if held.0 == 0 {
             return;
@@ -697,14 +751,14 @@ impl State {
 
         let left = QtyLots(held.0 - signed_closed.0);
         if long_leg {
-            self.holding_mut().qty = left;
+            self.at(h).qty = left;
             if left.0 == 0 {
-                self.holding_mut().entry = PriceTicks::ZERO;
+                self.at(h).entry = PriceTicks::ZERO;
             }
         } else {
-            self.holding_mut().short_qty = left;
+            self.at(h).short_qty = left;
             if left.0 == 0 {
-                self.holding_mut().short_entry = PriceTicks::ZERO;
+                self.at(h).short_entry = PriceTicks::ZERO;
             }
         }
     }
@@ -802,7 +856,13 @@ impl Kernel {
             // lower tier being handed depth is a fact about the run's
             // configuration, and the host counts it -- the kernel's job
             // here is to hand it over.
-            let _ = self.state.holding_mut().engine.on_depth(update);
+            // Depth carries no instrument of its own yet, so it reaches
+            // the only holding — and an account with several gets
+            // nothing, which is visible as an unread update rather than
+            // depth silently applied to the wrong book.
+            if self.state.holdings().count() == 1 {
+                let _ = self.state.at(0).engine.on_depth(update);
+            }
             return &self.outputs;
         }
 
@@ -815,7 +875,7 @@ impl Kernel {
                 // position at another instrument's price is a wrong
                 // number rather than a missing one.
                 match self.route(instrument) {
-                    Some(_) => self.on_tick(&tick),
+                    Some(h) => self.on_tick(h, &tick),
                     None => self.outputs.push(Output::Rejected {
                         id: OrderId::new(0),
                         reason: RejectReason::UnroutableObservation,
@@ -842,6 +902,8 @@ impl Kernel {
                         reason: RejectReason::DuplicateId,
                     });
                 } else if self.route(instrument).is_none() {
+                    // Bound below once the checks pass; here it is only
+                    // the refusal.
                     // An order for an instrument this account does not
                     // hold, or none named while it holds several. Same
                     // rule as an observation: placing it on whichever
@@ -866,12 +928,22 @@ impl Kernel {
                         Some(p) => oq_engine::limit_order(id, side, p, qty, stamp, offset),
                         None => oq_engine::market_order(id, side, qty, stamp, offset),
                     };
-                    self.state.holding_mut().engine.submit(order, stamp.local);
+                    // To the holding the order named, not the first one.
+                    // Every order landing on holding zero is what made a
+                    // two-instrument account net its positions together.
+                    let h = self.route(instrument).expect("checked above");
+                    self.state.at(h).engine.submit(order, stamp.local);
                     self.working.push(id);
                 }
             }
             Event::Cancel { id, .. } => {
-                if self.state.holding_mut().engine.cancel(id) {
+                // An order id is unique across the account, so the
+                // holding that took it is the one that answers. Asking
+                // each in turn is how the id names its own holding
+                // without the caller having to.
+                let cancelled =
+                    (0..self.state.holdings().count()).any(|h| self.state.at(h).engine.cancel(id));
+                if cancelled {
                     self.working.retain(|w| *w != id);
                     self.outputs.push(Output::Cancelled(id));
                 }
@@ -936,13 +1008,19 @@ impl Kernel {
         self.state.now = fill.stamp.exch;
         // Withdrawn before the books move, so a panic between the two
         // cannot leave an order that has already paid.
-        self.state.holding_mut().engine.cancel(fill.order);
+        // The order lives in the holding its fill names.
+        if let Some(h) = self.state.holding_index(fill.instrument) {
+            self.state.at(h).engine.cancel(fill.order);
+        }
         self.working.retain(|w| *w != fill.order);
 
-        let fee = self
+        // The fill's own instrument decides the contract, since a fee
+        // is a share of a notional and the multiplier is per contract.
+        let contract = self
             .state
-            .fee_schedule
-            .charge(self.state.holding().contract, fill);
+            .holding_of(fill.instrument)
+            .map_or(self.state.holding().contract, |h| h.contract);
+        let fee = self.state.fee_schedule.charge(contract, fill);
         self.state.fees = self.state.fees.add(fee);
         self.state.credit(fee.neg());
         self.state.apply_fill(fill);
@@ -953,9 +1031,14 @@ impl Kernel {
         self.check_liquidation(fill.price);
     }
 
-    fn on_tick(&mut self, tick: &Tick) {
+    /// Advance one holding to an observation.
+    ///
+    /// `h` is the holding the observation was routed to. Every
+    /// price here is that instrument's, and applying it to a
+    /// different one marks a position at another market's price.
+    fn on_tick(&mut self, h: usize, tick: &Tick) {
         self.state.now = tick.stamp.exch;
-        self.state.holding_mut().mark = tick.last;
+        self.state.at(h).mark = tick.last;
         if self.state.matching == Matching::Venue {
             // The venue is matching. The mark, the clock, the funding
             // and the liquidation check all still follow the price —
@@ -970,7 +1053,7 @@ impl Kernel {
         // is computed against.
         let fills: Vec<Fill> = self
             .state
-            .holding_mut()
+            .at(h)
             .engine
             .on_tick(tick)
             .iter()
@@ -984,7 +1067,7 @@ impl Kernel {
             let fee = self
                 .state
                 .fee_schedule
-                .charge(self.state.holding().contract, fill);
+                .charge(self.state.holdings_at(h).contract, fill);
             self.state.fees = self.state.fees.add(fee);
             self.state.credit(fee.neg());
             self.state.apply_fill(fill);
@@ -1027,16 +1110,13 @@ impl Kernel {
     ///
     /// `None` names the only holding, and is an error when there is
     /// more than one.
-    fn route(&self, instrument: Option<InstrumentId>) -> Option<InstrumentId> {
+    fn route(&self, instrument: Option<InstrumentId>) -> Option<usize> {
         match instrument {
-            Some(id) => self.state.holding_of(id).map(|h| h.instrument),
-            None => {
-                let mut it = self.state.holdings();
-                match (it.next(), it.next()) {
-                    (Some(only), None) => Some(only.instrument),
-                    _ => None,
-                }
-            }
+            Some(id) => self.state.holding_index(id),
+            // An unnamed event names the only holding, and nothing once
+            // there are two: guessing marks one instrument's position at
+            // another's price.
+            None => (self.state.holdings().count() == 1).then_some(0),
         }
     }
 
@@ -1095,7 +1175,7 @@ impl Kernel {
         asks: &[oq_engine::Level],
     ) -> bool {
         self.state
-            .holding_mut()
+            .at(0)
             .engine
             .install_snapshot(update_id, bids, asks)
     }
@@ -1753,6 +1833,60 @@ mod hedge_tests {
         assert!(
             both > one.maintenance(),
             "holding a second instrument requires more margin, not the same"
+        );
+    }
+
+    /// **Each instrument's order reaches its own matcher.**
+    ///
+    /// Routing an event was only half of it: an order that was routed
+    /// and then handed to `holding_mut()` lands on the first holding
+    /// whatever it named, and two instruments net into one position
+    /// while every count and check still looks right.
+    #[test]
+    fn an_order_fills_on_the_instrument_it_named() {
+        let mut s = State::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(20_000),
+        );
+        let second = InstrumentId::new(2);
+        s.open_holding(second, Contract::new(1_000), TierTable::example_btcusdt());
+        let first = s.holding().instrument;
+        let mut k = Kernel::new(s);
+
+        let tick = |id: InstrumentId, at: i64| Event::Tick {
+            instrument: Some(id),
+            tick: oq_engine::Tick::trades_only(oq_types::Stamp::synthetic(at), 6_000_000, 0, 0),
+        };
+        let order = |id: InstrumentId, oid: u64, at: i64, side: Side| Event::Submit {
+            instrument: Some(id),
+            id: OrderId::new(oid),
+            side,
+            price: None,
+            qty: QtyLots(3),
+            offset: Offset::Open,
+            stamp: oq_types::Stamp::synthetic(at),
+        };
+
+        for id in [first, second] {
+            k.apply(&tick(id, 1_000));
+        }
+        k.apply(&order(first, 1, 1_000, Side::Buy));
+        k.apply(&order(second, 2, 1_000, Side::Sell));
+        for id in [first, second] {
+            k.apply(&tick(id, 2_000));
+        }
+
+        assert_eq!(
+            k.state().holding_of(first).expect("held").qty,
+            QtyLots(3),
+            "the buy landed on the instrument it named"
+        );
+        assert_eq!(
+            k.state().holding_of(second).expect("held").qty,
+            QtyLots(-3),
+            "and so did the sell, rather than netting against the buy"
         );
     }
 
