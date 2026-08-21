@@ -246,6 +246,7 @@ mod tests {
                 tick: Tick::trades_only(Stamp::synthetic(1), 1_000_000, 1_000_000, 1_000_000),
             },
             Event::Submit {
+                instrument: None,
                 id: OrderId::new(1),
                 side: Side::Buy,
                 price: Some(PriceTicks(990_000)),
@@ -263,6 +264,7 @@ mod tests {
                 mark: PriceTicks(985_000),
             },
             Event::Submit {
+                instrument: None,
                 id: OrderId::new(2),
                 side: Side::Sell,
                 price: Some(PriceTicks(1_005_000)),
@@ -287,6 +289,7 @@ mod tests {
             // book was empty in both arms and a replay that rebuilt it
             // incorrectly would still have passed.
             Event::Submit {
+                instrument: None,
                 id: OrderId::new(3),
                 side: Side::Buy,
                 price: Some(PriceTicks(500_000)),
@@ -297,6 +300,7 @@ mod tests {
             // And one that is cancelled, so the working set is exercised
             // in both directions.
             Event::Submit {
+                instrument: None,
                 id: OrderId::new(4),
                 side: Side::Sell,
                 price: Some(PriceTicks(2_000_000)),
@@ -367,6 +371,7 @@ mod tests {
                         price + offset
                     };
                     events.push(Event::Submit {
+                        instrument: None,
                         id: OrderId::new(next_id),
                         side,
                         price: Some(PriceTicks(limit)),
@@ -521,6 +526,7 @@ mod tests {
             })
             .expect("submit");
             seq.submit(&Event::Submit {
+                instrument: None,
                 id: OrderId::new(1),
                 side: Side::Buy,
                 price: Some(PriceTicks(1_200_000)),
@@ -720,6 +726,7 @@ mod tests {
             asks: Vec::new(),
         }))];
         events.push(Event::Submit {
+            instrument: None,
             id: OrderId::new(1),
             side: Side::Buy,
             price: Some(PriceTicks(100)),

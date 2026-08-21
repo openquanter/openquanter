@@ -137,7 +137,7 @@ input this project cannot reach, the second has not been written.
 | Types | `oq-types` fixed point, typestate order and position machines | Built |
 | Journal | mmap append log, snapshots, replay, torn-tail tolerance | Built |
 | Core | Sequencer, deterministic kernel, injected clock | Built |
-| Core | **Sharding by instrument** | **Not built, and no longer blocked** (`shard` still appears nowhere; FR-CORE-6). What blocked it was the account: a shard is one instrument's kernel, and `State` held one balance and one position, which two instruments would have had to share. That is done — `State` holds a list of `Holding`s, each with its own matcher, position and margin table, none of it shared and no way to reach the account from one, which is the direction FR-CORE-6 rules out; equity and maintenance sum across them. Routing is done in both directions: `Intent` and `Event::Tick` name their instrument, and an observation that names none is refused once the account holds two rather than guessed at. **What remains is the mechanical part** — one kernel per shard, one thread each, and a stream that fans out to them |
+| Core | **Sharding by instrument** | Built — `oq_core::Shards`. The requirement reads as a performance decision and is also an accounting one: a balance two instruments draw on **is** shared mutable state, so "shares nothing" and "one balance behind several positions" cannot both hold. Venues have both arrangements and so does this: cross margin is one kernel with several holdings and cannot be sharded by construction; isolated margin is one kernel each, which is what FR-CORE-6 describes. Events route by instrument, an unnamed one reaches a lone shard and is refused past that, and an instrument no shard holds is refused rather than dropped. No threads: FR-CORE-1 forbids the core from spawning any and a scheduler-dependent result would not reproduce from `(journal, seed, commit)`. Running shards on threads is the host's decision, safe because they share nothing — and a test asserts interleaving them changes no fingerprint, which is the basis for it |
 | Matching | L0 tick replay, frozen as the regression anchor | Built |
 | Margin | Tiered maintenance margin, liquidation pricing, funding | Built |
 | Margin | Bitemporal rule schedules | Built |
@@ -224,7 +224,7 @@ input this project cannot reach, the second has not been written.
 |---|---|---|
 | Inference | `oq-infer` ONNX and compiled trees | **Not built** |
 | Inference | Prediction parity gate | **Not built** |
-| Environments | `oq-env` gym-style vectorized environments | **Not built** |
+| Environments | `oq-env` gym-style vectorized environments | Built — `Env` and `VecEnv`, zero dependencies. The inversion is done by taking the backtest loop apart rather than by a thread and a channel: `step` advances one observation, so nothing is concurrent and **G10**'s reproduction test holds by construction. An action is a target position rather than an order, and the cost is stated — an agent trained here cannot learn to work an order, because it never sees one. Reward is the change in equity, which is the one definition needing no parameter and is a poor signal alone; `Step::equity` is there so a caller can shape their own. Batch seeds are derived with SplitMix64, because sequential seeds correlate on the first draw and nothing in one episode shows it |
 | Features | `oq-features` production point-in-time layer with drift monitoring | Skeleton built; production layer not |
 | Sandbox | `oq-lab` | **Not built** |
 

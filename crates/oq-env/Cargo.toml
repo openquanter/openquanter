@@ -1,0 +1,18 @@
+[package]
+name = "oq-env"
+version.workspace = true
+description = "Gym-style reinforcement-learning environments over the deterministic core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oq-backtest.workspace = true
+oq-core.workspace = true
+oq-engine.workspace = true
+oq-margin.workspace = true
+oq-types.workspace = true
+
+[lints]
+workspace = true

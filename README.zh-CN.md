@@ -238,11 +238,11 @@ Pre-alpha，并且把话说清楚。**今天已建成并有测试覆盖的**：
 <!-- begin generated: workspace facts (scripts/doc-facts.sh) -->
 
 ```text
-crates (22)
-  oq-backtest oq-book oq-cli oq-core oq-data oq-engine oq-examples
-  oq-features oq-gateway oq-hash oq-ingest oq-journal oq-l2feed
-  oq-live oq-margin oq-parity oq-py oq-risk oq-sim oq-stats
-  oq-strategy oq-types
+crates (23)
+  oq-backtest oq-book oq-cli oq-core oq-data oq-engine oq-env
+  oq-examples oq-features oq-gateway oq-hash oq-ingest oq-journal
+  oq-l2feed oq-live oq-margin oq-parity oq-py oq-risk oq-sim
+  oq-stats oq-strategy oq-types
 
 the live path
   oq-live

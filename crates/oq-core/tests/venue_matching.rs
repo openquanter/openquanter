@@ -64,6 +64,7 @@ fn venue_fill(ns: i64, order: u64, price: i64, qty: i64) -> Fill {
 
 fn submit(id: u64, ns: i64) -> Event {
     Event::Submit {
+        instrument: None,
         id: OrderId(id),
         side: Side::Buy,
         price: None,
@@ -173,6 +174,7 @@ fn a_filled_order_leaves_the_book_so_a_replay_cannot_match_it_again() {
         tick: tick(SEC, 6_000_000),
     });
     k.apply(&Event::Submit {
+        instrument: None,
         id: OrderId(7),
         side: Side::Buy,
         price: Some(PriceTicks(5_900_000)),

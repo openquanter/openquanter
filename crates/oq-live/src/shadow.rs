@@ -529,6 +529,7 @@ pub fn submitted(
     stamp: oq_types::Stamp,
 ) -> Event {
     Event::Submit {
+        instrument: None,
         id,
         side,
         price,

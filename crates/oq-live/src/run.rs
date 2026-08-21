@@ -705,6 +705,7 @@ where
                                 {
                                     books.on_submit(*local, side, qty, offset, now);
                                     shadow.apply(&oq_core::Event::Submit {
+                                        instrument: None,
                                         id: *local,
                                         side,
                                         price: None,
