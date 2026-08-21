@@ -60,6 +60,24 @@ writing it down and better than leaving it out.
   rule is now the adapter contract (`parse_trade` returns a positive
   price and quantity or `None`) and `conformance` holds every adapter to
   it, so the same fault cannot return through a new venue.
+- **`Event::Depth` (kind 9) added to the event schema, and `Event` is no
+  longer `Copy`.** *Changes results for L2 runs, and only for those.* An
+  L2 run's fills depend on the book its orders queued in, and a journal
+  without it replayed the orders into a different market — reproducing
+  what was asked for rather than what happened. That was the one place
+  in this kernel where replay was not faithful, and it now is.
+  **Behavioural delta:** none for L0 or L1, which read no depth; an L2
+  replay now reproduces its run's fills instead of a lower tier's.
+  Additive on disk: journals written before it contain no such record,
+  so replaying an existing one is unchanged, and a journal written
+  *with* it cannot be read by an earlier build — which the per-kind
+  length check makes loud rather than silent. **This is the first
+  variable-length kind.** Every other payload is a fixed size and
+  decode refuses anything else; a depth update carries its own level
+  counts and decode checks the byte count against them, which is the
+  same rule stated against a declaration instead of a constant. `Copy`
+  goes because a list of levels is not one; the six call sites that
+  needed it were mechanical.
 - **`Event::VenueFill` (kind 8) added to the event schema.** A fill the
   venue decided, as opposed to one the matcher produced. Additive:
   journals written before it contain no such record, so replay of an
