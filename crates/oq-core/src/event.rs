@@ -65,6 +65,12 @@ pub mod kind {
     /// routing existed still says. Both are read; only the one matching
     /// the event is written.
     pub const TICK_ON: u16 = 10;
+    /// A submission that names its instrument.
+    ///
+    /// [`SUBMIT`] is the same order without one. Appended like
+    /// [`TICK_ON`], so the shorter payload is a prefix of the longer and
+    /// one decoder reads both.
+    pub const SUBMIT_ON: u16 = 11;
 }
 
 /// An input to the core.
@@ -92,6 +98,14 @@ pub enum Event {
     },
     /// Place an order.
     Submit {
+        /// Which instrument to place it on.
+        ///
+        /// `None` means "the account's only one", as it does for a
+        /// tick, and for the same reason: it is what every journal
+        /// written before routing says, truthfully. A process holding
+        /// several refuses it — an order placed on the wrong instrument
+        /// is not a near miss.
+        instrument: Option<InstrumentId>,
         id: OrderId,
         side: Side,
         /// A limit price, or `None` for a market order.
@@ -154,7 +168,10 @@ impl Event {
                 instrument: None, ..
             } => kind::TICK,
             Self::Tick { .. } => kind::TICK_ON,
-            Self::Submit { .. } => kind::SUBMIT,
+            Self::Submit {
+                instrument: None, ..
+            } => kind::SUBMIT,
+            Self::Submit { .. } => kind::SUBMIT_ON,
             Self::Cancel { .. } => kind::CANCEL,
             Self::Funding { .. } => kind::FUNDING,
             Self::Time(_) => kind::TIME,
@@ -235,6 +252,7 @@ impl Event {
                 }
             }
             Self::Submit {
+                instrument,
                 id,
                 side,
                 price,
@@ -264,6 +282,14 @@ impl Event {
                     Offset::Open => 0,
                     Offset::Close => 1,
                 });
+                // The instrument goes after the offset for the same
+                // reason the offset went after the stamp: each addition
+                // leaves the previous payload a prefix, so one decoder
+                // reads every generation and the kind says how far to
+                // read.
+                if let Some(id) = instrument {
+                    out.extend_from_slice(&id.0.to_le_bytes());
+                }
             }
             Self::Cancel { id, stamp } => {
                 out.extend_from_slice(&id.0.to_le_bytes());
@@ -345,18 +371,29 @@ impl Event {
                     },
                 })
             }
-            kind::SUBMIT | kind::SUBMIT_LEGACY => {
+            kind::SUBMIT | kind::SUBMIT_LEGACY | kind::SUBMIT_ON => {
                 // Length is exact per kind rather than "either of two".
                 // Accepting both lengths under one kind would make a
                 // truncated new record indistinguishable from a valid old
                 // one, and decode is where that has to be caught — the
                 // whole point of refusing a wrong length is that a record
                 // is never quietly read as something it is not.
-                let expected = if kind == kind::SUBMIT { 43 } else { 42 };
+                let expected = match kind {
+                    kind::SUBMIT_LEGACY => 42,
+                    kind::SUBMIT => 43,
+                    _ => 47,
+                };
                 if payload.len() != expected {
                     return None;
                 }
-                let offset = if kind == kind::SUBMIT {
+                let instrument = if kind == kind::SUBMIT_ON {
+                    Some(InstrumentId(u32::from_le_bytes(
+                        payload.get(43..47)?.try_into().ok()?,
+                    )))
+                } else {
+                    None
+                };
+                let offset = if kind != kind::SUBMIT_LEGACY {
                     match payload[42] {
                         0 => Offset::Open,
                         1 => Offset::Close,
@@ -377,6 +414,7 @@ impl Event {
                 let rest = &payload[10..];
                 let price_raw = i64_at(rest, 0)?;
                 Some(Self::Submit {
+                    instrument,
                     id,
                     side,
                     price: has_price.then_some(PriceTicks(price_raw)),
@@ -552,6 +590,7 @@ mod tests {
                 tick: Tick::trades_only(Stamp::new(20, 21), 100, 0, 0),
             },
             Event::Submit {
+                instrument: None,
                 id: OrderId::new(7),
                 side: Side::Buy,
                 price: Some(PriceTicks(950)),
@@ -560,6 +599,7 @@ mod tests {
                 offset: oq_types::Offset::Open,
             },
             Event::Submit {
+                instrument: None,
                 id: OrderId::new(8),
                 side: Side::Sell,
                 price: None,
@@ -773,6 +813,7 @@ mod tests {
     #[test]
     fn a_market_order_stays_distinct_from_a_zero_price_limit() {
         let market = Event::Submit {
+            instrument: None,
             id: OrderId::new(1),
             side: Side::Buy,
             price: None,
@@ -781,6 +822,7 @@ mod tests {
             offset: oq_types::Offset::Open,
         };
         let zero_limit = Event::Submit {
+            instrument: None,
             id: OrderId::new(1),
             side: Side::Buy,
             price: Some(PriceTicks::ZERO),
@@ -805,6 +847,7 @@ mod tests {
     #[test]
     fn a_legacy_submit_decodes_as_an_open() {
         let modern = Event::Submit {
+            instrument: None,
             id: OrderId::new(9),
             side: Side::Buy,
             price: Some(PriceTicks(1_234_500)),
@@ -828,6 +871,7 @@ mod tests {
     #[test]
     fn a_legacy_length_under_the_modern_kind_is_refused() {
         let bytes = Event::Submit {
+            instrument: None,
             id: OrderId::new(9),
             side: Side::Buy,
             price: Some(PriceTicks(1_234_500)),
@@ -842,6 +886,7 @@ mod tests {
     #[test]
     fn a_close_survives_the_round_trip() {
         let e = Event::Submit {
+            instrument: None,
             id: OrderId::new(3),
             side: Side::Sell,
             price: None,

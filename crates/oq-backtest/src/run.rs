@@ -547,8 +547,10 @@ where
                     price,
                     qty,
                     offset,
+                    instrument,
                     ..
                 } => Event::Submit {
+                    instrument: Some(instrument),
                     id,
                     side,
                     price: Some(price),
@@ -561,8 +563,10 @@ where
                     side,
                     qty,
                     offset,
+                    instrument,
                     ..
                 } => Event::Submit {
+                    instrument: Some(instrument),
                     id,
                     side,
                     price: None,

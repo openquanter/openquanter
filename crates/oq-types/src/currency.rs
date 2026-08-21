@@ -189,6 +189,135 @@ impl Balances {
     }
 }
 
+/// What one currency was worth in another, at an instant.
+///
+/// # Why a rate carries a time
+///
+/// A rate is the one input here that is true only for a moment. An
+/// equity computed from yesterday's rate is not approximately right: it
+/// is a number with no instant attached, and nothing downstream can
+/// tell it from one that has. So a rate table states when it was read,
+/// and a total computed from it inherits that instant rather than the
+/// instant it was computed at.
+///
+/// # No triangulation
+///
+/// BTC to USD via USDT is two rates and two spreads, and the result is
+/// not what either market would have paid. A missing pair is reported
+/// missing. A caller who wants the hop can add the leg they mean and
+/// own the choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rates {
+    /// When these were read, in nanoseconds.
+    at: i64,
+    /// `(from, to) -> units of `to` per one unit of `from`, scaled by
+    /// [`RATE_SCALE`].
+    pairs: Vec<((Currency, Currency), i64)>,
+}
+
+/// Fixed-point scale for a rate: eight decimal places.
+///
+/// The same scale [`Cash`] counts in, so converting is a multiply and a
+/// divide by one constant rather than two conversions between scales.
+pub const RATE_SCALE: i64 = 100_000_000;
+
+impl Rates {
+    /// An empty table read at `at`.
+    #[must_use]
+    pub const fn at(at: i64) -> Self {
+        Self {
+            at,
+            pairs: Vec::new(),
+        }
+    }
+
+    /// When this table was read.
+    #[must_use]
+    pub const fn instant(&self) -> i64 {
+        self.at
+    }
+
+    /// Record that one unit of `from` was worth `rate` units of `to`,
+    /// scaled by [`RATE_SCALE`].
+    ///
+    /// The inverse is **not** recorded. One divided by a rounded rate is
+    /// not the rate the other side of that market would have paid, and a
+    /// table that invented it would answer a question nobody measured.
+    pub fn quote(&mut self, from: Currency, to: Currency, rate: i64) {
+        let key = (from, to);
+        match self.pairs.binary_search_by_key(&key, |(k, _)| *k) {
+            Ok(i) => self.pairs[i].1 = rate,
+            Err(i) => self.pairs.insert(i, (key, rate)),
+        }
+    }
+
+    /// The rate from one currency to another.
+    ///
+    /// A currency to itself is one, without being quoted: that is not a
+    /// market, it is the identity.
+    #[must_use]
+    pub fn rate(&self, from: Currency, to: Currency) -> Option<i64> {
+        if from == to {
+            return Some(RATE_SCALE);
+        }
+        self.pairs
+            .binary_search_by_key(&(from, to), |(k, _)| *k)
+            .ok()
+            .map(|i| self.pairs[i].1)
+    }
+
+    /// Convert an amount, or `None` when the pair was not quoted.
+    #[must_use]
+    pub fn convert(&self, amount: Cash, from: Currency, to: Currency) -> Option<Cash> {
+        let rate = self.rate(from, to)?;
+        // i128 because an amount near the top of `i64` times a rate at
+        // this scale overflows, and a wrapped total is a solvent account
+        // reported as insolvent or the reverse.
+        let v = i128::from(amount.0)
+            .checked_mul(i128::from(rate))?
+            .checked_div(i128::from(RATE_SCALE))?;
+        i64::try_from(v).ok().map(Cash)
+    }
+}
+
+impl Balances {
+    /// Everything this account holds, totalled in one currency.
+    ///
+    /// `None` when any held currency has no rate to `into`. Not a
+    /// partial sum: a total missing one of its parts is a smaller number
+    /// that looks like a complete one, and an account reported as
+    /// holding less than it does is the direction that liquidates
+    /// somebody.
+    ///
+    /// A currency holding exactly zero is skipped rather than requiring
+    /// a rate — it contributes nothing whichever rate it has, and
+    /// demanding one would make a closed-out position block a total.
+    #[must_use]
+    pub fn total_in(&self, into: Currency, rates: &Rates) -> Option<Cash> {
+        let mut sum = Cash::ZERO;
+        for (currency, amount) in self.iter() {
+            if amount == Cash::ZERO {
+                continue;
+            }
+            sum = sum.add(rates.convert(amount, currency, into)?);
+        }
+        Some(sum)
+    }
+
+    /// Which held currencies `rates` cannot convert into `into`.
+    ///
+    /// What a caller shows a reader when [`total_in`](Self::total_in)
+    /// returns `None`: "no total" is a fact and "no rate for BTC" is the
+    /// one that can be acted on.
+    #[must_use]
+    pub fn unconvertible(&self, into: Currency, rates: &Rates) -> Vec<Currency> {
+        self.iter()
+            .filter(|(c, amount)| *amount != Cash::ZERO && rates.rate(*c, into).is_none())
+            .map(|(c, _)| c)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +439,103 @@ mod tests {
         assert_eq!(b.get(c("USD")), Cash::ZERO);
         assert_eq!(b.len(), 1, "the account has touched USD");
         assert!(!b.is_empty());
+    }
+
+    // ---- Rates ----
+
+    fn rates_at(t: i64) -> Rates {
+        Rates::at(t)
+    }
+
+    /// A currency to itself is the identity, not a market.
+    #[test]
+    fn a_currency_converts_to_itself_without_a_quote() {
+        let r = rates_at(0);
+        assert_eq!(r.rate(c("USD"), c("USD")), Some(RATE_SCALE));
+        assert_eq!(
+            r.convert(Cash(1_234), c("USD"), c("USD")),
+            Some(Cash(1_234))
+        );
+    }
+
+    /// A quote in one direction is not a quote in the other.
+    ///
+    /// One divided by a rounded rate is not the rate the other side of
+    /// that market would have paid, and inventing it answers a question
+    /// nobody measured.
+    #[test]
+    fn a_quote_does_not_imply_its_inverse() {
+        let mut r = rates_at(0);
+        r.quote(c("BTC"), c("USDT"), 60_000 * RATE_SCALE);
+        assert!(r.rate(c("BTC"), c("USDT")).is_some());
+        assert!(r.rate(c("USDT"), c("BTC")).is_none());
+    }
+
+    /// No triangulation: BTC to USD is not BTC to USDT to USD.
+    #[test]
+    fn a_missing_pair_is_missing_even_when_a_path_exists() {
+        let mut r = rates_at(0);
+        r.quote(c("BTC"), c("USDT"), 60_000 * RATE_SCALE);
+        r.quote(c("USDT"), c("USD"), RATE_SCALE);
+        assert!(r.rate(c("BTC"), c("USD")).is_none());
+    }
+
+    /// A total is all of it or none of it.
+    ///
+    /// A sum missing one of its parts is a smaller number that looks
+    /// complete, and an account reported as holding less than it does is
+    /// the direction that liquidates somebody.
+    #[test]
+    fn a_total_missing_a_rate_is_no_total() {
+        let mut b = Balances::of(c("USDT"), Cash::from_units(1_000));
+        b.add(c("BTC"), Cash::from_units(2));
+
+        let mut r = rates_at(0);
+        assert!(b.total_in(c("USDT"), &r).is_none(), "BTC has no rate");
+        assert_eq!(b.unconvertible(c("USDT"), &r), vec![c("BTC")]);
+
+        r.quote(c("BTC"), c("USDT"), 60_000 * RATE_SCALE);
+        assert_eq!(
+            b.total_in(c("USDT"), &r),
+            Some(Cash::from_units(1_000 + 120_000))
+        );
+        assert!(b.unconvertible(c("USDT"), &r).is_empty());
+    }
+
+    /// A closed-out currency does not block a total.
+    ///
+    /// It contributes nothing at any rate, so requiring one would let a
+    /// position that ended flat stop the account being valued.
+    #[test]
+    fn a_zero_balance_needs_no_rate() {
+        let mut b = Balances::of(c("USDT"), Cash::from_units(10));
+        b.add(c("XYZ"), Cash::ZERO);
+        let r = rates_at(0);
+        assert_eq!(b.total_in(c("USDT"), &r), Some(Cash::from_units(10)));
+        assert!(b.unconvertible(c("USDT"), &r).is_empty());
+    }
+
+    /// A rate carries the instant it was read.
+    ///
+    /// The one input here that is true only for a moment; a total
+    /// computed from it inherits that instant rather than the one it was
+    /// computed at.
+    #[test]
+    fn a_rate_table_states_when_it_was_read() {
+        assert_eq!(
+            rates_at(1_786_000_000_000_000_000).instant(),
+            1_786_000_000_000_000_000
+        );
+    }
+
+    /// A conversion large enough to overflow i64 does not wrap.
+    ///
+    /// A wrapped total is a solvent account reported as insolvent, or
+    /// the reverse.
+    #[test]
+    fn a_conversion_that_would_overflow_returns_nothing() {
+        let mut r = rates_at(0);
+        r.quote(c("A"), c("B"), 1_000 * RATE_SCALE);
+        assert_eq!(r.convert(Cash(i64::MAX), c("A"), c("B")), None);
     }
 }

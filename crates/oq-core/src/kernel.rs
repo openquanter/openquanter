@@ -446,6 +446,35 @@ impl State {
         self.balances.add(self.settlement, amount);
     }
 
+    /// Equity totalled across every currency the account holds.
+    ///
+    /// [`State::equity`] answers in the settlement currency and counts
+    /// only what is held in it, which is the number margin and
+    /// liquidation are decided by — those happen in one currency
+    /// because a venue settles in one. This is the other question: what
+    /// is the account worth, given rates and the instant they were true
+    /// at.
+    ///
+    /// `None` when a held currency has no rate. Not a partial total: a
+    /// sum missing one of its parts is a smaller number that looks
+    /// complete, and an account reported as holding less than it does
+    /// is the direction that liquidates somebody.
+    ///
+    /// Unrealized profit is added in the settlement currency, because
+    /// that is where a position's mark-to-market lands.
+    #[must_use]
+    pub fn equity_across(&self, into: Currency, rates: &oq_types::Rates) -> Option<Cash> {
+        let held = self.balances.total_in(into, rates)?;
+        let unrealized = rates.convert(self.unrealized(), self.settlement, into)?;
+        Some(held.add(unrealized))
+    }
+
+    /// Which held currencies have no rate into `into`.
+    #[must_use]
+    pub fn unpriced(&self, into: Currency, rates: &oq_types::Rates) -> Vec<Currency> {
+        self.balances.unconvertible(into, rates)
+    }
+
     /// Credit a currency this account does not price itself in.
     ///
     /// Held, reported, and **not** counted toward equity. This is the
@@ -794,6 +823,7 @@ impl Kernel {
                 }
             }
             Event::Submit {
+                instrument,
                 id,
                 side,
                 price,
@@ -810,6 +840,15 @@ impl Kernel {
                     self.outputs.push(Output::Rejected {
                         id,
                         reason: RejectReason::DuplicateId,
+                    });
+                } else if self.route(instrument).is_none() {
+                    // An order for an instrument this account does not
+                    // hold, or none named while it holds several. Same
+                    // rule as an observation: placing it on whichever
+                    // holding is nearest is not a near miss.
+                    self.outputs.push(Output::Rejected {
+                        id,
+                        reason: RejectReason::UnroutableObservation,
                     });
                 } else if self.state.balance().0 <= 0 {
                     // A liquidated account does not get to keep trading.
@@ -1212,6 +1251,7 @@ mod tests {
 
     fn buy(id: u64, price: i64, qty: i64, n: i64) -> Event {
         Event::Submit {
+            instrument: None,
             id: OrderId::new(id),
             side: Side::Buy,
             price: Some(PriceTicks(price)),
@@ -1315,6 +1355,7 @@ mod tests {
         k.apply(&tick(2, 1_000_000));
         // Sell back higher.
         k.apply(&Event::Submit {
+            instrument: None,
             id: OrderId::new(2),
             side: Side::Sell,
             price: Some(PriceTicks(1_010_000)),
@@ -1461,6 +1502,7 @@ mod tests {
 
         // Sell 30: closes 10 long, opens 20 short.
         k.apply(&Event::Submit {
+            instrument: None,
             id: OrderId::new(2),
             side: Side::Sell,
             price: Some(PriceTicks(1_010_000)),
@@ -1812,6 +1854,65 @@ mod hedge_tests {
     fn an_instrument_never_opened_has_no_holding() {
         let s = state();
         assert!(s.holding_of(InstrumentId::new(99)).is_none());
+    }
+
+    /// **The other half of multi-currency: a total, once rates exist.**
+    ///
+    /// Holding several currencies was the half that needs no rate.
+    /// Totalling them is the half that does, and it now has one — with
+    /// the instant it was true at, because a rate is the one input here
+    /// that expires.
+    #[test]
+    fn an_account_totals_across_currencies_when_rates_are_given() {
+        let mut s = state();
+        let opening = s.balance();
+        let btc = oq_types::Currency::new("BTC").expect("valid");
+        let usdt = oq_types::Currency::usdt();
+        s.credit_in(btc, Cash::from_units(2));
+
+        let mut rates = oq_types::Rates::at(1_786_000_000_000_000_000);
+        assert!(
+            s.equity_across(usdt, &rates).is_none(),
+            "no rate for BTC, so no total"
+        );
+        assert_eq!(s.unpriced(usdt, &rates), vec![btc]);
+
+        rates.quote(btc, usdt, 60_000 * oq_types::RATE_SCALE);
+        let total = s.equity_across(usdt, &rates).expect("now priced");
+        assert_eq!(
+            total,
+            opening.add(Cash::from_units(120_000)).add(s.unrealized()),
+            "the settlement balance plus the converted one"
+        );
+        assert!(s.unpriced(usdt, &rates).is_empty());
+    }
+
+    /// A total is still not what margin is decided by.
+    ///
+    /// A venue settles in one currency and liquidates against what is
+    /// held in it. An account rich in something it cannot post is still
+    /// insolvent, and `equity` — the number margin uses — says so.
+    #[test]
+    fn a_cross_currency_total_does_not_move_the_margin_number() {
+        let mut s = state();
+        let before = s.equity();
+        let btc = oq_types::Currency::new("BTC").expect("valid");
+        s.credit_in(btc, Cash::from_units(1_000));
+
+        let mut rates = oq_types::Rates::at(0);
+        rates.quote(
+            btc,
+            oq_types::Currency::usdt(),
+            60_000 * oq_types::RATE_SCALE,
+        );
+
+        assert_eq!(s.equity(), before, "margin still sees the settlement leg");
+        assert!(
+            s.equity_across(oq_types::Currency::usdt(), &rates)
+                .expect("priced")
+                > before,
+            "while the account is worth more than it can post"
+        );
     }
 
     /// The settlement currency is the one the account is solvent in.    /// The settlement currency is the one the account is solvent in.
