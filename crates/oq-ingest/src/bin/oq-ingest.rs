@@ -13,12 +13,12 @@
 //! guessable and getting it wrong does not fail loudly — it silently
 //! rescales every price — so this refuses to run rather than assume.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use oq_ingest::batches::{hours, load_hour};
 use oq_ingest::{Aggregator, Report, Source, fold_into};
 use oq_l2feed::depth::Scales;
-use oq_l2feed::frame::decode_all;
 
 const USAGE: &str = "\
 oq-ingest — convert a captured archive into a tick file
@@ -116,57 +116,26 @@ fn main() -> ExitCode {
     let mut ticks = Vec::new();
     let mut batches = 0_u32;
 
-    // Hours are named by the file stem under an hourly rotation, and a
-    // daily rotation has a single file — both fall out of grouping the
-    // paths by name.
-    let mut hours: Vec<String> = Vec::new();
-    for stream in ["depth", "trade"] {
-        for path in files_for(&archive, stream, &day) {
-            if let Some(stem) = oq_l2feed::archive::stem(&path)
-                && !hours.contains(&stem)
-            {
-                hours.push(stem);
-            }
-        }
-    }
-    hours.sort();
+    let hours = hours(&archive, &day);
     if hours.is_empty() {
         eprintln!("oq-ingest: nothing to convert under {}", archive.display());
         return ExitCode::FAILURE;
     }
 
     for hour in &hours {
-        let mut loaded = Vec::new();
-        for stream in ["depth", "trade"] {
-            let mut bytes = Vec::new();
-            for path in files_for(&archive, stream, &day) {
-                if oq_l2feed::archive::stem(&path).as_deref() != Some(hour.as_str()) {
-                    continue;
-                }
-                match oq_l2feed::archive::read(&path) {
-                    Ok(b) => bytes.extend_from_slice(&b),
-                    Err(e) => {
-                        eprintln!("oq-ingest: cannot read {}: {e}", path.display());
-                        return ExitCode::FAILURE;
-                    }
-                }
+        let loaded = match load_hour(&archive, &day, hour) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("oq-ingest: {e}");
+                return ExitCode::FAILURE;
             }
-            if bytes.is_empty() {
-                continue;
-            }
-            match decode_all(&bytes) {
-                Ok((records, torn)) => {
-                    if torn > 0 {
-                        println!(
-                            "{stream:<7} {hour}: {torn} torn bytes at the end, decoding the rest"
-                        );
-                    }
-                    loaded.push((stream, records));
-                }
-                Err(e) => {
-                    eprintln!("oq-ingest: {stream} {hour} is damaged: {e}");
-                    return ExitCode::FAILURE;
-                }
+        };
+        for batch in &loaded {
+            if batch.torn > 0 {
+                println!(
+                    "{:<7} {hour}: {} torn bytes at the end, decoding the rest",
+                    batch.stream, batch.torn
+                );
             }
         }
         if loaded.is_empty() {
@@ -174,7 +143,10 @@ fn main() -> ExitCode {
         }
         let sources: Vec<Source<'_>> = loaded
             .iter()
-            .map(|(stream, records)| Source { records, stream })
+            .map(|b| Source {
+                records: &b.records,
+                stream: b.stream,
+            })
             .collect();
         ticks.extend(fold_into(
             venue.as_ref(),
@@ -244,35 +216,6 @@ fn main() -> ExitCode {
 
 /// Every capture file for one stream and day, under either rotation.
 ///
-/// Daily rotation writes `<stream>/<day>.oqcap`; hourly writes
-/// `<stream>/<day>/HH.oqcap`. Both are read, so a day that was captured
-/// across a rotation change still converts as one day. Either may carry
-/// a `.zst` suffix -- everything that has been through the archive step
-/// does -- so the test is `archive::is_capture`, not an extension.
-fn files_for(archive: &Path, stream: &str, day: &str) -> Vec<PathBuf> {
-    let dir = archive.join(stream);
-    let mut out = Vec::new();
-
-    for daily in [
-        dir.join(format!("{day}.oqcap")),
-        dir.join(format!("{day}.oqcap.zst")),
-    ] {
-        if daily.is_file() {
-            out.push(daily);
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(dir.join(day)) {
-        let mut hourly: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| oq_l2feed::archive::is_capture(p))
-            .collect();
-        hourly.sort();
-        out.extend(hourly);
-    }
-    out
-}
-
 /// FNV-1a, for a stable instrument id that does not depend on hash seeds.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;

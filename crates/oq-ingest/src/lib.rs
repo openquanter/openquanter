@@ -33,7 +33,7 @@
 pub mod agg;
 pub use agg::{Aggregator, Counts};
 
-use oq_engine::Tick;
+use oq_engine::{Observation, Tick};
 use oq_l2feed::depth::Scales;
 use oq_l2feed::frame::{Kind, Record};
 use oq_l2feed::manifest::is_gap;
@@ -174,7 +174,39 @@ pub fn fold_into(
     report: &mut Report,
 ) -> Vec<Tick> {
     let mut events: Vec<Event> = Vec::new();
+    collect(venue, sources, scales, report, &mut events);
 
+    // Two streams recorded by two sockets arrive interleaved only by
+    // accident. Ordering by exchange time puts them back into the order
+    // the venue produced them, which is the order the book and the
+    // extremes both assume.
+    events.sort_by_key(|e| (e.at, e.local));
+
+    let mut ticks = Vec::new();
+    for event in &events {
+        let closed = match &event.kind {
+            EventKind::Gap => agg.on_gap(event.at, event.local),
+            EventKind::Depth(update) => agg.on_depth(event.at, event.local, update),
+            EventKind::Trade(t) => agg.on_trade(event.at, event.local, t),
+        };
+        ticks.extend(closed);
+    }
+    ticks
+}
+
+/// Read a batch of sources into time-stamped events.
+///
+/// Shared by both folds so they cannot disagree about what a record
+/// means — which record is a gap, which payload is a trade, and which
+/// of the ones that are not get counted as unparseable rather than as
+/// the venue saying nothing happened.
+fn collect(
+    venue: &dyn Venue,
+    sources: &[Source<'_>],
+    scales: Scales,
+    report: &mut Report,
+    events: &mut Vec<Event>,
+) {
     for source in sources {
         for record in source.records {
             if record.kind == Kind::Control {
@@ -217,23 +249,71 @@ pub fn fold_into(
             }
         }
     }
+}
 
-    // Two streams recorded by two sockets arrive interleaved only by
-    // accident. Ordering by exchange time puts them back into the order
-    // the venue produced them, which is the order the book and the
-    // extremes both assume.
+/// Fold one batch into ticks **and** the depth behind them.
+///
+/// [`fold_into`] produces the projection a strategy consumes. This
+/// produces that plus the updates it was projected from, interleaved in
+/// the order the venue produced them, which is what a matcher above L1
+/// needs — the whole reason the tier exists is the book the tick threw
+/// away.
+///
+/// # The order is the point
+///
+/// Each arrival is placed where it happened. An update inside an open
+/// window reaches the book before that window's tick, because the book
+/// moved before the window closed. An update that *closes* a window --
+/// the first event of the next one -- comes after that tick, because it
+/// belongs to the window after the one being summarised.
+///
+/// Both follow from the same rule and the second is the one that is
+/// easy to get backwards: emitting every update before every tick
+/// matches orders against a book from the next window, and a backtest
+/// is better for it in exactly the way that makes it wrong.
+///
+/// The two are the same events read twice — the aggregator rebuilds a
+/// book to find the best bid and ask, and a matcher rebuilds one to find
+/// the queue. That is deliberate duplication rather than shared state:
+/// the tick's quote is a projection anyone can consume, and the
+/// matcher's book belongs to the run being matched.
+pub fn fold_into_observations(
+    venue: &dyn Venue,
+    sources: &[Source<'_>],
+    scales: Scales,
+    agg: &mut Aggregator,
+    report: &mut Report,
+) -> Vec<Observation> {
+    let mut events: Vec<Event> = Vec::new();
+    collect(venue, sources, scales, report, &mut events);
     events.sort_by_key(|e| (e.at, e.local));
 
-    let mut ticks = Vec::new();
+    let mut out = Vec::with_capacity(events.len());
     for event in &events {
+        // Any window this event closed goes first. That window is the
+        // summary of the time *before* this event, and the matcher acts
+        // on it at its close -- so an update arriving after it must not
+        // reach the book beforehand. Emitting the update first was the
+        // first version of this loop, and it means an order matched
+        // against a book from the next window: the direction that
+        // flatters a backtest.
         let closed = match &event.kind {
             EventKind::Gap => agg.on_gap(event.at, event.local),
             EventKind::Depth(update) => agg.on_depth(event.at, event.local, update),
             EventKind::Trade(t) => agg.on_trade(event.at, event.local, t),
         };
-        ticks.extend(closed);
+        out.extend(closed.into_iter().map(Observation::Tick));
+
+        // Then this event's own depth. An update falling inside the
+        // open window closes nothing, so it still reaches the book
+        // before that window's tick -- which is also correct, and is
+        // the same rule seen from the other side: the book moves when
+        // it moved.
+        if let EventKind::Depth(update) = &event.kind {
+            out.push(Observation::Depth(update.clone()));
+        }
     }
-    ticks
+    out
 }
 
 struct Event {
@@ -247,6 +327,8 @@ enum EventKind {
     Trade(oq_l2feed::venue::Trade),
     Gap,
 }
+
+pub mod batches;
 
 #[cfg(test)]
 mod tests;
