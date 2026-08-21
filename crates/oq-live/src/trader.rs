@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use oq_gateway::Execution;
 use oq_risk::ProposedOrder;
-use oq_strategy::{Context, Intent, Strategy};
+use oq_strategy::{Context, Ending, Intent, Strategy};
 use oq_types::{Nanos, Offset, OrderId, PriceTicks};
 
 use crate::session::{Session, Submission};
@@ -185,6 +185,40 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
     /// The venue says an order has ended. Forget its association.
     pub fn forget(&mut self, client_id: &str) {
         self.live.retain(|_, v| v != client_id);
+    }
+
+    /// The venue says an order has ended: tell the strategy, then forget
+    /// the association.
+    ///
+    /// In that order, and it has to be that order — the translation from
+    /// the venue's client id to the strategy's own id lives in the map
+    /// this call clears, so a strategy told after the forgetting would be
+    /// told about `OrderId(0)`.
+    ///
+    /// An order this process did not place still gets forgotten and the
+    /// strategy is not told, because it was never its order to end.
+    pub fn on_ended(
+        &mut self,
+        client_id: &str,
+        ending: Ending,
+        ctx: &Context,
+        now: Nanos,
+    ) -> Vec<Outcome> {
+        let Some(id) = self.local_id(client_id) else {
+            self.forget(client_id);
+            return Vec::new();
+        };
+        self.intents.clear();
+        self.strategy.on_ended(id, ending, &mut self.intents);
+        let intents = core::mem::take(&mut self.intents);
+        let out: Vec<Outcome> = intents
+            .iter()
+            .map(|i| self.act(i, ctx.tick.last, now))
+            .collect();
+        self.intents = intents;
+        self.report_placements(&out);
+        self.forget(client_id);
+        out
     }
 
     /// The strategy's own id for an order the venue is talking about.

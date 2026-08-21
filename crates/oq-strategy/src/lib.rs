@@ -67,6 +67,21 @@ pub enum Intent {
     CancelAll,
 }
 
+/// How an order ended.
+///
+/// Two outcomes, because an order that ends has either delivered its
+/// size or given it up, and no third thing. A rejection never reaches
+/// here: it is answered through [`Strategy::on_placed`], which is the
+/// callback for whether an order ever existed at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// Every lot the order asked for arrived.
+    Filled,
+    /// The order left the book with size unfilled — cancelled by this
+    /// process, or expired at the venue.
+    Cancelled,
+}
+
 /// What the strategy is told before it decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
@@ -198,6 +213,38 @@ pub trait Strategy {
     /// both — which is the point of having it in the trait rather than in
     /// the live host.
     fn on_placed(&mut self, _id: OrderId, _accepted: bool) {}
+
+    /// The venue will send nothing further about this order.
+    ///
+    /// The end of an order's life, as distinct from a fill: a limit
+    /// order fills in pieces, and every piece but the last leaves the
+    /// order still resting and still the venue's to report on. A
+    /// strategy that forgets an order when it first fills stops
+    /// recognising the fills that follow, and the position those fills
+    /// build is held by nobody.
+    ///
+    /// Not a hypothetical. A strategy cleared its entry order on the
+    /// first partial fill; the remainder of that entry then arrived
+    /// carrying an id that matched nothing, was dropped, and each cycle
+    /// left the difference behind. Over eight hours the untracked
+    /// remainder grew to three and a half times the size the strategy
+    /// believed it held, and its take-profit covered a fifth of the
+    /// position it was supposed to close.
+    ///
+    /// So this is where an order's identity is released, and
+    /// [`Strategy::on_fill`] is where quantity is accumulated. The
+    /// reference implementation draws the same line: it keeps an order
+    /// in its lists while `is_active()` holds and removes it in the
+    /// order callback, never in the trade callback.
+    ///
+    /// `ending` separates the two ways an order can end, because they
+    /// mean opposite things: [`Ending::Filled`] says the size arrived,
+    /// [`Ending::Cancelled`] says it never will. A ladder placed on the
+    /// first is placed on a position that exists.
+    ///
+    /// Intents are allowed here — an order ending is often exactly when
+    /// the next one should be placed.
+    fn on_ended(&mut self, _id: OrderId, _ending: Ending, _out: &mut Vec<Intent>) {}
 
     /// One historical observation, replayed before the run begins.
     ///

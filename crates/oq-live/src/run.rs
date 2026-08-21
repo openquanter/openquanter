@@ -26,7 +26,7 @@ use oq_ingest::Aggregator;
 use oq_l2feed::session::{install_signal_handlers, now_ns, shutdown_requested};
 use oq_l2feed::venue::Deployment;
 use oq_risk::{Limits, RiskGate};
-use oq_strategy::{Context, Strategy};
+use oq_strategy::{Context, Ending, Strategy};
 use oq_types::{Cash, Instrument, Nanos, OrderId, PriceTicks, QtyLots, Side};
 
 use crate::{
@@ -818,8 +818,37 @@ where
                 } else if matches!(u.status.as_str(), "CANCELED" | "EXPIRED") {
                     books.on_closed();
                 }
-                if matches!(u.status.as_str(), "FILLED" | "CANCELED" | "EXPIRED") {
-                    trader.forget(&u.client_id);
+                // The end of the order, which is not the same event as
+                // its last fill and must not be inferred from one. A
+                // limit order fills in pieces; only the venue knows
+                // which piece was the last, and this is where it says
+                // so.
+                //
+                // The strategy is told before the association is
+                // dropped — `on_ended` does both, in that order — so a
+                // strategy can release the order's identity at the same
+                // moment the host does, rather than guessing at the
+                // first fill and being wrong for every one after it.
+                if let Some(ending) = ending_of(&u.status) {
+                    match last_tick {
+                        Some(t) => {
+                            let ctx = books.context(t);
+                            for outcome in trader.on_ended(&u.client_id, ending, &ctx, now) {
+                                match &outcome {
+                                    Outcome::Sent { .. } => sent += 1,
+                                    Outcome::Cancelled { .. } => cancelled += 1,
+                                    Outcome::Refused { .. } => refused += 1,
+                                    Outcome::Unresolved { .. } => unresolved += 1,
+                                    Outcome::UnknownOrder(_) => {}
+                                }
+                                report(&outcome);
+                            }
+                        }
+                        // No tick yet means no context to decide in, and
+                        // an order that ended still has to be released
+                        // or its id is held for the life of the process.
+                        None => trader.forget(&u.client_id),
+                    }
                 }
             }
             StreamOutcome::Event(event) => {
@@ -1364,6 +1393,62 @@ fn adopted_legs(
             (symbol.to_string(), name.to_string(), signed, entry.0)
         })
         .collect()
+}
+
+/// The end of an order, as the venue names it.
+///
+/// `PARTIALLY_FILLED` is the one that matters and the one that is
+/// absent: it is a report about an order that is still resting, still
+/// the venue's to fill, and still the strategy's to recognise. Reading
+/// it as an ending is how a strategy comes to stop recognising the rest
+/// of its own order.
+///
+/// `NEW` is likewise not an ending, and `REJECTED` never reaches here —
+/// an order that was refused is answered through `on_placed`, which is
+/// the callback for whether it ever existed.
+fn ending_of(status: &str) -> Option<Ending> {
+    match status {
+        "FILLED" => Some(Ending::Filled),
+        "CANCELED" | "EXPIRED" => Some(Ending::Cancelled),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod endings {
+    use super::{Ending, ending_of};
+
+    /// The status that is not an ending.
+    ///
+    /// A strategy released its entry order on the first partial fill.
+    /// The rest of that entry then arrived carrying an id that matched
+    /// nothing it held, was dropped, and the position it built was
+    /// managed by nobody. Eight hours later the account held three and a
+    /// half times what the strategy believed, and the take-profit
+    /// resting against it covered a fifth of it.
+    #[test]
+    fn a_partial_fill_does_not_end_an_order() {
+        assert_eq!(ending_of("PARTIALLY_FILLED"), None);
+    }
+
+    #[test]
+    fn an_acknowledgement_does_not_end_an_order() {
+        assert_eq!(ending_of("NEW"), None);
+    }
+
+    /// A refusal is answered elsewhere, and answering it twice would
+    /// tell a strategy an order it never had has now ended.
+    #[test]
+    fn a_refusal_is_not_an_ending() {
+        assert_eq!(ending_of("REJECTED"), None);
+    }
+
+    #[test]
+    fn the_size_arrived_or_it_never_will() {
+        assert_eq!(ending_of("FILLED"), Some(Ending::Filled));
+        assert_eq!(ending_of("CANCELED"), Some(Ending::Cancelled));
+        assert_eq!(ending_of("EXPIRED"), Some(Ending::Cancelled));
+    }
 }
 
 #[cfg(test)]
