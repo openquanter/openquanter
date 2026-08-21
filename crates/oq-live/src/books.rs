@@ -190,6 +190,7 @@ impl Books {
     pub fn on_submit(&mut self, id: OrderId, side: Side, qty: QtyLots, offset: Offset, at: Nanos) {
         self.working += 1;
         self.kernel.apply(&Event::Submit {
+            instrument: None,
             id,
             side,
             // A live order's resting price is the venue's business; what

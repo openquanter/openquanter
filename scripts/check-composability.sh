@@ -34,6 +34,10 @@ BUDGETS=(
   "oq-journal:0"
   "oq-core:0"
   "oq-engine:0"
+  # Environments over the core. Zero, like everything it wraps: an RL
+  # loop that pulled in a tensor library would put one in every backtest
+  # that links this workspace.
+  "oq-env:0"
   "oq-margin:0"
   "oq-backtest:0"
   "oq-data:0"
