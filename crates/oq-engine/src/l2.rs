@@ -239,6 +239,52 @@ impl L2Engine {
             .map_or(0, |l| l.qty)
     }
 
+    /// Withdraw every order, in flight and resting alike.
+    pub fn cancel_all(&mut self) {
+        self.inner.cancel_all();
+    }
+
+    /// Withdraw one order, wherever it currently is.
+    pub fn cancel(&mut self, id: oq_types::OrderId) -> bool {
+        self.inner.cancel(id)
+    }
+
+    /// The instrument this engine matches.
+    #[must_use]
+    pub const fn instrument(&self) -> oq_types::InstrumentId {
+        self.inner.instrument()
+    }
+
+    /// The last traded price seen.
+    #[must_use]
+    pub const fn last_price(&self) -> Option<PriceTicks> {
+        self.inner.last_price()
+    }
+
+    /// Orders resting in the book. As [`L1Engine::book`], not every
+    /// order this engine holds.
+    #[must_use]
+    pub const fn book(&self) -> &crate::book::Book {
+        self.inner.book()
+    }
+
+    /// Snapshot the identifier watermark, for recovery.
+    #[must_use]
+    pub const fn id_watermark(&self) -> (u64, u64) {
+        self.inner.id_watermark()
+    }
+
+    /// Restore the identifier watermark after recovery.
+    pub fn restore_ids(&mut self, watermark: (u64, u64)) {
+        self.inner.restore_ids(watermark);
+    }
+
+    /// Orders that exist but are not yet in the book.
+    #[must_use]
+    pub fn shadowed(&self) -> usize {
+        self.inner.shadowed()
+    }
+
     /// Whether the book has been placed in sequence.
     ///
     /// `false` means every queue measurement so far is a lower bound:
@@ -737,6 +783,145 @@ mod tests {
             e.unswept(),
             0,
             "nor counted as one the book could not price"
+        );
+    }
+
+    // ---- The seam: a tier that measures nothing answers as L0 ----
+
+    /// L2 with no book and a transparent policy reproduces L0 exactly.
+    ///
+    /// This is what makes the tier safe to put behind a switch. A run
+    /// that has not been given depth must match as the tier below it,
+    /// or choosing L2 would change results for reasons having nothing
+    /// to do with the depth it was chosen for -- and the frozen anchor
+    /// would be frozen in name only.
+    ///
+    /// An empty book measures a queue of **zero**, which is the reading
+    /// and not an absence. That it agrees with a transparent policy's
+    /// zero is why this holds.
+    #[test]
+    fn an_unfed_l2_reproduces_l0_exactly() {
+        let ticks = [observation(1_000), observation(2_000), observation(3_000)];
+
+        let mut l0 = crate::L0Engine::new(oq_types::InstrumentId::new(1));
+        l0.submit_limit_with(
+            OrderId(1),
+            Side::Buy,
+            PriceTicks(101),
+            QtyLots(5),
+            Stamp::new(0, 0),
+            oq_types::Offset::Open,
+        );
+        let mut from_l0: Vec<oq_types::Fill> = Vec::new();
+        for t in &ticks {
+            from_l0.extend(l0.on_tick(t).iter().map(|f| f.fill));
+        }
+
+        let mut l2 = L2Engine::new(L1Engine::new(
+            oq_types::InstrumentId::new(1),
+            Policy::TRANSPARENT,
+        ));
+        l2.submit(
+            crate::limit_order(
+                OrderId(1),
+                Side::Buy,
+                PriceTicks(101),
+                QtyLots(5),
+                Stamp::new(0, 0),
+                oq_types::Offset::Open,
+            ),
+            Nanos(0),
+        );
+        let mut from_l2: Vec<oq_types::Fill> = Vec::new();
+        for t in &ticks {
+            from_l2.extend(l2.on_tick(t).iter().map(|f| f.fill));
+        }
+
+        assert!(!from_l0.is_empty(), "the fixture must actually fill");
+        assert_eq!(from_l2, from_l0, "an unfed L2 must not change L0's answer");
+        assert_eq!(l2.swept(), 0, "and must not claim to have measured one");
+    }
+
+    /// An order built by the shared constructor still goes through this
+    /// tier's `submit`.
+    ///
+    /// The constructors are free functions precisely so no tier grows
+    /// its own -- but a caller holding one of them could hand the result
+    /// to whichever engine is nearest. Given to L0 it rests instantly;
+    /// given here it serves entry latency and joins a measured queue.
+    /// The run's label is only worth something if the second happens.
+    #[test]
+    fn an_order_built_outside_still_enters_through_this_tier() {
+        let mut e = L2Engine::new(L1Engine::new(
+            oq_types::InstrumentId::new(1),
+            Policy {
+                queue: QueueAhead::None,
+                latency: Latency {
+                    entry: Delay::Fixed(Nanos(10_000)),
+                    response: Delay::Fixed(Nanos(0)),
+                },
+                impact: Impact { coefficient: 0 },
+            },
+        ));
+        e.install_snapshot(100, &[at(99, 640)], &[]);
+        e.submit(
+            crate::limit_order(
+                OrderId(1),
+                Side::Buy,
+                PriceTicks(99),
+                QtyLots(5),
+                Stamp::new(0, 0),
+                oq_types::Offset::Open,
+            ),
+            Nanos(0),
+        );
+
+        // Still serving entry latency, so not in the book: had this gone
+        // straight to L0 it would already be resting there.
+        assert_eq!(e.shadowed(), 1);
+        assert_eq!(e.book().iter().count(), 0);
+
+        let tick = Tick {
+            stamp: Stamp::new(20_000, 20_000),
+            ..observation(0)
+        };
+        let _ = e.on_tick(&tick);
+        assert_eq!(
+            e.inner().queued(),
+            1,
+            "it arrived carrying the 640 the book displayed, not the policy's zero"
+        );
+    }
+
+    /// Withdrawing everything must reach the orders that are still in
+    /// flight, not only the ones already resting.
+    #[test]
+    fn cancel_all_reaches_orders_that_have_not_landed() {
+        let mut e = L2Engine::new(L1Engine::new(
+            oq_types::InstrumentId::new(1),
+            Policy {
+                queue: QueueAhead::None,
+                latency: Latency {
+                    entry: Delay::Fixed(Nanos(10_000)),
+                    response: Delay::Fixed(Nanos(0)),
+                },
+                impact: Impact { coefficient: 0 },
+            },
+        ));
+        e.submit(limit(1, Side::Buy, 99, 5), Nanos(0));
+        assert_eq!(e.shadowed(), 1);
+
+        e.cancel_all();
+        assert_eq!(e.shadowed(), 0, "an in-flight order is still an order");
+
+        let tick = Tick {
+            stamp: Stamp::new(20_000, 20_000),
+            ..observation(0)
+        };
+        let fills = e.on_tick(&tick).to_vec();
+        assert!(
+            fills.is_empty(),
+            "a cancelled order must not arrive and fill afterwards"
         );
     }
 
