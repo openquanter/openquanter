@@ -214,6 +214,22 @@ pub trait Strategy {
     /// the live host.
     fn on_placed(&mut self, _id: OrderId, _accepted: bool) {}
 
+    /// A withdrawal the venue did not accept.
+    ///
+    /// The order named here is **still resting**. A strategy that treats
+    /// asking as having happened is in the same position as one that
+    /// treats submitting as resting, and the consequence is worse:
+    /// re-pricing a take-profit means cancelling one and placing
+    /// another, so a failed cancel leaves two live orders closing the
+    /// same position, and the second fill opens the opposite side.
+    ///
+    /// No intents, deliberately. This arrives from inside the handling
+    /// of the intents the strategy just produced, and letting it produce
+    /// more would nest that handling inside itself. Record it and act on
+    /// the next observation — which is what the reference does, by
+    /// putting the failure on a queue its timer drains.
+    fn on_cancel_failed(&mut self, _id: OrderId, _why: &str) {}
+
     /// The venue will send nothing further about this order.
     ///
     /// The end of an order's life, as distinct from a fill: a limit

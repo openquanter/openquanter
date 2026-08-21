@@ -47,7 +47,14 @@ pub enum Outcome {
     /// placement must not be reported as a refusal — reported every one
     /// of them as exactly that. The comment described a variant that did
     /// not exist, so the guard it described could never fire.
-    Unresolved { local: OrderId, why: String },
+    Unresolved {
+        local: OrderId,
+        /// The id the venue was given, so the question can be asked
+        /// again. Without it, "answerable later" is not true of this
+        /// value.
+        client_id: String,
+        why: String,
+    },
     /// A cancel naming an order this process has no client id for.
     ///
     /// Reported rather than ignored: it means the strategy and this
@@ -57,6 +64,19 @@ pub enum Outcome {
     UnknownOrder(OrderId),
     /// A cancel that was sent.
     Cancelled { local: OrderId, client_id: String },
+    /// A cancel the venue did not accept.
+    ///
+    /// The order is still resting. Reported as its own outcome because
+    /// for a while it was reported as [`Outcome::Cancelled`] — the
+    /// result of `cancel` was discarded and every withdrawal was
+    /// announced as having happened, so a failed one left this process
+    /// and the strategy both believing an order was gone while it went
+    /// on filling.
+    CancelFailed {
+        local: OrderId,
+        client_id: String,
+        why: String,
+    },
 }
 
 /// A strategy, a session, and the map between them.
@@ -66,6 +86,8 @@ pub struct Trader<S: Strategy, E: Execution> {
     /// Strategy id to the client id the venue knows.
     live: HashMap<u64, String>,
     intents: Vec<Intent>,
+    /// Submissions the venue has not answered, and the id it was given.
+    unanswered: Vec<(OrderId, String)>,
 }
 
 impl<S: Strategy, E: Execution> Trader<S, E> {
@@ -92,6 +114,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             session,
             live: HashMap::new(),
             intents: Vec::new(),
+            unanswered: Vec::new(),
         }
     }
 
@@ -115,7 +138,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         let intents = core::mem::take(&mut self.intents);
         let out: Vec<Outcome> = intents
             .iter()
-            .map(|i| self.act(i, ctx.tick.last, now))
+            .flat_map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
         self.report_placements(&out);
@@ -159,11 +182,22 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             match o {
                 Outcome::Sent { local, .. } => self.strategy.on_placed(*local, true),
                 Outcome::Refused { local, .. } => self.strategy.on_placed(*local, false),
-                // Unresolved, unknown, cancelled: not an answer about
-                // whether this submission is resting.
-                Outcome::Unresolved { .. }
-                | Outcome::UnknownOrder(_)
-                | Outcome::Cancelled { .. } => {}
+                // A withdrawal that did not take. The order is still
+                // there, and the strategy is the only thing that can
+                // decide what to do about it.
+                Outcome::CancelFailed { local, why, .. } => {
+                    self.strategy.on_cancel_failed(*local, why);
+                }
+                // Not an answer yet, so the strategy is not told one.
+                // Kept instead, and asked about again — the id was
+                // chosen before sending precisely so that this question
+                // stays answerable.
+                Outcome::Unresolved {
+                    local, client_id, ..
+                } => self.unanswered.push((*local, client_id.clone())),
+                // Unknown and cancelled: not an answer about whether
+                // this submission is resting.
+                Outcome::UnknownOrder(_) | Outcome::Cancelled { .. } => {}
             }
         }
     }
@@ -175,7 +209,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         let intents = core::mem::take(&mut self.intents);
         let out: Vec<Outcome> = intents
             .iter()
-            .map(|i| self.act(i, ctx.tick.last, now))
+            .flat_map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
         self.report_placements(&out);
@@ -185,6 +219,52 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
     /// The venue says an order has ended. Forget its association.
     pub fn forget(&mut self, client_id: &str) {
         self.live.retain(|_, v| v != client_id);
+    }
+
+    /// Ask the venue again about submissions that never got an answer.
+    ///
+    /// A submission whose outcome is unknown is asked about once, at the
+    /// moment it happens, inside `Session::submit`. If that question
+    /// also fails there is nothing further to try *then* — but there is
+    /// something to try later, and until this existed nothing did. The
+    /// count was reported at shutdown and the strategy was never told,
+    /// so an order that did land went unmanaged for the life of the run
+    /// and one that did not was never replaced.
+    ///
+    /// The reference drains a retry queue on its timer for the same
+    /// reason. This is that queue, with the venue as the authority
+    /// rather than a resend — resending is what turns "maybe one order"
+    /// into "certainly two".
+    ///
+    /// Called on the heartbeat rather than per observation: it is a
+    /// round trip to the venue, and the answer does not change between
+    /// ticks.
+    pub fn chase_unanswered(&mut self) -> Vec<(OrderId, bool)> {
+        if self.unanswered.is_empty() {
+            return Vec::new();
+        }
+        let symbol = self.session.symbol().to_string();
+        let mut settled = Vec::new();
+        let mut still_open = Vec::new();
+        for (local, client_id) in core::mem::take(&mut self.unanswered) {
+            match self.session.venue().order_status(&symbol, &client_id) {
+                Ok(Some(_)) => settled.push((local, true)),
+                Ok(None) => settled.push((local, false)),
+                // Still no answer. Kept, not guessed at.
+                Err(_) => still_open.push((local, client_id)),
+            }
+        }
+        self.unanswered = still_open;
+        for (local, resting) in &settled {
+            self.strategy.on_placed(*local, *resting);
+        }
+        settled
+    }
+
+    /// Submissions still without an answer.
+    #[must_use]
+    pub fn unanswered(&self) -> usize {
+        self.unanswered.len()
     }
 
     /// The venue says an order has ended: tell the strategy, then forget
@@ -213,7 +293,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         let intents = core::mem::take(&mut self.intents);
         let out: Vec<Outcome> = intents
             .iter()
-            .map(|i| self.act(i, ctx.tick.last, now))
+            .flat_map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
         self.report_placements(&out);
@@ -243,7 +323,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         self.live.values().map(String::as_str).collect()
     }
 
-    fn act(&mut self, intent: &Intent, mark: PriceTicks, now: Nanos) -> Outcome {
+    fn act(&mut self, intent: &Intent, mark: PriceTicks, now: Nanos) -> Vec<Outcome> {
         match intent {
             Intent::Limit {
                 id,
@@ -251,7 +331,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 price,
                 qty,
                 offset,
-            } => self.send(
+            } => vec![self.send(
                 *id,
                 ProposedOrder {
                     side: *side,
@@ -261,13 +341,13 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 },
                 mark,
                 now,
-            ),
+            )],
             Intent::Market {
                 id,
                 side,
                 qty,
                 offset,
-            } => self.send(
+            } => vec![self.send(
                 *id,
                 ProposedOrder {
                     side: *side,
@@ -277,35 +357,49 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 },
                 mark,
                 now,
-            ),
+            )],
             Intent::Cancel(id) => match self.live.get(&id.0) {
-                Some(client_id) => {
-                    let client_id = client_id.clone();
-                    self.session.cancel(&client_id);
-                    Outcome::Cancelled {
-                        local: *id,
-                        client_id,
-                    }
-                }
-                None => Outcome::UnknownOrder(*id),
+                Some(client_id) => vec![self.withdraw(*id, client_id.clone())],
+                None => vec![Outcome::UnknownOrder(*id)],
             },
             Intent::CancelAll => {
-                // Reported as one outcome per order rather than one for
-                // the request, because a partial failure here is the
-                // interesting case and a single result would hide it.
+                // One outcome per order rather than one for the request,
+                // because a partial failure is the interesting case and
+                // a single result hides it. The comment said this before
+                // the code did: it returned the first order's outcome
+                // and dropped the rest, so a sweep in which one cancel
+                // failed read exactly like one in which none did.
                 let all: Vec<(u64, String)> =
                     self.live.iter().map(|(k, v)| (*k, v.clone())).collect();
-                for (_, client_id) in &all {
-                    self.session.cancel(client_id);
-                }
-                all.first()
-                    .map_or(Outcome::UnknownOrder(OrderId(0)), |(k, v)| {
-                        Outcome::Cancelled {
-                            local: OrderId(*k),
-                            client_id: v.clone(),
-                        }
-                    })
+                all.into_iter()
+                    .map(|(local, client_id)| self.withdraw(OrderId(local), client_id))
+                    .collect()
             }
+        }
+    }
+
+    /// Withdraw one order and say what actually happened to the request.
+    fn withdraw(&mut self, local: OrderId, client_id: String) -> Outcome {
+        match self.session.cancel(&client_id) {
+            Submission::Sent(_) => Outcome::Cancelled { local, client_id },
+            Submission::Refused(b) => Outcome::CancelFailed {
+                local,
+                client_id,
+                why: format!("{b:?}"),
+            },
+            Submission::Rejected(why) => Outcome::CancelFailed {
+                local,
+                client_id,
+                why,
+            },
+            // Unknown is not success. The order may or may not still be
+            // resting, and the one thing that is certain is that nobody
+            // may act as though it is gone.
+            Submission::Unresolved { why, .. } => Outcome::CancelFailed {
+                local,
+                client_id,
+                why,
+            },
         }
     }
 
@@ -326,7 +420,11 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 why: format!("{b:?}"),
             },
             Submission::Rejected(why) => Outcome::Refused { local, why },
-            Submission::Unresolved(why) => Outcome::Unresolved { local, why },
+            Submission::Unresolved { client_id, why } => Outcome::Unresolved {
+                local,
+                client_id,
+                why,
+            },
         }
     }
 }
