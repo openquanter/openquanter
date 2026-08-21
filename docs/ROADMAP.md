@@ -212,7 +212,7 @@ input this project cannot reach, the second has not been written.
 | L1 | **Latency as distributions rather than constants** | Built — `Delay::Measured` takes p50/p90/p99/p999, which is what a latency measurement produces; nearest-rank and never interpolated, drawn deterministically from the order id so a replay from a snapshot fills the same way |
 | L1 | **Feed latency** | Deliberately not in the engine — it belongs to the event producer |
 | L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
-| L2 | Book reconstruction, snapshot reconciliation, gap handling | Reconstruction is built and now **measured on a real archive**: 133,910 depth updates, 0 sequence errors, 0 gaps, 0 crossed books, 10,286 levels deep — `RECONSTRUCTS CLEANLY`. **The queue is now measured from it** — `L2Engine` reads the displayed size at the level an order joins, replacing L1's assumed `QueueAhead`. Walking the book for taker impact is not built, and no MBP feed can tell a cancellation ahead of you from one behind, so the queue depletes on trades only and is conservative by construction |
+| L2 | Book reconstruction, snapshot reconciliation, gap handling | Reconstruction is built and now **measured on a real archive**: 133,910 depth updates, 0 sequence errors, 0 gaps, 0 crossed books, 10,286 levels deep — `RECONSTRUCTS CLEANLY`. **Both sides are now measured from it.** `L2Engine` reads the displayed size at the level an order joins, replacing L1's assumed `QueueAhead`, and walks the levels for taker fills, replacing L1's square-root penalty. Each measurement displaces the policy rather than compounding with it, a fill the book cannot reach keeps the policy, and `swept` / `unswept` report which priced a run. Several takers in one observation deplete one working copy of the depth, so size is not free for the second. Where book and tick disagree the worse price wins, which keeps the ladder monotone. No MBP feed can tell a cancellation ahead of you from one behind, so the queue depletes on trades only and is conservative by construction |
 | Validation | Stylized-facts test set | Built for the **generated** markets — `oq_stats::StylizedFacts` measures four facts, the fixtures are pinned against them, and the finding is that most do not hold (see QUICKSTART). Order-flow autocorrelation and the real-data half need a capture and are not done |
 | Validation | L0 / L0+margin / L1 comparative report | Built — `tiers` covers all three, and shows the rungs are **not** ordered by pessimism |
 
@@ -545,7 +545,11 @@ not in the matching kernel.
   producer rather than the matcher, so it belongs to the host loop and putting
   it in the engine as well would delay the same event twice.
 - **L2**: order book reconstruction from incremental depth, matching against
-  the reconstructed book, snapshot reconciliation and gap handling.
+  the reconstructed book, snapshot reconciliation and gap handling. Built:
+  reconstruction, the measured queue, and the taker's walk up the levels.
+  What remains is reaction — the book here is what the venue displayed, and
+  how the rest of the market answers a trade of ours is a claim nothing in
+  it measures.
 - Stylized-facts test set in CI (fat tails, volatility clustering, order flow
   autocorrelation) validating that the simulator behaves like a market.
 - Comparative report across L0 / L0+margin / L1 for the same strategy.

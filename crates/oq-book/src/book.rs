@@ -101,6 +101,106 @@ impl Side {
     pub fn depth(&self) -> usize {
         self.levels.len()
     }
+
+    /// What taking `qty` from this side would cost, best price first.
+    ///
+    /// The side is not modified: this answers a question, it does not
+    /// execute anything. A caller filling several orders against one
+    /// book snapshot must consume its own copy, or every order after
+    /// the first is priced as though the ones before it never traded.
+    ///
+    /// A buy sweeps the asks and a sell sweeps the bids; which side to
+    /// pass is the caller's to know, because this crate has no concept
+    /// of a buy.
+    #[must_use]
+    pub fn sweep(&self, qty: i64) -> Sweep {
+        let mut want = qty.max(0);
+        let mut swept = Sweep {
+            taken: 0,
+            cost: 0,
+            exhausted: want > 0,
+        };
+        for level in &self.levels {
+            if want == 0 {
+                swept.exhausted = false;
+                break;
+            }
+            let take = want.min(level.qty.max(0));
+            if take == 0 {
+                continue;
+            }
+            // i128 because price times quantity leaves i64 at plausible
+            // sizes: a tick price near 1e9 against a lot count near 1e10
+            // is 1e19, and i64 stops at 9.2e18. An overflow here would
+            // wrap into a profitable fill.
+            swept.cost += i128::from(level.price) * i128::from(take);
+            swept.taken += take;
+            want -= take;
+        }
+        swept.exhausted = want > 0;
+        swept
+    }
+
+    /// Take `qty` off this side, removing what was consumed.
+    ///
+    /// The consuming half of [`sweep`](Self::sweep), for a caller
+    /// filling several orders against one snapshot of the book: each
+    /// takes what the ones before it left. Pricing them all against the
+    /// untouched book would say a hundred lots and ten thousand lots
+    /// cost the same per lot, which is the assumption the whole tier
+    /// exists to stop making.
+    ///
+    /// This is a caller's private copy of the venue's depth, never the
+    /// venue's own. The book belongs to the feed: what it holds is what
+    /// the venue displayed, and an order of ours has no business
+    /// editing that.
+    pub fn take(&mut self, qty: i64) -> Sweep {
+        let swept = self.sweep(qty);
+        let mut want = swept.taken;
+        let mut drained = 0;
+        for level in &mut self.levels {
+            if want == 0 {
+                break;
+            }
+            let take = want.min(level.qty.max(0));
+            level.qty -= take;
+            want -= take;
+            // Levels are held only while they carry quantity -- `apply`
+            // removes a level a zero reaches -- so the emptied ones are
+            // a prefix, and the walk above starts at the front.
+            if level.qty == 0 {
+                drained += 1;
+            }
+        }
+        self.levels.drain(..drained);
+        swept
+    }
+}
+
+/// The result of taking size off one side of a book.
+///
+/// Prices are not averaged here. Rounding a volume-weighted price is a
+/// choice about who absorbs the fraction, and only a caller that knows
+/// which way it is trading can make it against itself rather than for
+/// itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sweep {
+    /// Quantity actually taken, at most the quantity asked for.
+    pub taken: i64,
+    /// Total price times quantity over every level touched.
+    ///
+    /// Not a price. Dividing by `taken` gives one, and which way to
+    /// round it is the caller's to decide -- see the type's own note.
+    pub cost: i128,
+    /// The side ran out before the requested quantity was filled.
+    ///
+    /// This is not "the order would be rejected" — it is "this book
+    /// cannot answer". Reconstructed depth is finite, and an order
+    /// larger than every level held is exactly the order whose impact
+    /// matters most. Reporting a price for it, computed from the levels
+    /// that happen to be present, would be least trustworthy where it
+    /// is most consequential.
+    pub exhausted: bool,
 }
 
 /// Why an update could not be applied.
@@ -473,5 +573,142 @@ mod tests {
         // reconstruction error, and worth catching as one.
         book.install_snapshot(2, &[level(100, 1)], &[level(99, 1)]);
         assert!(book.is_crossed());
+    }
+
+    #[test]
+    fn a_sweep_walks_levels_in_order_and_stops_when_filled() {
+        let mut asks = Side::asks();
+        for l in [level(102, 400), level(100, 100), level(101, 200)] {
+            asks.apply(l);
+        }
+
+        // 100 at 100, 200 at 101, 200 of the 400 at 102.
+        let swept = asks.sweep(500);
+        assert_eq!(swept.taken, 500);
+        assert_eq!(swept.cost, 100 * 100 + 200 * 101 + 200 * 102);
+        assert!(!swept.exhausted);
+
+        // The book is a question, not an execution: asking twice gives
+        // the same answer.
+        assert_eq!(asks.sweep(500), swept);
+    }
+
+    #[test]
+    fn a_sweep_that_fits_in_the_best_level_never_touches_a_worse_price() {
+        let mut asks = Side::asks();
+        asks.apply(level(100, 100));
+        asks.apply(level(101, 100));
+
+        let swept = asks.sweep(60);
+        assert_eq!(swept.taken, 60);
+        assert_eq!(swept.cost, 60 * 100);
+        assert!(!swept.exhausted);
+    }
+
+    /// Running out of book is reported, never papered over with the
+    /// last price held. The quantity that could not be taken is the
+    /// part whose cost this book does not know, and pricing it at the
+    /// deepest level present would understate it -- which is the
+    /// direction that flatters a backtest.
+    #[test]
+    fn a_sweep_deeper_than_the_book_says_so() {
+        let mut asks = Side::asks();
+        asks.apply(level(100, 100));
+        asks.apply(level(101, 50));
+
+        let swept = asks.sweep(1_000);
+        assert!(swept.exhausted);
+        assert_eq!(swept.taken, 150);
+        assert_eq!(swept.cost, 100 * 100 + 50 * 101);
+    }
+
+    #[test]
+    fn an_empty_side_takes_nothing_and_is_exhausted() {
+        let swept = Side::asks().sweep(10);
+        assert_eq!(swept.taken, 0);
+        assert_eq!(swept.cost, 0);
+        assert!(swept.exhausted);
+
+        // Asking for nothing is answerable by an empty book: nothing
+        // is what it costs, and it is not a shortfall.
+        let none = Side::asks().sweep(0);
+        assert_eq!(none.taken, 0);
+        assert!(!none.exhausted);
+    }
+
+    #[test]
+    fn bids_sweep_from_the_highest_price_down() {
+        let mut bids = Side::bids();
+        for l in [level(98, 100), level(100, 100), level(99, 100)] {
+            bids.apply(l);
+        }
+
+        let swept = bids.sweep(150);
+        assert_eq!(swept.cost, 100 * 100 + 50 * 99);
+    }
+
+    /// A tick price near 1e9 against a lot count near 1e10 overflows
+    /// i64 at the second level. In i64 that wraps negative, and a
+    /// negative cost is a fill that paid the taker.
+    /// The point of the consuming half: two orders against one book
+    /// must not both be priced as though they were first.
+    #[test]
+    fn taking_leaves_the_next_taker_a_worse_book() {
+        let mut asks = Side::asks();
+        asks.apply(level(100, 100));
+        asks.apply(level(101, 100));
+        asks.apply(level(102, 100));
+
+        let first = asks.take(150);
+        assert_eq!(first.cost, 100 * 100 + 50 * 101);
+
+        // 50 left at 101, then into 102 -- not back at the touch.
+        let second = asks.take(100);
+        assert_eq!(second.cost, 50 * 101 + 50 * 102);
+
+        assert_eq!(asks.depth(), 1);
+        assert_eq!(asks.best(), Some(level(102, 50)));
+    }
+
+    #[test]
+    fn taking_a_whole_level_removes_it() {
+        let mut asks = Side::asks();
+        asks.apply(level(100, 100));
+        asks.apply(level(101, 100));
+
+        asks.take(100);
+        assert_eq!(asks.depth(), 1);
+        assert_eq!(asks.best(), Some(level(101, 100)));
+    }
+
+    #[test]
+    fn taking_more_than_the_book_holds_empties_it_and_says_so() {
+        let mut asks = Side::asks();
+        asks.apply(level(100, 100));
+
+        let swept = asks.take(500);
+        assert!(swept.exhausted);
+        assert_eq!(swept.taken, 100);
+        assert_eq!(asks.depth(), 0);
+
+        // And an empty book still answers, rather than panicking on the
+        // drain range.
+        let again = asks.take(500);
+        assert_eq!(again.taken, 0);
+        assert!(again.exhausted);
+    }
+
+    #[test]
+    fn a_sweep_large_enough_to_overflow_i64_does_not() {
+        let mut asks = Side::asks();
+        asks.apply(level(1_000_000_000, 10_000_000_000));
+        asks.apply(level(1_000_000_001, 10_000_000_000));
+
+        let swept = asks.sweep(20_000_000_000);
+        assert!(swept.cost > i128::from(i64::MAX));
+        assert_eq!(
+            swept.cost,
+            1_000_000_000_i128 * 10_000_000_000 + 1_000_000_001_i128 * 10_000_000_000
+        );
     }
 }

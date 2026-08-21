@@ -440,9 +440,44 @@ impl L1Engine {
         self.pending.len() + self.queued.len()
     }
 
+    /// The fills the last observation released to the strategy.
+    ///
+    /// The same slice `on_tick` returns. A wrapper that has to finish
+    /// its own bookkeeping before handing fills on cannot hold that
+    /// borrow across the write, so it takes the slice again afterwards.
+    #[must_use]
+    pub fn released(&self) -> &[L0Fill] {
+        &self.released
+    }
+
     /// Advance to an observation and return the fills the strategy is
     /// entitled to know about.
     pub fn on_tick(&mut self, tick: &Tick) -> &[L0Fill] {
+        self.on_tick_with_impact(tick, |_, _| None)
+    }
+
+    /// Advance to an observation, pricing taker fills from a measurement
+    /// where one is available.
+    ///
+    /// `measured` is asked, for each taker fill, what that size actually
+    /// costs -- L2 answers by walking the venue's book. `None` falls
+    /// through to the square-root policy, so a caller with no book, or
+    /// one whose book cannot reach the size asked for, is exactly an L1
+    /// caller for that fill.
+    ///
+    /// **A measurement is only ever applied against the taker.** The
+    /// worse of the two prices wins, which is what keeps the ladder
+    /// monotone: climbing a tier must never make a backtest look
+    /// better, or the tiers become something to shop among rather than
+    /// a claim about fidelity. A sweep is already worse than the touch
+    /// by construction, so this binds only where the book and the tick
+    /// disagree -- a reconstructed book is a different measurement of
+    /// the same instant, not a more authoritative one.
+    pub fn on_tick_with_impact(
+        &mut self,
+        tick: &Tick,
+        mut measured: impl FnMut(Side, oq_types::QtyLots) -> Option<PriceTicks>,
+    ) -> &[L0Fill] {
         let now = tick.stamp.exch;
         let traded = self.traded_volume(tick);
 
@@ -498,10 +533,15 @@ impl L1Engine {
 
         // 4. Impact worsens taker fills. Applied after matching because
         //    it is a property of the fill's size against the market, and
-        //    L0 has no concept of either.
+        //    L0 has no concept of either. A measured price displaces the
+        //    policy rather than compounding with it: charging both would
+        //    price the same walk up the book twice.
         let adjusted: Vec<L0Fill> = produced
             .into_iter()
-            .map(|f| self.with_impact(f, tick, traded))
+            .map(|f| match measured_taker_price(&mut measured, &f) {
+                Some(price) => with_measured_price(f, price),
+                None => self.with_impact(f, tick, traded),
+            })
             .collect();
 
         // 5. Response latency holds a fill back from the strategy. The
@@ -630,6 +670,30 @@ impl L1Engine {
         });
         f
     }
+}
+
+/// Ask the measurement what a taker fill costs, if it is one.
+///
+/// A maker fill is not asked about at all. Its price is the price it
+/// rested at, and a book has nothing to add to a number the order
+/// itself chose.
+fn measured_taker_price(
+    measured: &mut impl FnMut(Side, oq_types::QtyLots) -> Option<PriceTicks>,
+    f: &L0Fill,
+) -> Option<PriceTicks> {
+    if f.fill.liquidity != oq_types::Liquidity::Taker {
+        return None;
+    }
+    measured(f.fill.side, f.fill.qty)
+}
+
+/// Replace a taker fill's price with a measured one, against the taker.
+fn with_measured_price(mut f: L0Fill, measured: PriceTicks) -> L0Fill {
+    f.fill.price = PriceTicks(match f.fill.side {
+        Side::Buy => f.fill.price.0.max(measured.0),
+        Side::Sell => f.fill.price.0.min(measured.0),
+    });
+    f
 }
 
 /// Whether this observation traded at the order's price at all.
