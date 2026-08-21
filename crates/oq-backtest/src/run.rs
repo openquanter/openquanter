@@ -373,7 +373,7 @@ where
     // and only the matcher knows which piece was the last.
     let mut ended: Vec<(OrderId, Ending)> = Vec::new();
 
-    let tier = kernel.state().engine.tier();
+    let tier = kernel.state().holding.engine.tier();
     let mut tick_count = 0usize;
     let mut depth_applied = 0u64;
     let mut depth_refused = 0u64;
