@@ -268,13 +268,17 @@ Pre-alpha, and specific about it. **Built and tested today:**
   for all six — which is the finding, not a flaw in the fixture: a margin model
   is invisible until leverage is real. `cargo run --example classics`.
 
-**Built but not wired:** fidelity tier L2. The engine is there — `L2Engine`
+**Built, and reachable from a backtest:** fidelity tier L2. `L2Engine`
 reads the queue ahead of an order from the venue's reconstructed book and
 walks the levels for taker fills, each tier wrapping the one below so L0
-stays frozen by construction. What does not exist is the path that feeds it:
-the tick file a backtest reads carries a best bid and a best ask, not a
-book, so nothing currently hands L2 the depth it was written to use. The
-parts are tested; the assembly is missing.
+stays frozen by construction. A run selects it with
+`RunConfig::at_tier(Tier::L2(policy))` and feeds it depth through
+`run_observations`, which takes ticks and depth updates on one stream;
+`cargo run --release -p oq-examples --example book_tiers` is the
+comparison. Two things are still missing from it: converting an archive
+into that stream is the caller's loop rather than a command, and depth
+does not go through `Event`, so replaying an L2 run's journal reproduces
+its orders but not the book they matched against.
 
 **Designed but not built:** everything under *AI-native* above. The pillars
 section describes where this is going; this section describes where it is.
