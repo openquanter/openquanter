@@ -137,7 +137,7 @@ input this project cannot reach, the second has not been written.
 | Types | `oq-types` fixed point, typestate order and position machines | Built |
 | Journal | mmap append log, snapshots, replay, torn-tail tolerance | Built |
 | Core | Sequencer, deterministic kernel, injected clock | Built |
-| Core | **Sharding by instrument** | **Not built** (`shard` appears nowhere; FR-CORE-6) |
+| Core | **Sharding by instrument** | **Blocked on a prior decision**, not merely unwritten (`shard` appears nowhere; FR-CORE-6). A shard is one instrument's kernel, and `State` already holds exactly one instrument — but it also holds the balance and the position, and an account trading two instruments shares both. FR-CORE-6 forbids shared mutable state across shards, so sharding needs the account separated from the instrument first, which is the open question below on the instrument model being split in two with neither half in the core. Sharding it as it stands gives each shard its own balance, which no multi-instrument strategy can use and no single-instrument one needs |
 | Matching | L0 tick replay, frozen as the regression anchor | Built |
 | Margin | Tiered maintenance margin, liquidation pricing, funding | Built |
 | Margin | Bitemporal rule schedules | Built |
