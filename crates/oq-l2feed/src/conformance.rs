@@ -46,6 +46,13 @@ pub struct Samples {
     pub trade: &'static [u8],
     /// Price and quantity that trade carries, in instrument units.
     pub trade_price_qty: (i64, i64),
+    /// Which side crossed the spread in that trade.
+    ///
+    /// The adapter's own claim about its own sample. A venue that
+    /// publishes the aggressor and an adapter that drops it look
+    /// identical downstream — the order flow is simply absent — so the
+    /// suite asks each adapter to state it and holds it to that.
+    pub trade_aggressor: oq_types::Side,
     /// The exchange timestamp both messages carry, in nanoseconds.
     pub event_time_ns: i64,
     /// A payload that is not a message of any kind this adapter parses.
@@ -183,6 +190,14 @@ pub fn check(venue: &dyn Venue, s: &Samples) -> Report {
                     venue.id(),
                     t.qty,
                     s.trade_price_qty.1
+                )
+            });
+            r.check(t.aggressor == Some(s.trade_aggressor), || {
+                format!(
+                    "{}: aggressor parsed as {:?}, the sample says {:?}",
+                    venue.id(),
+                    t.aggressor,
+                    s.trade_aggressor
                 )
             });
             r.check(t.price > 0 && t.qty > 0, || {

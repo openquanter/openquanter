@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 oq-book.workspace = true
 oq-hash.workspace = true
+oq-stats.workspace = true
 oq-types.workspace = true
 ruzstd = "0.8.2"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }

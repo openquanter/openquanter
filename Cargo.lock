@@ -778,6 +778,7 @@ dependencies = [
  "libc",
  "oq-book",
  "oq-hash",
+ "oq-stats",
  "oq-types",
  "ruzstd",
  "tungstenite",

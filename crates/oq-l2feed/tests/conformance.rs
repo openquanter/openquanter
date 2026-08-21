@@ -20,6 +20,8 @@ const BINANCE: Samples = Samples {
     trade: br#"{"e":"trade","E":1786780800123,"T":1786780800100,"s":"BTCUSDT","t":481923,"p":"62000.10","q":"0.500","m":false}"#,
     // Two decimal places of price, three of quantity.
     trade_price_qty: (6_200_010, 500),
+    // `"m":false` — the buyer was not the maker, so the buyer crossed.
+    trade_aggressor: oq_types::Side::Buy,
     event_time_ns: 1_786_780_800_123_000_000,
     not_a_message: br#"{"result":null,"id":1}"#,
     // Verbatim from a capture: 6312 of these in one hour of BTCUSDT,
@@ -43,6 +45,8 @@ const OKX: Samples = Samples {
     trade: br#"{"arg":{"channel":"trades","instId":"BTC-USDT-SWAP"},"data":[{"instId":"BTC-USDT-SWAP","tradeId":"481923","px":"62000.1","sz":"0.50","side":"buy","ts":"1786780800123"}]}"#,
     // One decimal place of price, two of quantity on this contract.
     trade_price_qty: (620_001, 50),
+    // This venue names the aggressor: `"side":"buy"`.
+    trade_aggressor: oq_types::Side::Buy,
     event_time_ns: 1_786_780_800_123_000_000,
     not_a_message: br#"{"event":"subscribe","arg":{"channel":"books"}}"#,
     // Constructed rather than captured: this venue has not been seen
@@ -93,6 +97,7 @@ fn the_suite_reports_every_failure_rather_than_the_first() {
         depth_ids: OKX.depth_ids,
         trade: OKX.trade,
         trade_price_qty: OKX.trade_price_qty,
+        trade_aggressor: OKX.trade_aggressor,
         event_time_ns: OKX.event_time_ns,
         not_a_message: BINANCE.not_a_message,
         non_trade: BINANCE.non_trade,

@@ -320,6 +320,18 @@ pub struct Trade {
     pub price: i64,
     /// Size in instrument lots.
     pub qty: i64,
+    /// Which side crossed the spread, when the venue says.
+    ///
+    /// The **aggressor**, not the buyer: every trade has both, and the
+    /// one that carries information is the side that chose to trade
+    /// now. It is what order-flow autocorrelation is computed over —
+    /// the sequence persists strongly, because a large order is worked
+    /// in pieces and each piece hits the same side.
+    ///
+    /// `None` when the venue does not say. A venue that publishes it
+    /// and an adapter that drops it are indistinguishable downstream
+    /// otherwise, and the second is a defect while the first is not.
+    pub aggressor: Option<oq_types::Side>,
 }
 
 /// Look up a venue by the identifier used on the command line and in
