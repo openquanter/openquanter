@@ -183,15 +183,43 @@ impl Venue for BinancePerp {
     fn parse_trade(&self, payload: &[u8], scales: Scales) -> Option<Trade> {
         let price = string_field(payload, br#""p":"#)?;
         let qty = string_field(payload, br#""q":"#)?;
+        // `"m"` says whether the *buyer* was the maker. So `true` means
+        // the buyer was resting and the seller crossed: the aggressor is
+        // the seller. Reading it as the trade's side would invert every
+        // one of them.
+        let aggressor = match string_or_bool(payload, br#""m":"#) {
+            Some(true) => Some(oq_types::Side::Sell),
+            Some(false) => Some(oq_types::Side::Buy),
+            None => None,
+        };
         let trade = Trade {
             price: parse_fixed(&price, scales.price).ok()?,
             qty: parse_fixed(&qty, scales.qty).ok()?,
+            aggressor,
         };
         (trade.price > 0 && trade.qty > 0).then_some(trade)
     }
 
     fn parse_depth(&self, payload: &[u8], scales: Scales) -> Result<DepthUpdate, ParseError> {
         crate::depth::parse_depth(payload, scales)
+    }
+}
+
+/// Read a bare JSON `true`/`false` following `key`.
+///
+/// Separate from [`string_field`] because this value is not quoted, and
+/// a reader looking for quotes finds the next field's instead — which
+/// parses, and inverts the aggressor on every trade that happens to be
+/// followed by the right shape.
+fn string_or_bool(payload: &[u8], key: &[u8]) -> Option<bool> {
+    let pos = payload.windows(key.len()).position(|w| w == key)?;
+    let rest = &payload[pos + key.len()..];
+    if rest.starts_with(b"true") {
+        Some(true)
+    } else if rest.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
     }
 }
 

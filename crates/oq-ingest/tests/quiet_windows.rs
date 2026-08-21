@@ -19,7 +19,11 @@ use oq_types::{Cash, InstrumentId, OrderId, QtyLots, Side};
 const SEC: i64 = 1_000_000_000;
 
 fn trade(price: i64, qty: i64) -> Trade {
-    Trade { price, qty }
+    Trade {
+        price,
+        qty,
+        aggressor: None,
+    }
 }
 
 /// Buys once and then does nothing, so every later number is the
