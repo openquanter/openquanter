@@ -53,9 +53,9 @@ impl oq_backtest::Strategy for MacdTrend {
         };
         let bullish = v.macd > v.signal;
         if bullish && ctx.position.0 == 0 {
-            self.trader.open(out, Side::Buy, QtyLots(1));
+            self.trader.open(ctx, out, Side::Buy, QtyLots(1));
         } else if !bullish && ctx.position.0 > 0 {
-            self.trader.close(out, Side::Sell, ctx.position);
+            self.trader.close(ctx, out, Side::Sell, ctx.position);
         }
     }
 }

@@ -67,10 +67,10 @@ impl oq_backtest::Strategy for BollingerReversion {
 
         if ctx.position.0 == 0 {
             if price < lower {
-                self.trader.open(out, Side::Buy, QtyLots(1));
+                self.trader.open(ctx, out, Side::Buy, QtyLots(1));
             }
         } else if price >= mean {
-            self.trader.close(out, Side::Sell, ctx.position);
+            self.trader.close(ctx, out, Side::Sell, ctx.position);
         }
     }
 }

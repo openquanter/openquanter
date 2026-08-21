@@ -178,6 +178,7 @@ use oq_types::{Fill, Liquidity, Offset, OrderId, PriceTicks, QtyLots, Side, Stam
 
 fn at(price: i64, position: i64) -> Context {
     Context {
+        instrument: oq_types::InstrumentId::new(1),
         tick: oq_engine::Tick {
             last: PriceTicks(price),
             ..oq_engine::Tick::default()

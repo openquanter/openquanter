@@ -87,6 +87,7 @@ fn shape_of(
             side,
             qty,
             offset,
+            ..
         } if *this == id => Some((*side, *qty, *offset)),
         _ => None,
     })
@@ -1839,6 +1840,7 @@ mod tests {
     /// build one in a test.
     fn market(id: u64, side: Side, qty: i64) -> Intent {
         Intent::Market {
+            instrument: oq_types::InstrumentId::new(1),
             id: OrderId(id),
             side,
             qty: QtyLots(qty),
@@ -1865,6 +1867,7 @@ mod tests {
     #[test]
     fn a_limit_order_is_matched_by_id_and_not_by_price() {
         let intents = vec![Intent::Limit {
+            instrument: oq_types::InstrumentId::new(1),
             id: OrderId(9),
             side: Side::Buy,
             price: PriceTicks(6_000_000),

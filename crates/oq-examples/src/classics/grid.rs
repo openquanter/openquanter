@@ -101,16 +101,16 @@ impl oq_backtest::Strategy for GridTrader {
             // observation means the grid is centred wherever the run
             // happened to start, which is true of every grid anybody
             // runs and is worth knowing about the results.
-            self.trader.open(out, Side::Buy, QtyLots(1));
+            self.trader.open(ctx, out, Side::Buy, QtyLots(1));
             self.pending = Some(self.trader.last_id());
             return;
         };
 
         if price <= anchor * (1.0 - self.step) && self.rungs < self.max_rungs {
-            self.trader.open(out, Side::Buy, QtyLots(1));
+            self.trader.open(ctx, out, Side::Buy, QtyLots(1));
             self.pending = Some(self.trader.last_id());
         } else if price >= anchor * (1.0 + self.step) && ctx.position.0 > 0 {
-            self.trader.close(out, Side::Sell, QtyLots(1));
+            self.trader.close(ctx, out, Side::Sell, QtyLots(1));
             self.pending = Some(self.trader.last_id());
         }
     }

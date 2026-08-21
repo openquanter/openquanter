@@ -61,6 +61,7 @@ impl Strategy for RestingBid {
                 let id = OrderId(self.next_id);
                 self.next_id += 1;
                 out.push(Intent::Limit {
+                    instrument: ctx.instrument,
                     id,
                     side: Side::Buy,
                     price: PriceTicks(want),

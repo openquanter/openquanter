@@ -71,10 +71,10 @@ impl oq_backtest::Strategy for RsiReversion {
         };
         if ctx.position.0 == 0 {
             if value < self.enter_below {
-                self.trader.open(out, Side::Buy, QtyLots(1));
+                self.trader.open(ctx, out, Side::Buy, QtyLots(1));
             }
         } else if value > self.exit_above {
-            self.trader.close(out, Side::Sell, ctx.position);
+            self.trader.close(ctx, out, Side::Sell, ctx.position);
         }
     }
 
