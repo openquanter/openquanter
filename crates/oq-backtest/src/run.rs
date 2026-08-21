@@ -18,8 +18,9 @@
 //! control arm of an experiment, and it is what most published backtest
 //! results silently are.
 
+use oq_core::matcher::{DepthOutcome, Matcher};
 use oq_core::{Event, Kernel, Output, State};
-use oq_engine::Tick;
+use oq_engine::{DepthUpdate, L1Engine, L2Engine, Level, Policy, Tick};
 use oq_margin::{Contract, FundingSchedule, TierTable};
 use oq_strategy::{Context, Ending, Intent, Strategy};
 use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Stamp};
@@ -74,6 +75,87 @@ pub struct RunConfig {
     /// the difference is a margin requirement the run either charges or
     /// does not.
     pub position_mode: oq_core::PositionMode,
+    /// Which matcher the run uses.
+    ///
+    /// L0 by default, the frozen anchor. A higher tier answers
+    /// identically until it is also given the data it exists to read —
+    /// depth for L2 — so raising this alone changes nothing, which is
+    /// what makes it safe to expose as an option rather than a rewrite.
+    pub tier: Tier,
+}
+
+/// One thing that happened, in the order it happened.
+///
+/// A backtest has always consumed ticks. L2 needs the venue's depth as
+/// well, and depth cannot go *in* a tick: a tick is a fixed record of
+/// seven numbers, and a book is not a field. So the two arrive
+/// interleaved on one stream, ordered the way the venue produced them.
+///
+/// One stream rather than two, because the alternative is a run holding
+/// both and deciding which to advance — which is a merge, written once
+/// here or once per caller, and a merge that gets the order wrong
+/// matches an order against a book from the future.
+#[derive(Debug, Clone)]
+pub enum Observation {
+    /// A market observation the strategy sees.
+    Tick(Tick),
+    /// A depth update the matcher reads. The strategy is not called: it
+    /// consumes ticks, and a book is the matcher's input, not a
+    /// signal's.
+    Depth(Box<DepthUpdate>),
+    /// The snapshot the incremental stream is sequenced against.
+    ///
+    /// A separate arrival because it is one: the venue serves it over
+    /// REST while the updates come over a socket, and the first update
+    /// that can be placed against it is where reconstruction begins.
+    /// Without it a book refuses every update it is given — an
+    /// incremental stream says what changed, and there is nothing to
+    /// change.
+    Snapshot {
+        update_id: u64,
+        bids: Vec<Level>,
+        asks: Vec<Level>,
+    },
+}
+
+impl From<Tick> for Observation {
+    fn from(t: Tick) -> Self {
+        Self::Tick(t)
+    }
+}
+
+/// Which matcher a run uses, as configuration rather than as a type.
+///
+/// Named for the fidelity ladder it selects from. Distinct from
+/// `fidelity::Fidelity`, which is about how faithfully a *margin* model
+/// tracks a real account -- a different question with the same adjective
+/// attached to it.
+///
+/// Carries the policy with the tier because they are one decision: an
+/// L1 whose policy models nothing is L0 wearing L1's name, and a report
+/// that says "L1" without saying which policy has told the reader
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tier {
+    /// Fills at the observation's prices. No queue, latency or impact.
+    L0,
+    /// Queue, latency and impact as policy — the caller's claim about
+    /// their own market, since a tick carries no depth to measure from.
+    L1(Policy),
+    /// The same, with queue and taker cost measured from the venue's
+    /// book where the run supplies depth, and the policy where it does
+    /// not.
+    L2(Policy),
+}
+
+impl Tier {
+    fn matcher(&self, instrument: InstrumentId) -> Matcher {
+        match self {
+            Self::L0 => Matcher::l0(instrument),
+            Self::L1(p) => Matcher::L1(Box::new(L1Engine::new(instrument, *p))),
+            Self::L2(p) => Matcher::L2(Box::new(L2Engine::new(L1Engine::new(instrument, *p)))),
+        }
+    }
 }
 
 impl RunConfig {
@@ -97,7 +179,15 @@ impl RunConfig {
             funding: FundingSchedule::default(),
             fees: oq_core::Fees::none(),
             position_mode: oq_core::PositionMode::OneWay,
+            tier: Tier::L0,
         }
+    }
+
+    /// Match with a different fidelity tier.
+    #[must_use]
+    pub fn at_tier(mut self, tier: Tier) -> Self {
+        self.tier = tier;
+        self
     }
 
     /// Measure how close the account came to its maintenance
@@ -165,6 +255,29 @@ pub struct RunResult {
     pub max_adverse_ticks: i64,
     /// How close the account came to its maintenance requirement.
     pub margin_usage: MarginUsage,
+    /// Which matcher produced these fills.
+    ///
+    /// Reported because fills without a named matcher are numbers with
+    /// no provenance, and the tiers disagree by design.
+    pub tier: &'static str,
+    /// Depth updates the matcher read and applied.
+    pub depth_applied: u64,
+    /// Depth updates the book refused, in sequence order.
+    ///
+    /// Messages were lost between two updates. The book is left as it
+    /// was rather than guessing the missing state, and the count says
+    /// how often — a reconstruction with holes in it produces plausible
+    /// queues that are wrong, and nothing downstream can tell.
+    pub depth_refused: u64,
+    /// Depth updates handed to a matcher that does not read one.
+    ///
+    /// **Non-zero is a wrong run, not a slow one.** It means the caller
+    /// converted an archive, fed the book, and matched at a tier that
+    /// ignored it — producing L0's or L1's answer under whatever name
+    /// the report carries. It is counted rather than refused because
+    /// refusing would break the run that deliberately feeds one stream
+    /// to several tiers to compare them.
+    pub depth_unused: u64,
 }
 
 /// One liquidation event, kept for the report.
@@ -237,6 +350,24 @@ where
     S: Strategy,
     I: IntoIterator<Item = Tick>,
 {
+    run_observations(config, strategy, ticks.into_iter().map(Observation::Tick))
+}
+
+/// Run `strategy` over ticks and depth interleaved.
+///
+/// The entry L2 needs. Depth reaches the matcher and never the
+/// strategy, so a strategy written for [`run_stream`] runs here
+/// unchanged and sees the same ticks in the same order.
+///
+/// Handing depth to a tier that cannot read it is **counted, not
+/// ignored** — see [`RunResult::depth_unused`]. A run that converted an
+/// archive, fed the book, and matched as L0 anyway is the failure this
+/// exists to make visible.
+pub fn run_observations<S, I>(config: &RunConfig, strategy: &mut S, stream: I) -> RunResult
+where
+    S: Strategy,
+    I: IntoIterator<Item = Observation>,
+{
     // Both arms carry the *same* margin table and differ only in
     // whether the venue is allowed to act on it. Zeroing the table
     // instead would still liquidate at zero equity, which is not the
@@ -249,7 +380,8 @@ where
         config.starting_balance,
     )
     .with_fees(config.fees)
-    .with_mode(config.position_mode);
+    .with_mode(config.position_mode)
+    .matching_with(config.tier.matcher(config.instrument));
     let mut kernel = Kernel::new(match config.margin {
         MarginMode::Enforced => state,
         MarginMode::Ignored => state.without_liquidation(),
@@ -280,8 +412,33 @@ where
     // and only the matcher knows which piece was the last.
     let mut ended: Vec<(OrderId, Ending)> = Vec::new();
 
+    let tier = kernel.state().engine.tier();
     let mut tick_count = 0usize;
-    for tick in ticks {
+    let mut depth_applied = 0u64;
+    let mut depth_refused = 0u64;
+    let mut depth_unused = 0u64;
+    for observation in stream {
+        let tick = match observation {
+            Observation::Tick(t) => t,
+            Observation::Depth(u) => {
+                match kernel.apply_depth(&u) {
+                    DepthOutcome::Applied => depth_applied += 1,
+                    DepthOutcome::Refused(_) => depth_refused += 1,
+                    DepthOutcome::NotRead => depth_unused += 1,
+                }
+                continue;
+            }
+            Observation::Snapshot {
+                update_id,
+                bids,
+                asks,
+            } => {
+                if !kernel.install_snapshot(update_id, &bids, &asks) {
+                    depth_unused += 1;
+                }
+                continue;
+            }
+        };
         tick_count += 1;
         let event = Event::Tick(tick);
         let mut tick_fills: Vec<Fill> = Vec::new();
@@ -485,6 +642,10 @@ where
         },
         equity_curve,
         max_adverse_ticks: max_adverse,
+        tier,
+        depth_applied,
+        depth_refused,
+        depth_unused,
     }
 }
 
@@ -999,5 +1160,198 @@ mod hedge_mode_tests {
             !hedged.liquidations.is_empty(),
             "hedged posts margin for both legs and cannot cover it"
         );
+    }
+}
+
+#[cfg(test)]
+mod depth_path_tests {
+    use super::*;
+    use oq_engine::{Delay, Impact, Latency, QueueAhead};
+    use oq_margin::{Contract, TierTable};
+    use oq_strategy::Intent;
+    use oq_types::{Cash, InstrumentId, OrderId, PriceTicks, QtyLots, Side, Stamp};
+
+    const BTC: Contract = Contract::new(10_000);
+
+    fn table() -> TierTable {
+        TierTable::new(vec![oq_margin::MarginTier {
+            max_notional: Cash(i64::MAX),
+            rate: oq_types::Ratio::from_percent(1),
+            amount: Cash::ZERO,
+        }])
+        .expect("single bracket")
+    }
+
+    fn config(balance: i64) -> RunConfig {
+        RunConfig::new(
+            InstrumentId::new(1),
+            BTC,
+            table(),
+            Cash::from_units(balance),
+        )
+    }
+
+    /// Rests one limit buy at a price the fixture trades through, then
+    /// holds. Enough to make the queue the only thing that decides
+    /// whether it fills.
+    struct RestOnce {
+        placed: bool,
+        price: i64,
+    }
+
+    impl Strategy for RestOnce {
+        fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+            if !self.placed {
+                self.placed = true;
+                out.push(Intent::Limit {
+                    id: OrderId(1),
+                    side: Side::Buy,
+                    price: PriceTicks(self.price),
+                    qty: QtyLots(1),
+                    offset: oq_types::Offset::Open,
+                });
+            }
+        }
+        fn name(&self) -> &str {
+            "rest-once"
+        }
+    }
+
+    fn flat_ticks(n: i64, price: i64) -> Vec<Tick> {
+        (1..=n)
+            .map(|i| Tick {
+                stamp: Stamp::new(i * 1_000_000, i * 1_000_000),
+                last: PriceTicks(price),
+                high: PriceTicks(price),
+                low: PriceTicks(price),
+                bid: PriceTicks(price),
+                ask: PriceTicks(price),
+                volume: QtyLots(10 * i),
+            })
+            .collect()
+    }
+
+    fn depth_at(id: u64, price: i64, qty: i64) -> Observation {
+        Observation::Depth(Box::new(DepthUpdate {
+            event_ms: 0,
+            first_id: id,
+            final_id: id,
+            prev_final_id: if id > 1 { Some(id - 1) } else { None },
+            bids: vec![oq_engine::Level { price, qty }],
+            asks: Vec::new(),
+        }))
+    }
+
+    /// The whole point of the path: depth reaches the matcher and
+    /// changes when an order fills.
+    ///
+    /// Same strategy, same ticks. The only difference is that one run
+    /// was told the level it joined already had 5000 lots displayed on
+    /// it — so it waits, and the other does not.
+    #[test]
+    fn depth_reaches_the_matcher_and_delays_a_fill() {
+        let ticks = flat_ticks(5, 100);
+        let policy = Policy {
+            queue: QueueAhead::None,
+            latency: Latency {
+                entry: Delay::Fixed(Nanos(0)),
+                response: Delay::Fixed(Nanos(0)),
+            },
+            impact: Impact { coefficient: 0 },
+        };
+
+        let cfg = config(1_000_000).at_tier(Tier::L2(policy));
+        let mut with_book = RestOnce {
+            placed: false,
+            price: 100,
+        };
+        // The snapshot first: an incremental stream says what changed,
+        // and a book with nothing to change refuses every update.
+        let stream = [
+            Observation::Snapshot {
+                update_id: 0,
+                bids: vec![oq_engine::Level {
+                    price: 100,
+                    qty: 5_000,
+                }],
+                asks: Vec::new(),
+            },
+            depth_at(1, 100, 5_000),
+        ]
+        .into_iter()
+        .chain(ticks.iter().copied().map(Observation::Tick));
+        let deep = run_observations(&cfg, &mut with_book, stream);
+
+        let mut no_book = RestOnce {
+            placed: false,
+            price: 100,
+        };
+        let empty = run_stream(&cfg, &mut no_book, ticks.iter().copied());
+
+        assert_eq!(deep.tier, "L2");
+        assert_eq!(deep.depth_applied, 1, "the update reached the matcher");
+        assert_eq!(deep.depth_refused, 0, "and was in sequence");
+        assert_eq!(deep.depth_unused, 0);
+        assert!(
+            !empty.fills.is_empty(),
+            "with nothing displayed the order is first in the queue and fills"
+        );
+        assert!(
+            deep.fills.is_empty(),
+            "behind 5000 lots it must not fill in {} ticks; got {:?}",
+            ticks.len(),
+            deep.fills
+        );
+    }
+
+    /// Depth handed to a tier that cannot read it is counted, not
+    /// ignored.
+    ///
+    /// A run that converted an archive, fed the book, and matched as L0
+    /// anyway reports L0's answer under whatever name the caller gave
+    /// it. The count is what lets a reader see that happened.
+    #[test]
+    fn depth_given_to_a_lower_tier_is_reported_unused() {
+        let ticks = flat_ticks(3, 100);
+        let mut s = RestOnce {
+            placed: false,
+            price: 100,
+        };
+        let out = run_observations(
+            &config(1_000_000),
+            &mut s,
+            core::iter::once(depth_at(1, 100, 5_000))
+                .chain(ticks.iter().copied().map(Observation::Tick)),
+        );
+        assert_eq!(out.tier, "L0");
+        assert_eq!(out.depth_applied, 0);
+        assert_eq!(out.depth_unused, 1, "an ignored update must be visible");
+    }
+
+    /// Raising the tier without giving it anything new must not change
+    /// the answer. Otherwise the tiers are a menu rather than a claim
+    /// about fidelity.
+    #[test]
+    fn a_higher_tier_given_nothing_extra_matches_l0() {
+        let ticks = flat_ticks(5, 100);
+        let mut a = RestOnce {
+            placed: false,
+            price: 100,
+        };
+        let l0 = run_stream(&config(1_000_000), &mut a, ticks.iter().copied());
+
+        let mut b = RestOnce {
+            placed: false,
+            price: 100,
+        };
+        let l2 = run_stream(
+            &config(1_000_000).at_tier(Tier::L2(Policy::TRANSPARENT)),
+            &mut b,
+            ticks.iter().copied(),
+        );
+
+        assert!(!l0.fills.is_empty(), "the fixture must fill");
+        assert_eq!(l2.fills, l0.fills, "an unfed L2 must reproduce L0");
+        assert_eq!(l2.tier, "L2", "while still reporting what it was");
     }
 }
