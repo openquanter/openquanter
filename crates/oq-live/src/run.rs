@@ -1072,6 +1072,17 @@ where
         "unbookable       {} report(s) the venue sent and this build could not read",
         metrics.unbookable_reports
     );
+    // Connections made and connections dropped for going quiet. The
+    // second number is the one that used to be invisible: a stream that
+    // stops delivering reads exactly like a quiet market, and the only
+    // way to see it was to measure the gaps in the journal afterwards.
+    println!(
+        "market data      depth {} connection(s), {} silent; trade {} connection(s), {} silent",
+        market.depth().connections(),
+        market.depth().stalls(),
+        market.trade().connections(),
+        market.trade().stalls()
+    );
     ExitCode::SUCCESS
 }
 
