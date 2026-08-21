@@ -373,7 +373,7 @@ where
     // and only the matcher knows which piece was the last.
     let mut ended: Vec<(OrderId, Ending)> = Vec::new();
 
-    let tier = kernel.state().holding.engine.tier();
+    let tier = kernel.state().holding().engine.tier();
     let mut tick_count = 0usize;
     let mut depth_applied = 0u64;
     let mut depth_refused = 0u64;
@@ -469,7 +469,7 @@ where
         // the branch below already tests for it — so the common case of
         // a strategy that is out of the market pays nothing for this.
         if track_margin && (!summary.qty.is_zero() || !summary.short_qty.is_zero()) {
-            let maintenance = kernel.state().maintenance(summary.mark);
+            let maintenance = kernel.state().maintenance();
             if maintenance.0 > peak_maintenance.0 {
                 peak_maintenance = maintenance;
             }
