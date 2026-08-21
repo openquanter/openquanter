@@ -275,10 +275,9 @@ stays frozen by construction. A run selects it with
 `RunConfig::at_tier(Tier::L2(policy))` and feeds it depth through
 `run_observations`, which takes ticks and depth updates on one stream;
 `cargo run --release -p oq-examples --example book_tiers` is the
-comparison. Two things are still missing from it: converting an archive
-into that stream is the caller's loop rather than a command, and depth
-does not go through `Event`, so replaying an L2 run's journal reproduces
-its orders but not the book they matched against.
+comparison. `oq-tiers` runs it against a
+captured archive, and `Event::Depth` puts the book in the journal, so an
+L2 run replays into the market it actually matched in.
 
 **Designed but not built:** everything under *AI-native* above. The pillars
 section describes where this is going; this section describes where it is.

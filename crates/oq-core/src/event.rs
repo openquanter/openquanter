@@ -43,10 +43,32 @@ pub mod kind {
     /// which it was, because a replay that fed a venue fill back through
     /// a matcher would book it twice.
     pub const VENUE_FILL: u16 = 8;
+    /// A depth update from the venue, for a matcher that reads one.
+    ///
+    /// **The first variable-length kind.** Every other payload here is
+    /// a fixed size and decode refuses anything else, which is what
+    /// stops a truncated record being read as a valid shorter one. A
+    /// depth update is a list of levels, so it carries its own counts
+    /// and decode checks the byte count against them -- the same rule,
+    /// stated against a declared length rather than a constant.
+    ///
+    /// Recorded because it changes results. An L2 run's fills depend on
+    /// the book its orders queued in, and a journal without it replays
+    /// the orders into a different market. That is the difference
+    /// between a record of what happened and a record of what was
+    /// asked for.
+    pub const DEPTH: u16 = 9;
 }
 
 /// An input to the core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Clone` but not `Copy`, since [`Event::Depth`] carries a list of
+/// levels. Everything else here is a handful of integers and copying it
+/// was free; a depth update is the one input whose size depends on what
+/// the venue sent, and pretending otherwise would mean either leaving
+/// it out of the journal or putting a fixed cap on how deep a book may
+/// be.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A market observation.
     Tick(Tick),
@@ -86,6 +108,18 @@ pub enum Event {
     /// simulated run produces its own fills and one arriving from
     /// outside would be a second matcher.
     VenueFill(oq_types::Fill),
+    /// A depth update from the venue.
+    ///
+    /// Read by [`Matcher::L2`](crate::matcher::Matcher::L2) and by no
+    /// other tier. A tier that does not keep a book reports it as
+    /// unread rather than failing: a run is allowed to be handed data
+    /// it does not use, and is not allowed to be silent about it.
+    ///
+    /// Boxed because it is the one variant that is not a handful of
+    /// integers, and an enum is as large as its largest arm -- every
+    /// tick in every journal would otherwise carry the footprint of a
+    /// book it does not hold.
+    Depth(Box<oq_engine::DepthUpdate>),
 }
 
 impl Event {
@@ -100,6 +134,7 @@ impl Event {
             Self::Time(_) => kind::TIME,
             Self::MarginDeposit { .. } => kind::MARGIN_DEPOSIT,
             Self::VenueFill(_) => kind::VENUE_FILL,
+            Self::Depth(_) => kind::DEPTH,
         }
     }
 
@@ -114,12 +149,43 @@ impl Event {
             // by when it happened, and the local receive time is a
             // property of the link rather than of the trade.
             Self::VenueFill(f) => f.stamp.exch,
+            // The venue's event time, in the unit everything else here
+            // uses. A depth update carries milliseconds because that is
+            // what the venue sends; ordering against ticks needs
+            // nanoseconds, and converting at the boundary keeps one unit
+            // in the kernel.
+            Self::Depth(u) => Nanos(u.event_ms.saturating_mul(1_000_000)),
         }
     }
 
     /// Encode the payload (the kind travels in the record header).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
+        // The one variable-length payload, taken first because the match
+        // below is over a copy and a list of levels is not one.
+        //
+        // Layout: the four sequence fields, then a byte saying whether
+        // `prev_final_id` is present, then the two level counts, then
+        // the levels. Counts before the data, so a reader knows how much
+        // to expect before it reads it -- and can refuse a payload whose
+        // size disagrees with what it declared, which is the same rule
+        // the fixed-size kinds enforce against a constant.
+        if let Self::Depth(u) = self {
+            let mut out = Vec::with_capacity(41 + (u.bids.len() + u.asks.len()) * 16);
+            out.extend_from_slice(&u.event_ms.to_le_bytes());
+            out.extend_from_slice(&u.first_id.to_le_bytes());
+            out.extend_from_slice(&u.final_id.to_le_bytes());
+            out.extend_from_slice(&u.prev_final_id.unwrap_or(0).to_le_bytes());
+            out.push(u8::from(u.prev_final_id.is_some()));
+            out.extend_from_slice(&(u.bids.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(u.asks.len() as u32).to_le_bytes());
+            for level in u.bids.iter().chain(u.asks.iter()) {
+                out.extend_from_slice(&level.price.to_le_bytes());
+                out.extend_from_slice(&level.qty.to_le_bytes());
+            }
+            return out;
+        }
+
         let mut out = Vec::with_capacity(64);
         let put_i64 = |out: &mut Vec<u8>, v: i64| out.extend_from_slice(&v.to_le_bytes());
         match *self {
@@ -200,6 +266,7 @@ impl Event {
                 put_i64(&mut out, amount);
                 put_i64(&mut out, at.0);
             }
+            Self::Depth(_) => unreachable!("handled before the match"),
         }
         out
     }
@@ -309,6 +376,71 @@ impl Event {
                     at: Nanos(i64_at(payload, 1)?),
                 })
             }
+            kind::DEPTH => {
+                // The only kind whose length is declared rather than
+                // fixed, so the check is against the declaration: the
+                // header, then exactly the levels it says it carries.
+                // A payload that disagrees with its own counts is a
+                // truncation or a corruption, and reading it as a
+                // shorter book would put a queue behind levels that
+                // were never there.
+                const HEADER: usize = 8 + 8 + 8 + 8 + 1 + 4 + 4;
+                if payload.len() < HEADER {
+                    return None;
+                }
+                let at = |i: usize| -> Option<i64> {
+                    payload
+                        .get(i..i + 8)?
+                        .try_into()
+                        .ok()
+                        .map(i64::from_le_bytes)
+                };
+                let u64_at = |i: usize| -> Option<u64> {
+                    payload
+                        .get(i..i + 8)?
+                        .try_into()
+                        .ok()
+                        .map(u64::from_le_bytes)
+                };
+                let u32_at = |i: usize| -> Option<u32> {
+                    payload
+                        .get(i..i + 4)?
+                        .try_into()
+                        .ok()
+                        .map(u32::from_le_bytes)
+                };
+                let prev = u64_at(24)?;
+                let prev_final_id = match payload[32] {
+                    0 => None,
+                    1 => Some(prev),
+                    // A third value is a record this build cannot read,
+                    // not a `None` to fall back on.
+                    _ => return None,
+                };
+                let n_bids = u32_at(33)? as usize;
+                let n_asks = u32_at(37)? as usize;
+                let levels = n_bids.checked_add(n_asks)?;
+                if payload.len() != HEADER + levels.checked_mul(16)? {
+                    return None;
+                }
+                let mut read = Vec::with_capacity(levels);
+                for i in 0..levels {
+                    let o = HEADER + i * 16;
+                    read.push(oq_engine::Level {
+                        price: at(o)?,
+                        qty: at(o + 8)?,
+                    });
+                }
+                let asks = read.split_off(n_bids);
+                Some(Self::Depth(Box::new(oq_engine::DepthUpdate {
+                    event_ms: at(0)?,
+                    first_id: u64_at(8)?,
+                    final_id: u64_at(16)?,
+                    prev_final_id,
+                    bids: read,
+                    asks,
+                })))
+            }
             kind::VENUE_FILL => {
                 // Exact length, like every other kind: a truncated
                 // record must not read as a valid shorter one.
@@ -396,7 +528,115 @@ mod tests {
                 amount: -12_345,
                 at: Nanos(80),
             },
+            Event::Depth(Box::new(oq_engine::DepthUpdate {
+                event_ms: 1_786_000_000_123,
+                first_id: 7_000,
+                final_id: 7_005,
+                prev_final_id: Some(6_999),
+                bids: vec![
+                    oq_engine::Level {
+                        price: 6_200_010,
+                        qty: 1_500,
+                    },
+                    oq_engine::Level {
+                        price: 6_200_000,
+                        qty: 2_500,
+                    },
+                ],
+                asks: vec![oq_engine::Level {
+                    price: 6_200_020,
+                    qty: 2_000,
+                }],
+            })),
         ]
+    }
+
+    fn depth(bids: Vec<oq_engine::Level>, asks: Vec<oq_engine::Level>) -> Event {
+        Event::Depth(Box::new(oq_engine::DepthUpdate {
+            event_ms: 1,
+            first_id: 2,
+            final_id: 3,
+            prev_final_id: None,
+            bids,
+            asks,
+        }))
+    }
+
+    fn level(price: i64, qty: i64) -> oq_engine::Level {
+        oq_engine::Level { price, qty }
+    }
+
+    /// The two sides survive as two sides.
+    ///
+    /// They are encoded as one run of levels behind two counts, so an
+    /// off-by-one in the split reads a bid as an ask -- which produces a
+    /// crossed book, prices that look plausible, and a queue measured
+    /// against the wrong side.
+    #[test]
+    fn the_sides_do_not_swap_across_the_round_trip() {
+        let e = depth(vec![level(99, 10), level(98, 20)], vec![level(101, 30)]);
+        let Event::Depth(back) = Event::decode(e.kind(), &e.encode()).expect("decodes") else {
+            panic!("wrong kind");
+        };
+        assert_eq!(back.bids, vec![level(99, 10), level(98, 20)]);
+        assert_eq!(back.asks, vec![level(101, 30)]);
+    }
+
+    /// An empty side is empty, not absent.
+    #[test]
+    fn a_one_sided_update_round_trips() {
+        for e in [
+            depth(vec![level(99, 10)], Vec::new()),
+            depth(Vec::new(), vec![level(101, 10)]),
+            depth(Vec::new(), Vec::new()),
+        ] {
+            assert_eq!(Event::decode(e.kind(), &e.encode()).expect("decodes"), e);
+        }
+    }
+
+    /// A payload that disagrees with its own counts is refused.
+    ///
+    /// This kind is the only one whose length is declared rather than
+    /// fixed, so the rule every other kind states against a constant --
+    /// a truncated record must not read as a valid shorter one -- has to
+    /// be stated against the declaration instead. Reading it anyway
+    /// would put a queue behind levels that were never there.
+    #[test]
+    fn a_payload_disagreeing_with_its_counts_is_refused() {
+        let e = depth(vec![level(99, 10), level(98, 20)], vec![level(101, 30)]);
+        let full = e.encode();
+
+        for cut in 1..=(3 * 16) {
+            let short = &full[..full.len() - cut];
+            assert!(
+                Event::decode(kind::DEPTH, short).is_none(),
+                "a payload {cut} bytes short must not decode"
+            );
+        }
+
+        let mut long = full.clone();
+        long.push(0);
+        assert!(Event::decode(kind::DEPTH, &long).is_none());
+
+        // A count claiming more levels than the bytes hold. The 16 MiB
+        // frame cap is the only thing between this and an allocation the
+        // checksum has not yet had a chance to reject.
+        let mut lying = full;
+        lying[33..37].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Event::decode(kind::DEPTH, &lying).is_none());
+    }
+
+    /// The presence byte for `prev_final_id` takes two values.
+    ///
+    /// A third is a record this build cannot read. Falling back to
+    /// `None` would turn an unreadable record into a snapshot boundary,
+    /// and the book would accept the next update as a fresh start.
+    #[test]
+    fn an_unknown_presence_byte_is_refused() {
+        let e = depth(vec![level(99, 10)], Vec::new());
+        let mut bytes = e.encode();
+        bytes[32] = 2;
+        assert!(Event::decode(kind::DEPTH, &bytes).is_none());
     }
 
     #[test]
