@@ -23,6 +23,17 @@
 //! thing that makes the queue decide the outcome. Its P&L is not a
 //! finding; the fill counts either side of it are.
 //!
+//! # What it has measured
+//!
+//! Ten hours spread across four days of captured BTCUSDT, 1.3 million
+//! depth updates, none refused by the sequencing check: a bid resting
+//! at the touch filled **13,972 times at L0 and 3,140 at L2**. No hour
+//! kept more than 44.6% of L0's fills or fewer than 12.5%.
+//!
+//! The spread matters as much as the total. A backtest's error here is
+//! not a constant to subtract; it depends on how thick the book was that
+//! hour, which is exactly the thing a tick file does not carry.
+//!
 //! # The queue here still only depletes on trades
 //!
 //! No MBP feed can tell a cancellation ahead of you from one behind, so
