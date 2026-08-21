@@ -22,6 +22,10 @@ const BINANCE: Samples = Samples {
     trade_price_qty: (6_200_010, 500),
     event_time_ns: 1_786_780_800_123_000_000,
     not_a_message: br#"{"result":null,"id":1}"#,
+    // Verbatim from a capture: 6312 of these in one hour of BTCUSDT,
+    // among 1.45 million real trades. Well formed, id-bearing, and not
+    // a trade.
+    non_trade: br#"{"e":"trade","E":1787151602037,"T":1787151602037,"s":"BTCUSDT","t":7979344737,"p":"0","q":"0","X":"NA","m":true,"st":1}"#,
 };
 
 /// An OKX swap depth update and trade, as recorded. A snapshot's
@@ -41,6 +45,12 @@ const OKX: Samples = Samples {
     trade_price_qty: (620_001, 50),
     event_time_ns: 1_786_780_800_123_000_000,
     not_a_message: br#"{"event":"subscribe","arg":{"channel":"books"}}"#,
+    // Constructed rather than captured: this venue has not been seen
+    // sending one. The contract is not "reject the records your venue
+    // happens to send", it is "a zero price is not a price", and an
+    // adapter that would pass one through is wrong before the first
+    // such message arrives rather than after.
+    non_trade: br#"{"arg":{"channel":"trades","instId":"BTC-USDT-SWAP"},"data":[{"instId":"BTC-USDT-SWAP","tradeId":"481924","px":"0","sz":"0","side":"buy","ts":"1786780800123"}]}"#,
 };
 
 #[test]
@@ -85,6 +95,7 @@ fn the_suite_reports_every_failure_rather_than_the_first() {
         trade_price_qty: OKX.trade_price_qty,
         event_time_ns: OKX.event_time_ns,
         not_a_message: BINANCE.not_a_message,
+        non_trade: BINANCE.non_trade,
     };
     let report = check(v.as_ref(), &mismatched);
     assert!(!report.passed(), "the wrong venue's payloads must not pass");

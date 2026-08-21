@@ -50,6 +50,14 @@ pub struct Samples {
     pub event_time_ns: i64,
     /// A payload that is not a message of any kind this adapter parses.
     pub not_a_message: &'static [u8],
+    /// A message in this venue's own shape that declares no trade.
+    ///
+    /// Separate from `not_a_message` because it is not malformed: it
+    /// parses, and what it parses to is nothing. Binance really
+    /// publishes these; whether a given venue does is beside the point,
+    /// since an adapter that would pass a zero price through is wrong
+    /// whether or not its venue has yet sent one.
+    pub non_trade: &'static [u8],
 }
 
 /// What the suite found.
@@ -230,6 +238,15 @@ pub fn check(venue: &dyn Venue, s: &Samples) -> Report {
     r.check(venue.parse_depth(s.not_a_message, scales).is_err(), || {
         format!("{}: parsed a non-message as depth", venue.id())
     });
+    // A record the venue publishes on the trade stream that is not a
+    // trade. One zero price reaching a window makes its low zero, and a
+    // resting buy is triggered by the low -- so this is the difference
+    // between a backtest that fills orders the venue would have filled
+    // and one that does not.
+    r.check(venue.parse_trade(s.non_trade, scales).is_none(), || {
+        format!("{}: a message declaring no trade parsed as one", venue.id())
+    });
+
     r.check(venue.parse_trade(s.not_a_message, scales).is_none(), || {
         format!("{}: parsed a non-message as a trade", venue.id())
     });
