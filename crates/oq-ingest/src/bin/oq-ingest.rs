@@ -122,11 +122,10 @@ fn main() -> ExitCode {
     let mut hours: Vec<String> = Vec::new();
     for stream in ["depth", "trade"] {
         for path in files_for(&archive, stream, &day) {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let stem = stem.to_string();
-                if !hours.contains(&stem) {
-                    hours.push(stem);
-                }
+            if let Some(stem) = oq_l2feed::archive::stem(&path)
+                && !hours.contains(&stem)
+            {
+                hours.push(stem);
             }
         }
     }
@@ -141,7 +140,7 @@ fn main() -> ExitCode {
         for stream in ["depth", "trade"] {
             let mut bytes = Vec::new();
             for path in files_for(&archive, stream, &day) {
-                if path.file_stem().and_then(|s| s.to_str()) != Some(hour.as_str()) {
+                if oq_l2feed::archive::stem(&path).as_deref() != Some(hour.as_str()) {
                     continue;
                 }
                 match oq_l2feed::archive::read(&path) {
@@ -227,6 +226,13 @@ fn main() -> ExitCode {
     }
     println!("gap markers     {}", report.gaps);
     println!("unparseable     {}", report.unparseable);
+    if report.non_trades > 0 {
+        println!(
+            "not a trade     {} — records the venue publishes on the trade stream \
+             that declare no trade",
+            report.non_trades
+        );
+    }
     println!("wrote           {out} ({} bytes)", encoded.len());
 
     if report.ticks == 0 {
@@ -240,20 +246,26 @@ fn main() -> ExitCode {
 ///
 /// Daily rotation writes `<stream>/<day>.oqcap`; hourly writes
 /// `<stream>/<day>/HH.oqcap`. Both are read, so a day that was captured
-/// across a rotation change still converts as one day.
+/// across a rotation change still converts as one day. Either may carry
+/// a `.zst` suffix -- everything that has been through the archive step
+/// does -- so the test is `archive::is_capture`, not an extension.
 fn files_for(archive: &Path, stream: &str, day: &str) -> Vec<PathBuf> {
     let dir = archive.join(stream);
     let mut out = Vec::new();
 
-    let daily = dir.join(format!("{day}.oqcap"));
-    if daily.is_file() {
-        out.push(daily);
+    for daily in [
+        dir.join(format!("{day}.oqcap")),
+        dir.join(format!("{day}.oqcap.zst")),
+    ] {
+        if daily.is_file() {
+            out.push(daily);
+        }
     }
     if let Ok(entries) = std::fs::read_dir(dir.join(day)) {
         let mut hourly: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "oqcap"))
+            .filter(|p| oq_l2feed::archive::is_capture(p))
             .collect();
         hourly.sort();
         out.extend(hourly);
