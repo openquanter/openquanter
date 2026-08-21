@@ -170,7 +170,9 @@ fn a_filled_order_leaves_the_book_so_a_replay_cannot_match_it_again() {
 #[test]
 fn a_venue_fill_that_breaches_maintenance_is_noticed_at_once() {
     let mut s = state(Matching::Venue);
-    s.balance = Cash::from_units(50);
+    // Overwrite by crediting the difference: the balance is what the
+    // account holds in its settlement currency, not a field to poke.
+    s.credit(Cash::from_units(50).sub(s.balance()));
     let mut k = Kernel::new(s);
     k.apply(&Event::Tick(tick(SEC, 6_000_000)));
 
