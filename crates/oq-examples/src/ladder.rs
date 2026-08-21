@@ -55,6 +55,7 @@ impl Strategy for MartingaleLadder {
             self.rungs = 1;
             let id = self.id();
             out.push(Intent::Market {
+                instrument: ctx.instrument,
                 id,
                 side: Side::Buy,
                 qty: QtyLots(self.base_qty),
@@ -77,6 +78,7 @@ impl Strategy for MartingaleLadder {
             self.rungs += 1;
             let id = self.id();
             out.push(Intent::Market {
+                instrument: ctx.instrument,
                 id,
                 side: Side::Buy,
                 qty: QtyLots(qty),

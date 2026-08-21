@@ -282,7 +282,10 @@ impl PyOrder {
 }
 
 impl PyOrder {
-    fn into_intent(self, id: u64) -> Intent {
+    /// `instrument` is the run's, because the Python surface has no way
+    /// to name another one yet: a `PyOrder` carries a side, a size and a
+    /// price. When it grows one, this is where it arrives.
+    fn into_intent(self, id: u64, instrument: oq_types::InstrumentId) -> Intent {
         let side = if self.side == "buy" {
             Side::Buy
         } else {
@@ -297,12 +300,14 @@ impl PyOrder {
         let id = OrderId(id);
         match self.price {
             None => Intent::Market {
+                instrument,
                 id,
                 side,
                 qty,
                 offset,
             },
             Some(p) => Intent::Limit {
+                instrument,
                 id,
                 side,
                 qty,
@@ -378,7 +383,7 @@ impl PyDriven {
                     Ok(orders) => {
                         for o in orders {
                             self.next_id += 1;
-                            out.push(o.into_intent(self.next_id));
+                            out.push(o.into_intent(self.next_id, ctx.instrument));
                         }
                     }
                     Err(_) => {

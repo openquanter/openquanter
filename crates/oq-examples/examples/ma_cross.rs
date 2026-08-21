@@ -102,7 +102,7 @@ impl Strategy for MaCross {
         self.position_open = want_long;
         self.flips += 1;
         let id = self.id();
-        out.push(Intent::market(
+        out.push(ctx.market(
             id,
             if want_long { Side::Buy } else { Side::Sell },
             QtyLots(if ctx.position.0 == 0 {

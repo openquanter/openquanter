@@ -105,6 +105,7 @@ impl Strategy for RestingBid {
                 let id = OrderId(self.next_id);
                 self.next_id += 1;
                 out.push(Intent::Limit {
+                    instrument: ctx.instrument,
                     id,
                     side: Side::Buy,
                     price: PriceTicks(want),
@@ -325,6 +326,12 @@ fn main() -> ExitCode {
         "depth applied {}   refused {}   ignored {}",
         l2.depth_applied, l2.depth_refused, l2.depth_unused
     );
+    if l0.misrouted_orders > 0 || l2.misrouted_orders > 0 {
+        println!(
+            "orders refused for naming another instrument: {} at L0, {} at L2",
+            l0.misrouted_orders, l2.misrouted_orders
+        );
+    }
     println!(
         "  the book was bootstrapped from the first update, not a REST \
          snapshot, so levels resting before the capture began are absent \

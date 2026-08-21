@@ -38,33 +38,65 @@ pub mod indicator;
 
 pub use indicator::{Ema, Macd, MacdValue, Rsi, Sma, Warmup, Window};
 
-use oq_types::{Fill, Offset, OrderId, PriceTicks, QtyLots, Side};
+use oq_types::{Fill, InstrumentId, Offset, OrderId, PriceTicks, QtyLots, Side};
 
 /// What a strategy wants to happen next.
+///
+/// # Every order names its instrument
+///
+/// Not "the one the callback was about". A [`Fill`] carries an
+/// instrument and an intent that did not would be the one asymmetry in
+/// the pair — but the reason is sharper than symmetry: an implicit
+/// "current instrument" makes the same line of code place different
+/// orders depending on which callback it ran in, and nothing at the
+/// call site shows it. That is fine while an account holds one
+/// instrument and is a defect the moment it holds two.
+///
+/// [`Context`] builds these with its own instrument already filled in,
+/// so a single-instrument strategy writes `ctx.limit(..)` and never
+/// names one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
     /// Rest a limit order.
     Limit {
+        instrument: InstrumentId,
         id: OrderId,
         side: Side,
         price: PriceTicks,
         qty: QtyLots,
         /// Whether this adds to a position or reduces one. Only matters
         /// under hedge accounting, where a buy while short is ambiguous
-        /// without it; [`Intent::limit`] defaults it to `Open`.
+        /// without it; [`Context::limit`] defaults it to `Open`.
         offset: Offset,
     },
     /// Cross the spread now.
     Market {
+        instrument: InstrumentId,
         id: OrderId,
         side: Side,
         qty: QtyLots,
         offset: Offset,
     },
     /// Withdraw a resting order.
+    ///
+    /// No instrument: an order id is unique across the account, so the
+    /// order names its own holding. Requiring one would let a caller
+    /// name the wrong one and be refused for an order that exists.
     Cancel(OrderId),
-    /// Withdraw everything.
+    /// Withdraw everything, on every instrument.
     CancelAll,
+}
+
+impl Intent {
+    /// Which instrument this is for, or `None` when it is for all of
+    /// them or for an order that already names its own.
+    #[must_use]
+    pub const fn instrument(&self) -> Option<InstrumentId> {
+        match self {
+            Self::Limit { instrument, .. } | Self::Market { instrument, .. } => Some(*instrument),
+            Self::Cancel(_) | Self::CancelAll => None,
+        }
+    }
 }
 
 /// How an order ended.
@@ -85,6 +117,13 @@ pub enum Ending {
 /// What the strategy is told before it decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
+    /// Which instrument this callback is about.
+    ///
+    /// The one [`Context::limit`] and [`Context::market`] fill in. A
+    /// strategy that holds only this instrument never has to name it;
+    /// one that holds several is told which it is being called for
+    /// rather than having to infer it from the price.
+    pub instrument: InstrumentId,
     /// The observation that triggered this call.
     pub tick: oq_engine::Tick,
     /// Signed position: positive long, negative short.
@@ -107,13 +146,22 @@ pub struct Context {
 }
 
 impl Intent {
-    /// A limit order that adds to a position.
+    /// A limit order on a named instrument, adding to a position.
     ///
-    /// The common case, and the only one that exists under one-way
-    /// netting. Use the variant directly to close a specific leg.
+    /// [`Context::limit`] is the one a strategy usually wants: it fills
+    /// in the instrument the callback is about. This is for a caller
+    /// that means a particular one — the case the instrument field
+    /// exists for.
     #[must_use]
-    pub const fn limit(id: OrderId, side: Side, price: PriceTicks, qty: QtyLots) -> Self {
+    pub const fn limit_on(
+        instrument: InstrumentId,
+        id: OrderId,
+        side: Side,
+        price: PriceTicks,
+        qty: QtyLots,
+    ) -> Self {
         Self::Limit {
+            instrument,
             id,
             side,
             price,
@@ -122,10 +170,16 @@ impl Intent {
         }
     }
 
-    /// A market order that adds to a position.
+    /// A market order on a named instrument, adding to a position.
     #[must_use]
-    pub const fn market(id: OrderId, side: Side, qty: QtyLots) -> Self {
+    pub const fn market_on(
+        instrument: InstrumentId,
+        id: OrderId,
+        side: Side,
+        qty: QtyLots,
+    ) -> Self {
         Self::Market {
+            instrument,
             id,
             side,
             qty,
@@ -138,19 +192,28 @@ impl Intent {
     pub const fn closing(self) -> Self {
         match self {
             Self::Limit {
+                instrument,
                 id,
                 side,
                 price,
                 qty,
                 ..
             } => Self::Limit {
+                instrument,
                 id,
                 side,
                 price,
                 qty,
                 offset: Offset::Close,
             },
-            Self::Market { id, side, qty, .. } => Self::Market {
+            Self::Market {
+                instrument,
+                id,
+                side,
+                qty,
+                ..
+            } => Self::Market {
+                instrument,
                 id,
                 side,
                 qty,
@@ -158,6 +221,25 @@ impl Intent {
             },
             other => other,
         }
+    }
+}
+
+impl Context {
+    /// A limit order on this callback's instrument, adding to a
+    /// position.
+    ///
+    /// The common case, and the reason a single-instrument strategy
+    /// never writes an instrument down: this one is already the right
+    /// answer. Use [`Intent::limit_on`] to mean a different one.
+    #[must_use]
+    pub const fn limit(&self, id: OrderId, side: Side, price: PriceTicks, qty: QtyLots) -> Intent {
+        Intent::limit_on(self.instrument, id, side, price, qty)
+    }
+
+    /// A market order on this callback's instrument.
+    #[must_use]
+    pub const fn market(&self, id: OrderId, side: Side, qty: QtyLots) -> Intent {
+        Intent::market_on(self.instrument, id, side, qty)
     }
 }
 
@@ -345,6 +427,7 @@ mod tests {
             if !self.done && ctx.position.is_zero() {
                 self.done = true;
                 out.push(Intent::Market {
+                    instrument: oq_types::InstrumentId::new(1),
                     id: OrderId::new(1),
                     side: Side::Buy,
                     qty: QtyLots(1),
@@ -362,6 +445,7 @@ mod tests {
     fn a_strategy_is_testable_without_a_host() {
         let mut s = BuyOnce { done: false };
         let ctx = Context {
+            instrument: oq_types::InstrumentId::new(1),
             tick: oq_engine::Tick::trades_only(Stamp::synthetic(0), 100, 100, 100),
             position: QtyLots::ZERO,
             entry: PriceTicks::ZERO,

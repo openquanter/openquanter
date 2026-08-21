@@ -30,7 +30,7 @@ impl Strategy for BuyOnce {
     fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
         if !self.0 && ctx.position.is_zero() && ctx.tick.last.0 > 0 {
             self.0 = true;
-            out.push(Intent::market(OrderId(1), Side::Buy, QtyLots(1)));
+            out.push(ctx.market(OrderId(1), Side::Buy, QtyLots(1)));
         }
     }
     fn name(&self) -> &str {

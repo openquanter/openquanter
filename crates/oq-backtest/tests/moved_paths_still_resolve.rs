@@ -19,8 +19,8 @@ use oq_types::{OrderId, QtyLots, Side};
 struct Legacy;
 
 impl Strategy for Legacy {
-    fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
-        out.push(Intent::market(OrderId(1), Side::Buy, QtyLots(1)));
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+        out.push(ctx.market(OrderId(1), Side::Buy, QtyLots(1)));
     }
 
     fn name(&self) -> &str {
@@ -42,6 +42,7 @@ fn a_strategy_written_before_the_move_still_compiles_and_runs() {
     let mut s = Legacy;
     let mut out = Vec::new();
     let ctx = Context {
+        instrument: oq_types::InstrumentId::new(1),
         tick: oq_engine::Tick::default(),
         position: QtyLots(0),
         entry: oq_types::PriceTicks(0),

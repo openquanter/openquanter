@@ -5,7 +5,7 @@
 //! as an inheritance hierarchy a strategy must join, and this is a field
 //! a strategy holds, not a parent it inherits.
 
-use oq_backtest::Intent;
+use oq_backtest::{Context, Intent};
 use oq_types::{Offset, OrderId, QtyLots, Side};
 
 /// Issues order ids and the right offset.
@@ -28,9 +28,10 @@ impl Trader {
     }
 
     /// Open exposure.
-    pub fn open(&mut self, out: &mut Vec<Intent>, side: Side, qty: QtyLots) {
+    pub fn open(&mut self, ctx: &Context, out: &mut Vec<Intent>, side: Side, qty: QtyLots) {
         self.next += 1;
         out.push(Intent::Market {
+            instrument: ctx.instrument,
             id: OrderId(self.next),
             side,
             qty,
@@ -43,12 +44,13 @@ impl Trader {
     /// Takes the quantity to close rather than assuming one lot: a
     /// strategy that scaled in and closes one lot leaves a position it
     /// believes it exited.
-    pub fn close(&mut self, out: &mut Vec<Intent>, side: Side, qty: QtyLots) {
+    pub fn close(&mut self, ctx: &Context, out: &mut Vec<Intent>, side: Side, qty: QtyLots) {
         if qty.0 <= 0 {
             return;
         }
         self.next += 1;
         out.push(Intent::Market {
+            instrument: ctx.instrument,
             id: OrderId(self.next),
             side,
             qty: QtyLots(qty.0.abs()),

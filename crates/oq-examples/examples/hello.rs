@@ -20,10 +20,11 @@ struct BuyAndHold {
 }
 
 impl Strategy for BuyAndHold {
-    fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
         if !self.bought {
             self.bought = true;
             out.push(Intent::Market {
+                instrument: ctx.instrument,
                 id: OrderId::new(1),
                 side: Side::Buy,
                 qty: QtyLots(10),

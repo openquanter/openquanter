@@ -331,6 +331,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 price,
                 qty,
                 offset,
+                ..
             } => vec![self.send(
                 *id,
                 ProposedOrder {
@@ -347,6 +348,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 side,
                 qty,
                 offset,
+                ..
             } => vec![self.send(
                 *id,
                 ProposedOrder {

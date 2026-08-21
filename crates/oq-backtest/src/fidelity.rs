@@ -489,6 +489,7 @@ mod tests {
             depth_applied: 0,
             depth_refused: 0,
             depth_unused: 0,
+            misrouted_orders: 0,
         };
         for _ in 0..liquidations {
             r.liquidations.push(crate::run::Liquidation {
