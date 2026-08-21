@@ -8,9 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+oq-backtest.workspace = true
 oq-data.workspace = true
 oq-engine.workspace = true
 oq-l2feed.workspace = true
+oq-margin.workspace = true
 oq-types.workspace = true
 
 [lints]

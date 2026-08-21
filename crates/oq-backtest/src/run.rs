@@ -20,7 +20,8 @@
 
 use oq_core::matcher::{DepthOutcome, Matcher};
 use oq_core::{Event, Kernel, Output, State};
-use oq_engine::{DepthUpdate, L1Engine, L2Engine, Level, Policy, Tick};
+pub use oq_engine::Observation;
+use oq_engine::{L1Engine, L2Engine, Policy, Tick};
 use oq_margin::{Contract, FundingSchedule, TierTable};
 use oq_strategy::{Context, Ending, Intent, Strategy};
 use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Stamp};
@@ -82,46 +83,6 @@ pub struct RunConfig {
     /// depth for L2 — so raising this alone changes nothing, which is
     /// what makes it safe to expose as an option rather than a rewrite.
     pub tier: Tier,
-}
-
-/// One thing that happened, in the order it happened.
-///
-/// A backtest has always consumed ticks. L2 needs the venue's depth as
-/// well, and depth cannot go *in* a tick: a tick is a fixed record of
-/// seven numbers, and a book is not a field. So the two arrive
-/// interleaved on one stream, ordered the way the venue produced them.
-///
-/// One stream rather than two, because the alternative is a run holding
-/// both and deciding which to advance — which is a merge, written once
-/// here or once per caller, and a merge that gets the order wrong
-/// matches an order against a book from the future.
-#[derive(Debug, Clone)]
-pub enum Observation {
-    /// A market observation the strategy sees.
-    Tick(Tick),
-    /// A depth update the matcher reads. The strategy is not called: it
-    /// consumes ticks, and a book is the matcher's input, not a
-    /// signal's.
-    Depth(Box<DepthUpdate>),
-    /// The snapshot the incremental stream is sequenced against.
-    ///
-    /// A separate arrival because it is one: the venue serves it over
-    /// REST while the updates come over a socket, and the first update
-    /// that can be placed against it is where reconstruction begins.
-    /// Without it a book refuses every update it is given — an
-    /// incremental stream says what changed, and there is nothing to
-    /// change.
-    Snapshot {
-        update_id: u64,
-        bids: Vec<Level>,
-        asks: Vec<Level>,
-    },
-}
-
-impl From<Tick> for Observation {
-    fn from(t: Tick) -> Self {
-        Self::Tick(t)
-    }
 }
 
 /// Which matcher a run uses, as configuration rather than as a type.
@@ -1166,7 +1127,7 @@ mod hedge_mode_tests {
 #[cfg(test)]
 mod depth_path_tests {
     use super::*;
-    use oq_engine::{Delay, Impact, Latency, QueueAhead};
+    use oq_engine::{Delay, DepthUpdate, Impact, Latency, QueueAhead};
     use oq_margin::{Contract, TierTable};
     use oq_strategy::Intent;
     use oq_types::{Cash, InstrumentId, OrderId, PriceTicks, QtyLots, Side, Stamp};
