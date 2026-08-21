@@ -80,7 +80,12 @@ pub enum Submission {
     /// The caller must not resend: the id is known, so the question is
     /// answerable later, and resending is the one action that can turn
     /// "maybe one order" into "certainly two".
-    Unresolved(String),
+    ///
+    /// The id is carried rather than folded into the message, because
+    /// "answerable later" is only true for a caller that still has it.
+    /// It was a string for a while, and in that form the sentence above
+    /// was advice nobody could follow.
+    Unresolved { client_id: String, why: String },
 }
 
 /// What a session trades and how it identifies its orders.
@@ -432,7 +437,10 @@ impl<E: Execution> Session<E> {
                 Ok(None) => Submission::Rejected(
                     "the order never reached the venue; it may be sent again".to_string(),
                 ),
-                Err(e) => Submission::Unresolved(format!("{client_id}: {e}")),
+                Err(e) => Submission::Unresolved {
+                    client_id: client_id.clone(),
+                    why: e.to_string(),
+                },
             },
         }
     }
@@ -448,8 +456,17 @@ impl<E: Execution> Session<E> {
         match self.venue.cancel(&self.symbol, client_id) {
             Placed::Accepted(a) => Submission::Sent(a.client_id),
             Placed::Rejected(r) => Submission::Rejected(r.message),
-            Placed::Unknown(u) => Submission::Unresolved(format!("{}: {}", u.client_id, u.reason)),
+            Placed::Unknown(u) => Submission::Unresolved {
+                client_id: u.client_id,
+                why: u.reason,
+            },
         }
+    }
+
+    /// The venue's symbol for what this session trades.
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
     }
 
     /// Adopt the venue's own view after a reconciliation.

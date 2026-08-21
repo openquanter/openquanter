@@ -643,6 +643,7 @@ where
     // one level up.
     let mut refused = 0_u64;
     let mut unresolved = 0_u64;
+    let mut cancel_failed = 0_u64;
     let mut last_tick_report = Instant::now();
     // The last observation, kept so a fill arriving between ticks can be
     // handed a context. A strategy sizing a ladder needs a price, and the
@@ -715,6 +716,7 @@ where
                                 Outcome::Cancelled { .. } => cancelled += 1,
                                 Outcome::Refused { .. } => refused += 1,
                                 Outcome::Unresolved { .. } => unresolved += 1,
+                                Outcome::CancelFailed { .. } => cancel_failed += 1,
                                 _ => {}
                             }
                             report(&outcome);
@@ -791,6 +793,7 @@ where
                                         Outcome::Cancelled { .. } => cancelled += 1,
                                         Outcome::Refused { .. } => refused += 1,
                                         Outcome::Unresolved { .. } => unresolved += 1,
+                                        Outcome::CancelFailed { .. } => cancel_failed += 1,
                                         Outcome::UnknownOrder(_) => {}
                                     }
                                     report(&outcome);
@@ -839,6 +842,7 @@ where
                                     Outcome::Cancelled { .. } => cancelled += 1,
                                     Outcome::Refused { .. } => refused += 1,
                                     Outcome::Unresolved { .. } => unresolved += 1,
+                                    Outcome::CancelFailed { .. } => cancel_failed += 1,
                                     Outcome::UnknownOrder(_) => {}
                                 }
                                 report(&outcome);
@@ -901,14 +905,32 @@ where
 
         if last_tick_report.elapsed() >= Duration::from_secs(30) {
             last_tick_report = Instant::now();
+            // Submissions the venue never answered, asked about again.
+            // A round trip, so it belongs on the heartbeat and not on
+            // the observation path. Each answer reaches the strategy
+            // through `on_placed`, which is where it would have arrived
+            // had the venue answered the first time.
+            for (local, resting) in trader.chase_unanswered() {
+                if resting {
+                    println!("resolved         {local:?} is resting after all");
+                } else {
+                    println!("resolved         {local:?} never landed; it may be sent again");
+                }
+            }
             // Sampled and recorded together, so what a reader sees in
             // the terminal and what a replay sees in the journal are the
             // same observation rather than two that happen to agree.
             let now_ns = Nanos(now_ns());
             trader.record_waiting(now_ns);
             let waiting = trader.waiting_summary();
+            let unanswered = trader.unanswered();
+            let pending = if unanswered > 0 {
+                format!(", {unanswered} unanswered")
+            } else {
+                String::new()
+            };
             println!(
-                "heartbeat        {ticks} ticks, {} resting{waiting}",
+                "heartbeat        {ticks} ticks, {} resting{pending}{waiting}",
                 trader.working()
             );
         }
@@ -1006,6 +1028,13 @@ where
         println!("limits           ended at version {}", limits.version());
     }
     println!("orders           {sent} placed, {refused} refused, {cancelled} withdrawn");
+    // Zero is the expected number and is not printed. Above zero means
+    // orders this process asked the venue to withdraw were still
+    // resting afterwards, which is the state in which two orders close
+    // the same position and the second one opens the opposite side.
+    if cancel_failed > 0 {
+        println!("CANCEL FAILED    {cancel_failed} withdrawal(s) the venue did not accept");
+    }
     if unresolved > 0 {
         // Loud, and only when it happened. This is the count that says
         // the account may not be where this summary claims it is, so it
@@ -1179,12 +1208,24 @@ fn report(outcome: &Outcome) {
         // Deliberately not printed as a refusal. An operator reading
         // "refused" concludes the order does not exist and that the
         // account is where they left it; here neither is known.
-        Outcome::Unresolved { local, why } => println!(
-            "UNRESOLVED       {local:?}: {why} — this order may be resting; do not replace it"
+        Outcome::Unresolved {
+            local,
+            client_id,
+            why,
+        } => println!(
+            "UNRESOLVED       {local:?} ({client_id}): {why} — this order may be resting; \
+             do not replace it"
         ),
         Outcome::Cancelled { local, client_id } => {
             println!("cancelled        {local:?} ({client_id})");
         }
+        Outcome::CancelFailed {
+            local,
+            client_id,
+            why,
+        } => println!(
+            "CANCEL FAILED    {local:?} ({client_id}): {why} — this order is still resting"
+        ),
         Outcome::UnknownOrder(id) => println!("unknown order    {id:?} — not in this run's map"),
     }
 }

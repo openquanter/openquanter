@@ -450,3 +450,273 @@ fn a_fill_reaches_the_strategy_and_its_answer_reaches_the_venue() {
         "the intent the strategy returned on the fill was not sent: {outcomes:?}"
     );
 }
+
+/// A venue that takes orders and refuses to withdraw them.
+struct WontCancel {
+    n: RefCell<u64>,
+}
+
+impl Execution for WontCancel {
+    fn place(&self, order: &NewOrder, _i: &Instrument) -> Placed {
+        *self.n.borrow_mut() += 1;
+        Placed::Accepted(OrderAck {
+            venue_id: *self.n.borrow() as i64,
+            client_id: order.client_id.clone(),
+            status: "NEW".into(),
+            executed_qty: "0".into(),
+        })
+    }
+    fn cancel(&self, _symbol: &str, _client_id: &str) -> Placed {
+        Placed::Rejected(oq_gateway::Reject {
+            code: Some(-2011),
+            message: "Unknown order sent.".into(),
+        })
+    }
+    fn order_status(&self, _s: &str, _c: &str) -> Result<Option<OrderAck>, VenueError> {
+        Ok(None)
+    }
+}
+
+/// Records what it is told about its own withdrawals.
+struct Withdrawing {
+    open: Vec<Intent>,
+    failed: Vec<OrderId>,
+}
+
+impl Strategy for Withdrawing {
+    fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+        out.append(&mut self.open);
+    }
+    fn on_cancel_failed(&mut self, id: OrderId, _why: &str) {
+        self.failed.push(id);
+    }
+    fn name(&self) -> &str {
+        "withdrawing"
+    }
+}
+
+fn wont_cancel(intents: Vec<Intent>) -> Trader<Withdrawing, WontCancel> {
+    let session = Session::start(
+        WontCancel { n: RefCell::new(0) },
+        RiskGate::new(Limits {
+            max_order_qty: QtyLots(100),
+            max_position_qty: QtyLots(1000),
+            max_order_notional: Cash(1_000_000 * oq_types::CASH_SCALE),
+            price_band: Ratio(500_000_000),
+            max_working: 10,
+            max_rate: 100,
+            rate_window: Nanos(1_000_000_000),
+        }),
+        SessionConfig {
+            symbol: "BTCUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "live".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("clean venue");
+    Trader::new(
+        Withdrawing {
+            open: intents,
+            failed: Vec::new(),
+        },
+        session,
+    )
+}
+
+/// A withdrawal the venue refused is not a withdrawal.
+///
+/// The result of `cancel` was discarded for a while and every request
+/// was announced as `Cancelled`. Re-pricing a take-profit is a cancel
+/// followed by a place, so a failed cancel leaves two orders closing one
+/// position — and the second fill opens the opposite side.
+#[test]
+fn a_refused_cancel_is_not_reported_as_a_cancel() {
+    let mut t = wont_cancel(vec![limit(7)]);
+    t.on_tick(&ctx(), Nanos(1));
+
+    t.strategy_mut().open = vec![Intent::Cancel(OrderId(7))];
+    let outcomes = t.on_tick(&ctx(), Nanos(2));
+
+    assert!(
+        !outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Cancelled { .. })),
+        "a refused withdrawal was announced as having happened: {outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::CancelFailed { local, .. } if *local == OrderId(7))),
+        "the refusal was not reported at all: {outcomes:?}"
+    );
+    assert_eq!(
+        t.strategy().failed,
+        vec![OrderId(7)],
+        "the strategy was not told its order is still resting"
+    );
+}
+
+/// Every order in a sweep, not the first one.
+///
+/// `CancelAll` returned one outcome and the comment above it said it
+/// returned one per order. A sweep in which one cancel failed read
+/// exactly like one in which none did.
+#[test]
+fn a_sweep_reports_every_order_it_touched() {
+    let mut t = wont_cancel(vec![limit(7), limit(8), limit(9)]);
+    t.on_tick(&ctx(), Nanos(1));
+
+    t.strategy_mut().open = vec![Intent::CancelAll];
+    let outcomes = t.on_tick(&ctx(), Nanos(2));
+
+    assert_eq!(
+        outcomes.len(),
+        3,
+        "three orders were swept and {} outcome(s) came back: {outcomes:?}",
+        outcomes.len()
+    );
+    assert_eq!(t.strategy().failed.len(), 3);
+}
+
+/// A venue that takes the order and then loses its voice.
+///
+/// `place` returns `Unknown`, and `order_status` fails until it is told
+/// to stop failing — the shape of a venue that is reachable again after
+/// a network fault, which is the only case in which asking later helps.
+struct Mute {
+    answers: RefCell<bool>,
+    resting: bool,
+}
+
+impl Execution for Mute {
+    fn place(&self, order: &NewOrder, _i: &Instrument) -> Placed {
+        Placed::Unknown(oq_gateway::Unresolved {
+            client_id: order.client_id.clone(),
+            reason: "timed out".into(),
+        })
+    }
+    fn cancel(&self, _symbol: &str, client_id: &str) -> Placed {
+        Placed::Accepted(OrderAck {
+            venue_id: 0,
+            client_id: client_id.to_string(),
+            status: "CANCELED".into(),
+            executed_qty: "0".into(),
+        })
+    }
+    fn order_status(&self, _s: &str, c: &str) -> Result<Option<OrderAck>, VenueError> {
+        if !*self.answers.borrow() {
+            return Err(VenueError::Transport("still unreachable".into()));
+        }
+        Ok(self.resting.then(|| OrderAck {
+            venue_id: 1,
+            client_id: c.to_string(),
+            status: "NEW".into(),
+            executed_qty: "0".into(),
+        }))
+    }
+}
+
+/// Records the answers it eventually gets.
+struct Placing {
+    open: Vec<Intent>,
+    answers: Vec<(OrderId, bool)>,
+}
+
+impl Strategy for Placing {
+    fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+        out.append(&mut self.open);
+    }
+    fn on_placed(&mut self, id: OrderId, accepted: bool) {
+        self.answers.push((id, accepted));
+    }
+    fn name(&self) -> &str {
+        "placing"
+    }
+}
+
+fn mute(resting: bool) -> Trader<Placing, Mute> {
+    let session = Session::start(
+        Mute {
+            answers: RefCell::new(false),
+            resting,
+        },
+        RiskGate::new(Limits {
+            max_order_qty: QtyLots(100),
+            max_position_qty: QtyLots(1000),
+            max_order_notional: Cash(1_000_000 * oq_types::CASH_SCALE),
+            price_band: Ratio(500_000_000),
+            max_working: 10,
+            max_rate: 100,
+            rate_window: Nanos(1_000_000_000),
+        }),
+        SessionConfig {
+            symbol: "BTCUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "live".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("clean venue");
+    Trader::new(
+        Placing {
+            open: vec![limit(7)],
+            answers: Vec::new(),
+        },
+        session,
+    )
+}
+
+/// A submission with no answer is not left without one.
+///
+/// It was counted, printed at shutdown, and never told to the strategy.
+/// So an order that had landed went unmanaged for the life of the run,
+/// and one that had not was never replaced.
+#[test]
+fn a_submission_the_venue_never_answered_is_asked_about_again() {
+    let mut t = mute(true);
+    t.on_tick(&ctx(), Nanos(1));
+
+    assert_eq!(t.unanswered(), 1, "the question is kept");
+    assert!(
+        t.strategy().answers.is_empty(),
+        "and no answer is invented while it is open"
+    );
+
+    // Nothing changes while the venue is still unreachable.
+    assert!(t.chase_unanswered().is_empty());
+    assert_eq!(t.unanswered(), 1);
+
+    *t.session().venue().answers.borrow_mut() = true;
+    let settled = t.chase_unanswered();
+
+    assert_eq!(settled, vec![(OrderId(7), true)]);
+    assert_eq!(t.unanswered(), 0, "and it is not asked a third time");
+    assert_eq!(
+        t.strategy().answers,
+        vec![(OrderId(7), true)],
+        "the strategy learns its order is resting"
+    );
+}
+
+/// The other answer, which is the one that matters more.
+///
+/// `Ok(None)` means the order never landed. A strategy that is never
+/// told keeps a field set for an order that does not exist — and for
+/// this strategy's entry condition, that field stops the side from ever
+/// opening again.
+#[test]
+fn an_order_that_never_landed_is_reported_as_not_resting() {
+    let mut t = mute(false);
+    t.on_tick(&ctx(), Nanos(1));
+    *t.session().venue().answers.borrow_mut() = true;
+
+    assert_eq!(t.chase_unanswered(), vec![(OrderId(7), false)]);
+    assert_eq!(t.strategy().answers, vec![(OrderId(7), false)]);
+}
