@@ -29,6 +29,25 @@ was made with `--features parquet`, because the columnar stack is about
 ninety crates and a backtest must not pay for it.
 ";
 
+/// Log returns of the traded price, over ticks that carry one.
+///
+/// Ticks without a trade are skipped rather than carried forward. A
+/// forward-filled zero is a return the market did not produce, and
+/// enough of them pull kurtosis toward the normal -- which would flatter
+/// exactly the fact this is measured to check.
+fn log_returns(ticks: &[oq_engine::Tick]) -> Vec<f64> {
+    let traded: Vec<f64> = ticks
+        .iter()
+        .filter(|t| t.last.0 > 0)
+        .map(|t| {
+            #[allow(clippy::cast_precision_loss)]
+            let p = t.last.0 as f64;
+            p
+        })
+        .collect();
+    traded.windows(2).map(|w| (w[1] / w[0]).ln()).collect()
+}
+
 fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
         print!("{USAGE}");
@@ -159,6 +178,38 @@ fn main() -> ExitCode {
             println!(
                 "feed latency     none carried: every arrival time equals its exchange \
              time, so this file cannot support latency-aware work"
+            );
+        }
+    }
+
+    // What kind of series this is, as opposed to whether it is intact.
+    //
+    // Everything above asks whether the file holds what it says it
+    // holds. This asks whether what it holds behaves like a market --
+    // a different question, and the one that decides whether a result
+    // measured on it means anything outside it. The generated fixtures
+    // in this workspace hold almost none of these facts, which is fine
+    // for a fixture and not fine for a claim about a strategy.
+    println!();
+    let returns = log_returns(&ticks);
+    match oq_stats::StylizedFacts::measure(&returns) {
+        Ok(facts) => {
+            println!(
+                "stylized facts   {} of 4 hold, from {} returns",
+                facts.held(),
+                facts.n
+            );
+            for line in facts.render().lines() {
+                println!("  {line}");
+            }
+        }
+        Err(e) => {
+            // Not a defect in the file. A short window or a quiet
+            // instrument produces too few traded ticks to say anything,
+            // and saying nothing is the correct answer to that.
+            println!(
+                "stylized facts   not measurable: {e} (from {} returns)",
+                returns.len()
             );
         }
     }

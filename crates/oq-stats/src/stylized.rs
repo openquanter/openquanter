@@ -18,6 +18,34 @@
 //! calm. What is not allowed is failing them without anybody knowing,
 //! and then quoting results from it as though the market had been real.
 //!
+//! # What a real market measures, and how little it takes to move it
+//!
+//! Four days of BTCUSDT perpetual — 5,759 one-minute returns from
+//! 15.9 million captured trades — put numbers on both halves of that.
+//! Per day, three of the four facts hold and excess kurtosis lands
+//! between 8 and 11 against the generated markets' 0.03, 0.07 and
+//! −0.05. That is the direction the argument above assumes, now
+//! measured rather than assumed.
+//!
+//! The second half is the warning. Pooled over the four days, excess
+//! kurtosis is **951** and ρ(1) is −0.157, which fails. Remove **two**
+//! of the 5,759 returns — one minute that rose 4.1% on 251× the median
+//! volume, and the minute that gave most of it back — and kurtosis is
+//! 24.6 with ρ(1) at −0.067, which holds. Three of the four verdicts
+//! turn on 0.035% of the sample.
+//!
+//! Those two returns are not contamination to be cleaned; they are what
+//! a heavy tail *is*, and a series without them is the fiction. What
+//! follows is narrower and firmer: **an estimate from a short sample is
+//! dominated by its largest event**, so a verdict here describes the
+//! sample and not the market behind it. Cont's facts are stated over
+//! years. Four days can say a market is unlike a fixture — the gap from
+//! 0.03 to 8 is far too wide for one event to explain — and cannot say
+//! which side of a threshold the market sits on.
+//!
+//! Which is the other reason this is not a gate. A threshold crossed by
+//! one afternoon's trading is a build that breaks on the news.
+//!
 //! # What is not here
 //!
 //! Facts needing more than a return series — the leverage effect wants a
