@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 oq-engine.workspace = true
 oq-hash.workspace = true
+oq-stats.workspace = true
 oq-types.workspace = true
 
 # Columnar export. Optional, and the whole reason the feature exists: the
