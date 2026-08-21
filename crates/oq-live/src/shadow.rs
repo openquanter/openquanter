@@ -333,7 +333,7 @@ impl Shadow {
     #[must_use]
     pub fn net_position(&self) -> QtyLots {
         let s = self.kernel.state();
-        QtyLots(s.holding.qty.0 - s.holding.short_qty.0)
+        QtyLots(s.holding().qty.0 - s.holding().short_qty.0)
     }
 
     /// The model's equity at the last mark it saw.
