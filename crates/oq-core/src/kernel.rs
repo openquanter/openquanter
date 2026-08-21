@@ -547,6 +547,18 @@ impl Kernel {
     /// overwrites.
     pub fn apply(&mut self, event: &Event) -> &[Output] {
         self.outputs.clear();
+
+        // Taken before the match, which is over a copy: a depth update
+        // carries a list of levels and is the one input that is not one.
+        if let Event::Depth(update) = event {
+            // Whether the tier read it is not an output. A run at a
+            // lower tier being handed depth is a fact about the run's
+            // configuration, and the host counts it -- the kernel's job
+            // here is to hand it over.
+            let _ = self.state.engine.on_depth(update);
+            return &self.outputs;
+        }
+
         match *event {
             Event::Tick(tick) => self.on_tick(&tick),
             Event::Submit {
@@ -616,6 +628,7 @@ impl Kernel {
                 self.state.balance = self.state.balance.add(Cash(amount));
             }
             Event::VenueFill(fill) => self.on_venue_fill(&fill),
+            Event::Depth(_) => unreachable!("handled before the match"),
         }
         &self.outputs
     }
@@ -746,23 +759,34 @@ impl Kernel {
     /// a higher one, and saying so is what stops the run from looking
     /// like an L2 that happened to agree with L1.
     ///
-    /// # Not an event, and what that costs
+    /// # It is an event, so it is in the journal
     ///
-    /// This does **not** go through [`Kernel::apply`], so it is not in
-    /// the journal, and replaying a journal from an L2 run reproduces
-    /// its orders but not the book they matched against. The fills will
-    /// differ, which is the one place in this kernel where replay is not
-    /// faithful.
+    /// [`Event::Depth`] carries one, which is what makes an L2 run
+    /// replayable: its orders and the book they queued in are recorded
+    /// together, and a replay reproduces the fills rather than the
+    /// requests. This was the one place replay was not faithful.
     ///
-    /// It is deliberate and it is temporary. An `Event` is a fixed-size
-    /// record and a depth update is a variable-length list of levels;
-    /// putting one in the schema is a format change with a version
-    /// behind it, not a field. Until that happens, an L2 run's evidence
-    /// is its archive plus its journal rather than its journal alone —
-    /// stated here rather than discovered by someone whose replay
-    /// disagreed with their run.
+    /// It costs journal size, and a lot of it — a captured hour of one
+    /// instrument is over a hundred thousand updates. A run that does
+    /// not read depth should not be given any, and the count of ignored
+    /// updates is there to make that visible rather than expensive and
+    /// silent.
     pub fn apply_depth(&mut self, update: &oq_engine::DepthUpdate) -> DepthOutcome {
         self.state.engine.on_depth(update)
+    }
+
+    /// The same update as an event, for a host that journals what it
+    /// applies.
+    ///
+    /// [`Kernel::apply_depth`] answers what the matcher did with it and
+    /// records nothing; this records it and answers nothing. A host that
+    /// wants both applies the event and asks the matcher separately --
+    /// the alternative is an `apply` that returns something only one
+    /// kind of event has, which every other call site would have to
+    /// ignore.
+    #[must_use]
+    pub fn depth_event(update: &oq_engine::DepthUpdate) -> Event {
+        Event::Depth(Box::new(update.clone()))
     }
 
     /// Seed the venue book from a snapshot. Returns whether the tier

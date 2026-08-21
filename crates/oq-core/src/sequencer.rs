@@ -685,6 +685,114 @@ mod tests {
         }
     }
 
+    /// **The reason depth is an event.**
+    ///
+    /// An L2 run's fills depend on the book its orders queued in. Before
+    /// this, a journal held the orders and not the book, so a replay
+    /// reproduced what was *asked for* rather than what happened -- the
+    /// one place in this kernel where replay was not faithful. The test
+    /// is the same shape as the others: run live, replay, compare both
+    /// the outputs and the state.
+    #[test]
+    fn replaying_an_l2_run_reproduces_the_book_it_matched_against() {
+        use oq_engine::{Level, Policy};
+
+        // The snapshot is part of the starting state, not something
+        // that happened -- so it is installed when the matcher is built,
+        // and a replay starts from the same one rather than expecting to
+        // find it in the log.
+        let l2 = || {
+            let mut m = crate::matcher::Matcher::L2(Box::new(oq_engine::L2Engine::new(
+                oq_engine::L1Engine::new(InstrumentId::new(1), Policy::TRANSPARENT),
+            )));
+            m.install_snapshot(0, &[], &[]);
+            fresh_state().matching_with(m)
+        };
+
+        // A book deep enough that the queue, and therefore the fill,
+        // depends on it: without the depth events a replay puts the
+        // order at the front and fills it.
+        let mut events = vec![Event::Depth(Box::new(oq_engine::DepthUpdate {
+            event_ms: 0,
+            first_id: 1,
+            final_id: 1,
+            prev_final_id: None,
+            bids: vec![Level {
+                price: 100,
+                qty: 5_000,
+            }],
+            asks: Vec::new(),
+        }))];
+        events.push(Event::Submit {
+            id: OrderId::new(1),
+            side: Side::Buy,
+            price: Some(PriceTicks(100)),
+            qty: QtyLots(1),
+            stamp: Stamp::synthetic(1),
+            offset: oq_types::Offset::Open,
+        });
+        for i in 1..=6 {
+            events.push(Event::Tick(oq_engine::Tick {
+                stamp: Stamp::synthetic(i * 1_000_000),
+                last: PriceTicks(100),
+                high: PriceTicks(100),
+                low: PriceTicks(100),
+                bid: PriceTicks(100),
+                ask: PriceTicks(100),
+                volume: QtyLots(10 * i),
+            }));
+        }
+
+        let path = temp_path("l2-replay");
+        let live_outputs;
+        let live_fingerprint;
+        {
+            // The book is installed outside the event stream, as a
+            // snapshot is: it is a starting state rather than something
+            // that happened, and replay starts from the same one.
+            let mut seq = Sequencer::open(l2(), &path, SyncPolicy::Never).expect("open");
+            let mut outs = Vec::new();
+            for event in &events {
+                outs.extend_from_slice(seq.submit(event).expect("submit"));
+            }
+            seq.sync().expect("sync");
+            live_outputs = outs;
+            live_fingerprint = seq.kernel().fingerprint();
+        }
+
+        let replayed = replay(l2(), &path).expect("replay");
+        assert_eq!(replayed.outputs, live_outputs, "outputs diverged on replay");
+        assert_eq!(
+            replayed.kernel.fingerprint(),
+            live_fingerprint,
+            "state diverged on replay"
+        );
+
+        // And the fixture must actually depend on the book, or the
+        // assertions above hold for a reason that has nothing to do
+        // with depth.
+        let mut without = fresh_state();
+        without = without.matching_with(crate::matcher::Matcher::l0(InstrumentId::new(1)));
+        let mut seq = Sequencer::with_sink(without, crate::MemorySink::new());
+        let mut l0_fills = 0usize;
+        for event in &events {
+            l0_fills += seq
+                .submit(event)
+                .expect("submit")
+                .iter()
+                .filter(|o| matches!(o, Output::Filled(_)))
+                .count();
+        }
+        let l2_fills = live_outputs
+            .iter()
+            .filter(|o| matches!(o, Output::Filled(_)))
+            .count();
+        assert!(l0_fills > 0, "the fixture must fill without a queue");
+        assert_eq!(l2_fills, 0, "and must not fill behind 5000 lots");
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn generated_scenarios_actually_exercise_the_engine() {
         // A property test over scenarios that never trade would pass
