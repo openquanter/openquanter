@@ -210,24 +210,60 @@ impl Matcher {
     }
 
     /// Apply a depth update, if this tier reads one.
-    ///
-    /// Below L2 this is **not an error and not a no-op to be papered
-    /// over** — it is a run that was handed depth and is not using it.
-    /// The `false` says so, so a host can report it rather than let a
-    /// backtest read an L2 archive and quietly answer as L1.
     #[inline]
-    pub fn on_depth(&mut self, update: &oq_engine::DepthUpdate) -> bool {
+    pub fn on_depth(&mut self, update: &oq_engine::DepthUpdate) -> DepthOutcome {
+        match self {
+            Self::L0(_) | Self::L1(_) => DepthOutcome::NotRead,
+            Self::L2(e) => match e.on_depth(update) {
+                Ok(()) => DepthOutcome::Applied,
+                Err(e) => DepthOutcome::Refused(e),
+            },
+        }
+    }
+
+    /// Seed the venue book from a snapshot, if this tier keeps one.
+    ///
+    /// An incremental depth stream is meaningless without one: the
+    /// updates say what *changed*, and a book with nothing to change
+    /// refuses them. Bootstrapping from the first update instead would
+    /// silently make every level that existed beforehand invisible, so
+    /// a queue measured early reads shorter than it was — which is the
+    /// direction that flatters a backtest.
+    #[inline]
+    pub fn install_snapshot(
+        &mut self,
+        update_id: u64,
+        bids: &[oq_engine::Level],
+        asks: &[oq_engine::Level],
+    ) -> bool {
         match self {
             Self::L0(_) | Self::L1(_) => false,
             Self::L2(e) => {
-                // A refused update is counted inside the engine rather
-                // than raised here: the book knows which sequencing rule
-                // broke, and this only knows that one did.
-                let _ = e.on_depth(update);
+                e.install_snapshot(update_id, bids, asks);
                 true
             }
         }
     }
+}
+
+/// What a matcher did with a depth update.
+///
+/// Three outcomes rather than a boolean, because they call for three
+/// different reactions and merging any two hides one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DepthOutcome {
+    /// The book advanced.
+    Applied,
+    /// The book refused it, naming the sequencing rule that broke.
+    /// Messages were lost, and the correct response is a fresh
+    /// snapshot rather than guessing the missing state.
+    Refused(oq_engine::SequenceError),
+    /// This tier does not read depth.
+    ///
+    /// Not an error — and not something to pass over either. A run
+    /// handed depth and matching without it is producing a lower tier's
+    /// answer under whatever name the report carries.
+    NotRead,
 }
 
 #[cfg(test)]
@@ -310,20 +346,38 @@ mod tests {
             asks: Vec::new(),
         };
 
-        assert!(!Matcher::l0(InstrumentId::new(1)).on_depth(&update));
-        assert!(
-            !Matcher::L1(Box::new(L1Engine::new(
+        assert_eq!(
+            Matcher::l0(InstrumentId::new(1)).on_depth(&update),
+            DepthOutcome::NotRead
+        );
+        assert_eq!(
+            Matcher::L1(Box::new(L1Engine::new(
                 InstrumentId::new(1),
                 Policy::TRANSPARENT
             )))
-            .on_depth(&update)
+            .on_depth(&update),
+            DepthOutcome::NotRead
         );
+
+        // L2 reads it -- and refuses this one, because a book with no
+        // snapshot has nothing for an incremental update to change.
+        // "Read it and rejected it" is a different fact from "does not
+        // read depth", which is why they are different variants.
+        let mut l2 = Matcher::L2(Box::new(L2Engine::new(L1Engine::new(
+            InstrumentId::new(1),
+            Policy::TRANSPARENT,
+        ))));
+        assert_eq!(
+            l2.on_depth(&update),
+            DepthOutcome::Refused(oq_engine::SequenceError::NoSnapshot)
+        );
+
+        // Seeded, it applies.
+        assert!(l2.install_snapshot(0, &[], &[]));
+        assert_eq!(l2.on_depth(&update), DepthOutcome::Applied);
         assert!(
-            Matcher::L2(Box::new(L2Engine::new(L1Engine::new(
-                InstrumentId::new(1),
-                Policy::TRANSPARENT
-            ))))
-            .on_depth(&update)
+            !Matcher::l0(InstrumentId::new(1)).install_snapshot(0, &[], &[]),
+            "a tier with no book has nowhere to put a snapshot"
         );
     }
 
