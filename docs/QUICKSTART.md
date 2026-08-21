@@ -235,7 +235,9 @@ bid and a best ask, and the book behind them is dropped. That is only an
 acceptable trade because the archive is kept: the capture is the record,
 and this is a projection of it for the strategies a projection can
 carry. Strategies that need the book itself need the L2 fidelity tier,
-which does not exist yet — a richer tick would not substitute for it.
+which exists as an engine but has nothing feeding it: this projection is
+where the depth would have come from, and it is dropped here. A richer
+tick would not substitute for it — a book is not a field.
 
 Two conventions matter if you read the output directly. Extremes belong
 to their own window: `high` and `low` are the highest and lowest trades

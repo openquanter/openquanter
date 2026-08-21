@@ -46,6 +46,20 @@ writing it down and better than leaving it out.
   where it previously could not. Runs inside the range are unchanged, and
   every golden in the repository was inside it — none needed
   regenerating.
+- **A record declaring no trade is no longer parsed as one.** *Changes
+  results.* Binance publishes `"p":"0","q":"0","X":"NA"` records among
+  real trades — 19,725 in one day of BTCUSDT against 5.4 million. They
+  were parsed into `Trade { price: 0 }` and folded into ticks, and a
+  window's low is the minimum of its prices, so one zero made it zero:
+  1355 of 1409 minutes of real capture reported a low of `0.00` with the
+  high right beside it. A resting buy is triggered by the low.
+  **Behavioural delta:** any tick built from a venue that emits such
+  records changes — lows become real, and windows previously dropped as
+  "before the first trade" are emitted. The generated fixtures contain
+  no such record, so every golden in the repository is unchanged. The
+  rule is now the adapter contract (`parse_trade` returns a positive
+  price and quantity or `None`) and `conformance` holds every adapter to
+  it, so the same fault cannot return through a new venue.
 - **`Event::VenueFill` (kind 8) added to the event schema.** A fill the
   venue decided, as opposed to one the matcher produced. Additive:
   journals written before it contain no such record, so replay of an
@@ -119,6 +133,26 @@ the claim the documentation actually makes: unlevered, the two arms agree
 for all six. Verified by putting 4.06 back, which fails with
 `expected 4.06, got 4.46`.
 
+- **`L2Engine` — the queue and the taker's cost read from the venue's
+  book.** It wraps `L1Engine` the way that wraps `L0Engine`, so L0 stays
+  frozen by construction. The size displayed at the level an order joins
+  is the queue ahead of it, replacing L1's assumed `QueueAhead`; a taker
+  fill walks the levels and pays the weighted price of the walk,
+  replacing L1's square-root penalty. Each measurement displaces the
+  policy rather than compounding with it, a fill the book cannot reach
+  keeps the policy, and `swept` / `unswept` say which priced a run.
+  Where the book and the tick disagree the worse price wins, so climbing
+  a tier can never make a backtest look better. **Nothing feeds it yet**
+  — a tick file carries a best bid and a best ask, not a book.
+- **`oq-book` — order book reconstruction as its own crate**, extracted
+  from `oq-l2feed` so a matcher does not inherit a TLS stack to look at
+  a price level. `oq-l2feed` re-exports at the old paths, so no call site
+  moved.
+- **`oq-data` reports stylized facts** for any tick file, so "does this
+  behave like a market" is a command rather than a study. Four days of
+  captured BTCUSDT hold three of four per day at excess kurtosis 8–11,
+  against the generated fixtures' 0.03 / 0.07 / −0.05.
+
 ### Live trading
 
 Nothing here has traded real money, and the entry triggers in
@@ -183,6 +217,20 @@ number the documentation quotes is gross of costs.
   whether it reconstructs. Bytes on disk prove the messages arrived; only
   a reconstruction proves they can be used. This is archive verification,
   **not** the L2 fidelity tier.
+- **A compressed archive can now be found, not only read.** An earlier
+  change taught every tool to read `.oqcap.zst`; nothing taught them to
+  find one, and `oq-ingest` filtered on an extension that a compressed
+  file does not have — so a full day of capture reported "nothing to
+  convert", which reads exactly like an empty directory. Naming now goes
+  through `archive::stem`, beside `archive::read`.
+- **`pull-capture-cron.sh`** — the half of the archive pull a schedule
+  needs and a manual run does not. Blocked-by-lock exits `3` rather than
+  sharing `1` with a transfer failure, because a first backfill outlasts
+  any sensible interval and overlap is the normal state of an archive
+  catching up; a monitor that cannot tell the two apart either raises on
+  healthy overlap or stays quiet through real loss. Leaves
+  `.last-success` / `.last-failure` in the archive root, because silence
+  is the failure mode and a log nobody reads is silence.
 
 ### Examples and performance
 
