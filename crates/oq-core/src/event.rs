@@ -19,7 +19,7 @@
 //! reused**, because a journal outlives the build that wrote it.
 
 use oq_engine::Tick;
-use oq_types::{Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp};
+use oq_types::{InstrumentId, Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp};
 
 /// Journal record kinds. Append-only; values are permanent.
 pub mod kind {
@@ -58,6 +58,13 @@ pub mod kind {
     /// between a record of what happened and a record of what was
     /// asked for.
     pub const DEPTH: u16 = 9;
+    /// A tick that names its instrument.
+    ///
+    /// [`TICK`] is the same observation without one, which is what a
+    /// single-instrument account meant and every journal written before
+    /// routing existed still says. Both are read; only the one matching
+    /// the event is written.
+    pub const TICK_ON: u16 = 10;
 }
 
 /// An input to the core.
@@ -71,7 +78,18 @@ pub mod kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A market observation.
-    Tick(Tick),
+    Tick {
+        /// Which instrument it is of.
+        ///
+        /// `None` means "the account's only one", which is what every
+        /// journal written before instruments were routable says — and
+        /// says truthfully, since an account that held one instrument
+        /// had no other answer. A kernel holding several refuses it
+        /// rather than guessing, because guessing here marks a position
+        /// at another instrument's price.
+        instrument: Option<InstrumentId>,
+        tick: Tick,
+    },
     /// Place an order.
     Submit {
         id: OrderId,
@@ -127,7 +145,15 @@ impl Event {
     #[must_use]
     pub const fn kind(&self) -> u16 {
         match self {
-            Self::Tick(_) => kind::TICK,
+            // Two kinds for one variant: an observation that names
+            // its instrument does not fit the payload every reader
+            // before it expects, and widening that payload in place
+            // would make an old reader decode a new record as a tick
+            // with a wrong volume rather than refusing it.
+            Self::Tick {
+                instrument: None, ..
+            } => kind::TICK,
+            Self::Tick { .. } => kind::TICK_ON,
             Self::Submit { .. } => kind::SUBMIT,
             Self::Cancel { .. } => kind::CANCEL,
             Self::Funding { .. } => kind::FUNDING,
@@ -142,7 +168,7 @@ impl Event {
     #[must_use]
     pub const fn at(&self) -> Nanos {
         match self {
-            Self::Tick(t) => t.stamp.exch,
+            Self::Tick { tick, .. } => tick.stamp.exch,
             Self::Submit { stamp, .. } | Self::Cancel { stamp, .. } => stamp.exch,
             Self::Funding { at, .. } | Self::Time(at) | Self::MarginDeposit { at, .. } => *at,
             // The venue's clock, not this process's. A fill is ordered
@@ -189,7 +215,10 @@ impl Event {
         let mut out = Vec::with_capacity(64);
         let put_i64 = |out: &mut Vec<u8>, v: i64| out.extend_from_slice(&v.to_le_bytes());
         match *self {
-            Self::Tick(t) => {
+            Self::Tick {
+                instrument,
+                tick: t,
+            } => {
                 put_i64(&mut out, t.stamp.exch.0);
                 put_i64(&mut out, t.stamp.local.0);
                 put_i64(&mut out, t.last.0);
@@ -198,6 +227,12 @@ impl Event {
                 put_i64(&mut out, t.bid.0);
                 put_i64(&mut out, t.ask.0);
                 put_i64(&mut out, t.volume.0);
+                // Appended, so the first 64 bytes are byte-identical to
+                // the older kind: one decoder reads both halves and the
+                // kind decides whether the tail is there.
+                if let Some(id) = instrument {
+                    out.extend_from_slice(&id.0.to_le_bytes());
+                }
             }
             Self::Submit {
                 id,
@@ -284,19 +319,31 @@ impl Event {
                 .map(|s| i64::from_le_bytes(s.try_into().expect("8 bytes")))
         }
         match kind {
-            kind::TICK => {
-                if payload.len() != 64 {
+            kind::TICK | kind::TICK_ON => {
+                let named = kind == kind::TICK_ON;
+                let expected = if named { 68 } else { 64 };
+                if payload.len() != expected {
                     return None;
                 }
-                Some(Self::Tick(Tick {
-                    stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
-                    last: PriceTicks(i64_at(payload, 2)?),
-                    high: PriceTicks(i64_at(payload, 3)?),
-                    low: PriceTicks(i64_at(payload, 4)?),
-                    bid: PriceTicks(i64_at(payload, 5)?),
-                    ask: PriceTicks(i64_at(payload, 6)?),
-                    volume: oq_types::QtyLots(i64_at(payload, 7)?),
-                }))
+                let instrument = if named {
+                    Some(InstrumentId(u32::from_le_bytes(
+                        payload.get(64..68)?.try_into().ok()?,
+                    )))
+                } else {
+                    None
+                };
+                Some(Self::Tick {
+                    instrument,
+                    tick: Tick {
+                        stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
+                        last: PriceTicks(i64_at(payload, 2)?),
+                        high: PriceTicks(i64_at(payload, 3)?),
+                        low: PriceTicks(i64_at(payload, 4)?),
+                        bid: PriceTicks(i64_at(payload, 5)?),
+                        ask: PriceTicks(i64_at(payload, 6)?),
+                        volume: oq_types::QtyLots(i64_at(payload, 7)?),
+                    },
+                })
             }
             kind::SUBMIT | kind::SUBMIT_LEGACY => {
                 // Length is exact per kind rather than "either of two".
@@ -496,8 +543,14 @@ mod tests {
 
     fn samples() -> Vec<Event> {
         vec![
-            Event::Tick(Tick::quoted(Stamp::new(10, 12), 100, 110, 90, 99, 101)),
-            Event::Tick(Tick::trades_only(Stamp::new(20, 21), 100, 0, 0)),
+            Event::Tick {
+                instrument: None,
+                tick: Tick::quoted(Stamp::new(10, 12), 100, 110, 90, 99, 101),
+            },
+            Event::Tick {
+                instrument: None,
+                tick: Tick::trades_only(Stamp::new(20, 21), 100, 0, 0),
+            },
             Event::Submit {
                 id: OrderId::new(7),
                 side: Side::Buy,
@@ -637,6 +690,76 @@ mod tests {
         let mut bytes = e.encode();
         bytes[32] = 2;
         assert!(Event::decode(kind::DEPTH, &bytes).is_none());
+    }
+
+    /// A named tick and an unnamed one are different records.
+    ///
+    /// Same observation, different kinds, different lengths. Sharing a
+    /// kind would make a truncated named tick decode as a valid unnamed
+    /// one — the failure every fixed-length kind here is shaped to
+    /// prevent.
+    #[test]
+    fn a_named_tick_is_a_different_record_from_an_unnamed_one() {
+        let t = Tick::quoted(Stamp::new(10, 12), 100, 110, 90, 99, 101);
+        let anonymous = Event::Tick {
+            instrument: None,
+            tick: t,
+        };
+        let named = Event::Tick {
+            instrument: Some(InstrumentId::new(42)),
+            tick: t,
+        };
+
+        assert_ne!(anonymous.kind(), named.kind());
+        assert_eq!(anonymous.encode().len(), 64);
+        assert_eq!(named.encode().len(), 68);
+
+        // The first 64 bytes are identical, so one decoder reads both
+        // and the kind decides whether the tail is there.
+        assert_eq!(&named.encode()[..64], &anonymous.encode()[..]);
+
+        for e in [anonymous, named] {
+            assert_eq!(Event::decode(e.kind(), &e.encode()).expect("decodes"), e);
+        }
+    }
+
+    /// A journal written before instruments were routable still reads.
+    ///
+    /// Its ticks are 64 bytes under `kind::TICK`, and they decode to
+    /// "the account's only instrument" — which is what they meant when
+    /// they were written, not a default standing in for something
+    /// missing.
+    #[test]
+    fn an_older_tick_decodes_as_the_only_instrument() {
+        let bytes = Event::Tick {
+            instrument: None,
+            tick: Tick::trades_only(Stamp::new(20, 21), 100, 0, 0),
+        }
+        .encode();
+
+        let Some(Event::Tick { instrument, .. }) = Event::decode(kind::TICK, &bytes) else {
+            panic!("an older tick must still decode");
+        };
+        assert_eq!(instrument, None);
+    }
+
+    /// Each length belongs to one kind.
+    #[test]
+    fn a_tick_of_the_wrong_length_for_its_kind_is_refused() {
+        let named = Event::Tick {
+            instrument: Some(InstrumentId::new(1)),
+            tick: Tick::trades_only(Stamp::new(1, 1), 100, 0, 0),
+        }
+        .encode();
+
+        assert!(
+            Event::decode(kind::TICK, &named).is_none(),
+            "68 bytes is not an unnamed tick"
+        );
+        assert!(
+            Event::decode(kind::TICK_ON, &named[..64]).is_none(),
+            "64 bytes is not a named one"
+        );
     }
 
     #[test]

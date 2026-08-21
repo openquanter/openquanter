@@ -60,6 +60,30 @@ writing it down and better than leaving it out.
   rule is now the adapter contract (`parse_trade` returns a positive
   price and quantity or `None`) and `conformance` holds every adapter to
   it, so the same fault cannot return through a new venue.
+- **`Event::Tick` names an instrument, and `kind::TICK_ON` (10) is
+  added to the schema.** *Changes nothing for a single-instrument
+  account.* An observation has to reach the holding it is of, and an
+  account can hold several now. `None` means "the account's only one",
+  which is what every journal written before this says — truthfully,
+  since an account with one instrument had no other answer. A kernel
+  holding several refuses it: guessing would mark one instrument's
+  position at another's price, which is a wrong number rather than a
+  missing one. **Behavioural delta:** none for an account with one
+  holding. Two kinds for one variant because a named tick is 68 bytes
+  and an unnamed one 64 — widening the payload in place would make an
+  older reader decode a newer record as a tick with a wrong volume
+  rather than refusing it. The first 64 bytes are byte-identical, so
+  one decoder reads both and the kind decides whether the tail is
+  there.
+- **`Intent::Limit` and `Intent::Market` name an instrument.** An
+  implicit "whichever instrument this callback was about" makes the
+  same line of code place different orders depending on where it ran,
+  with nothing at the call site showing it. `Context` builds intents
+  for the instrument it is about, so a single-instrument strategy never
+  writes one down. An order for an instrument the run does not hold is
+  refused, reported through `on_placed`, and counted — never sent to
+  the only holding there is, which would fill an order the strategy did
+  not place on a book it was not looking at.
 - **`Event::Depth` (kind 9) added to the event schema, and `Event` is no
   longer `Copy`.** *Changes results for L2 runs, and only for those.* An
   L2 run's fills depend on the book its orders queued in, and a journal
