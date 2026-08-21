@@ -137,7 +137,7 @@ input this project cannot reach, the second has not been written.
 | Types | `oq-types` fixed point, typestate order and position machines | Built |
 | Journal | mmap append log, snapshots, replay, torn-tail tolerance | Built |
 | Core | Sequencer, deterministic kernel, injected clock | Built |
-| Core | **Sharding by instrument** | **Blocked on a prior decision**, not merely unwritten (`shard` appears nowhere; FR-CORE-6). A shard is one instrument's kernel, and `State` already holds exactly one instrument — but it also holds the balance and the position, and an account trading two instruments shares both. FR-CORE-6 forbids shared mutable state across shards, so sharding needs the account separated from the instrument first, which is the open question below on the instrument model being split in two with neither half in the core. Sharding it as it stands gives each shard its own balance, which no multi-instrument strategy can use and no single-instrument one needs |
+| Core | **Sharding by instrument** | **Blocked on a prior decision**, not merely unwritten (`shard` appears nowhere; FR-CORE-6). A shard is one instrument's kernel, and `State` already holds exactly one instrument — but it also holds the balance and the position, and an account trading two instruments shares both. FR-CORE-6 forbids shared mutable state across shards, so sharding needs the account separated from the instrument first: one balance and one margin requirement over several instruments' positions, where today there is one of each per `State`. That is its own piece of work — the instrument model is no longer the thing in the way, since `oq_types::Instrument` is in the core. Sharding it as it stands gives each shard its own balance, which no multi-instrument strategy can use and no single-instrument one needs |
 | Matching | L0 tick replay, frozen as the regression anchor | Built |
 | Margin | Tiered maintenance margin, liquidation pricing, funding | Built |
 | Margin | Bitemporal rule schedules | Built |
@@ -395,10 +395,10 @@ window. Neither is engineering effort:
   hosts, which are running live trading and are not to be touched. The
   229/229 result recorded earlier in this project's history is therefore
   **historical**: it was real, and nothing currently reproduces it.
-- The capture this project has made for itself is thirty-four hours, not
-  multi-year. A throughput ratio measured over thirty-four hours would not
-  be the number G3 names, and quoting it as though it were would be worse
-  than having no number.
+- The capture this project has made for itself is seven calendar days —
+  2026-08-15 to 2026-08-21, of which five are complete — not multi-year. A
+  throughput ratio measured over a week would not be the number G3 names,
+  and quoting it as though it were would be worse than having no number.
 
 What *is* measured, and reported under its own name rather than G3's: the
 Python tier's throughput mode runs at up to about 7x its compatibility mode
@@ -632,7 +632,7 @@ confirmation recorded in the pull request.
 | Bus factor of one | Medium-high | Agent-friendly codebase (per-crate `AGENTS.md`, layered verification anchors); behavior encoded in deterministic tests; all design rationale written down rather than remembered |
 | Building the framework becomes the goal instead of using it | High | Every milestone states the capability it unlocks; the question "what got measurably better because of this?" is asked at each gate |
 | The execution seam has one implementation and no second | Medium | Was: no seam at all. `Execution` now exists and `oq-gateway` implements it for one venue, so the layers above no longer name a venue — but the claim that a second one is an implementation rather than a rewrite is exactly as unproven as it was for market data before OKX landed. The market data side now has a conformance suite both its adapters pass — driven by samples each adapter supplies, so it tests the contract rather than one venue's bytes, and it caught a wrongly stated convention on its first run. The order side has no equivalent, because its contract's interesting terms need a venue to exercise. The way to close this is still a second venue, not more design |
-| The instrument model is split in two, and neither half is in the core | High | `oq-margin::Contract` holds the economics — `tick_cash` is the contract multiplier, so a 300x index future is already expressible — and `oq-l2feed::Instrument` holds the quoting precision. They never meet, and `oq-types` names an instrument only as `InstrumentId(u32)`, so nothing below the two hosts knows what a contract is. Harder than either half: `Cash` carries no currency dimension, so a book settling in more than one currency cannot be expressed at all, which is what equities and FX require. Unify identity, precision and economics in the core and settle the currency question before the Python surface freezes |
+| ~~The instrument model is split in two, and neither half is in the core~~ | Partly closed | **The identity and precision half is done.** `oq_types::Instrument` is in the core and carries price and quantity scales, contract size, the price and quantity grids, and the venue's minimum notional; `oq_margin::Contract::of` derives the economics from it rather than restating them, so a hand-written `tick_cash` cannot drift from a definition after a relisting changes a precision. `oq-l2feed` no longer has a second one. **The currency half is open and unchanged:** `Cash` is an `i64` at a fixed scale with no currency dimension, so a book settling in more than one currency cannot be expressed at all — which is what equities and FX require, and what still has to be settled before the Python surface freezes |
 | `Strategy` is defined in the backtest host | Medium-high | Live execution would either depend on `oq-backtest` or need a second strategy trait, and G7 — the same strategy unchanged in both modes — cannot hold either way. Move the trait below both hosts before external code implements it |
 | ~~L0 is the frozen regression anchor and has no matching seam~~ | Closed | Resolved for L1 without the refactor this entry proposed. `L1Engine` **owns** an `L0Engine` and never modifies it — orders are held outside it until they are entitled to be in it, and its fills are adjusted after it produces them. So L0 needed no seam, no trait and no change at all, and a test asserts a transparent L1 policy reproduces L0's fills exactly. L2 may still need the seam; L1 established that wrapping is enough to try first |
 
