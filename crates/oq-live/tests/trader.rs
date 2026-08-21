@@ -451,6 +451,56 @@ fn a_fill_reaches_the_strategy_and_its_answer_reaches_the_venue() {
     );
 }
 
+/// A burst does not slip past the bound on resting orders.
+///
+/// The count came from the venue's acknowledgements, so orders sent
+/// back to back were each measured before any of them had been
+/// acknowledged and all of them passed. Live, a ladder of seven went
+/// out under a limit of four, and the refusals began afterwards —
+/// against the orders that came next, which were the ones that
+/// mattered.
+///
+/// The limit here is one, which no default produces, so this also fails
+/// if a host writes its own number over the caller's.
+#[test]
+fn a_burst_of_orders_is_bounded_by_the_working_limit() {
+    let limits = Limits {
+        max_order_qty: QtyLots(100),
+        max_position_qty: QtyLots(1000),
+        max_order_notional: Cash(1_000_000 * oq_types::CASH_SCALE),
+        price_band: Ratio(500_000_000),
+        max_working: 1,
+        max_rate: 100,
+        rate_window: Nanos(1_000_000_000),
+    };
+    let session = Session::start(
+        Accepting::new(),
+        RiskGate::new(limits),
+        SessionConfig {
+            symbol: "BTCUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "live".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("clean venue");
+    let mut t = Trader::new(Scripted(vec![limit(1), limit(2)]), session);
+
+    let outcomes = t.on_tick(&ctx(), Nanos(1));
+
+    assert!(
+        matches!(outcomes[0], Outcome::Sent { .. }),
+        "the first fits: {outcomes:?}"
+    );
+    assert!(
+        matches!(outcomes[1], Outcome::Refused { .. }),
+        "the second exceeds a limit of one and must be refused: {outcomes:?}"
+    );
+}
+
 /// A venue that takes orders and refuses to withdraw them.
 struct WontCancel {
     n: RefCell<u64>,
