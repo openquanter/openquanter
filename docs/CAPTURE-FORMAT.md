@@ -200,6 +200,42 @@ object store that can hold the data and recompute a hash will do. Where
 a given deployment archives to is deployment configuration, not part of
 the format.
 
+### Staging adds a deadline the direct pipeline does not have
+
+A capture host behind a lossy link often cannot reach the archive at
+all, and the archive is usually not reachable from the internet either.
+Putting an object store between them lets each side speak only to a
+third party: the capture host uploads and forgets, the archive pulls and
+keeps. `scripts/archive-capture.py` is the first half and
+`scripts/pull-capture.py` the second.
+
+The cost is that a staging bucket has an expiry, and the moment one
+exists, **the pipeline has a deadline instead of a backlog**. Direct
+transfer degrades safely — an archive host that is down for a month
+finds the data waiting, because retention is a function of verified
+archival. Through staging, an archive host that is down past the expiry
+finds nothing, and capture cannot be redone.
+
+So the pulling side is where the failure mode moved, and it needs two
+things the pushing side does not:
+
+- **A schedule with margin.** The interval must be short enough that
+  several consecutive failures still fit inside the expiry. The run is
+  idempotent — an object already local at the same size is skipped — so
+  a frequent schedule costs nothing when there is nothing to do.
+- **A status that outlives the run.** Silence is the failure mode here,
+  and a log nobody reads is silence. `scripts/pull-capture-cron.sh`
+  leaves `.last-success` / `.last-failure` in the archive root so
+  "when did this last work?" is answerable without reading a log.
+
+That wrapper branches on the pull's exit status, which is part of its
+interface: `0` every object is local, `1` some object could not be
+fetched, `3` another run holds the lock and this one did nothing. The
+third is not a failure — a first backfill outlasts the interval that
+starts the next run, so overlap is the normal state of an archive that
+is catching up, and reporting it as loss trains whoever is watching to
+ignore the alert that matters.
+
 ## 7. Crash safety
 
 The active file is append-only. A process that dies mid-write leaves a

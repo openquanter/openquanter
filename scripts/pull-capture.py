@@ -27,6 +27,13 @@ Two things this learned the hard way, both on a Synology:
   used to take the remaining 4047 with it, and the next scheduled run
   inherited the same object and the same crash. With a staging bucket
   that expires after seven days, that is how a week of capture is lost.
+
+Exit status is what a scheduled run says about itself: 0 every object
+is local, 1 some object could not be fetched, 3 another puller holds
+the lock and this run did nothing. The third is separate from the
+second because a full backfill outlasts the interval that starts the
+next run, so overlap is the normal state of a catching-up archive and
+must not read as loss.
 """
 
 import argparse
@@ -41,6 +48,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cos
 from cos_client import from_env, _sign  # noqa: E402
 
 CHUNK = 1 << 20
+
+# A scheduled run reports through its exit status, and "another puller
+# is still going" is not a failure -- the previous run is doing the work
+# this one would have done. Sharing status 1 with a genuine transfer
+# failure means a monitor either raises on healthy overlap or stays
+# quiet through real loss; it cannot do both. 2 is left to argparse,
+# which uses it for a usage error.
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_LOCKED = 3
 
 
 class OnlyOne:
@@ -73,10 +90,10 @@ class OnlyOne:
                 held = open(self.path).read().strip()
             except OSError:
                 held = "nothing about itself"
-            raise SystemExit(
-                f"pull: another puller holds {self.path} ({held}).\n"
-                f"      If that process is gone, remove the file."
-            )
+            print(f"pull: another puller holds {self.path} ({held}).\n"
+                  f"      If that process is gone, remove the file.",
+                  file=sys.stderr)
+            raise SystemExit(EXIT_LOCKED)
         return self
 
     def __exit__(self, *exc):
@@ -260,7 +277,7 @@ def pull(cos, args):
     print(f"failed            : {failed}")
 
     if failed:
-        return 1
+        return EXIT_FAILED
 
     if args.heartbeat:
         try:
@@ -269,7 +286,7 @@ def pull(cos, args):
                                    timeout=8).read()
         except Exception:
             pass
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":
