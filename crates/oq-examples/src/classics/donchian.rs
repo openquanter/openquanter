@@ -67,10 +67,10 @@ impl oq_backtest::Strategy for DonchianBreakout {
 
         match (ctx.position.0, channel, stop) {
             (0, Some((_, high)), _) if price > high => {
-                self.trader.open(out, Side::Buy, QtyLots(1));
+                self.trader.open(ctx, out, Side::Buy, QtyLots(1));
             }
             (held, _, Some((low, _))) if held > 0 && price < low => {
-                self.trader.close(out, Side::Sell, ctx.position);
+                self.trader.close(ctx, out, Side::Sell, ctx.position);
             }
             _ => {}
         }

@@ -236,6 +236,7 @@ impl Books {
     pub fn context(&self, tick: Tick) -> Context {
         let s = self.kernel.summary();
         Context {
+            instrument: self.kernel.state().holding().instrument,
             tick,
             position: s.qty,
             entry: s.entry,

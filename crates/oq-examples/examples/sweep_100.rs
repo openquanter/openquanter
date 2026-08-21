@@ -94,6 +94,7 @@ impl Strategy for Cross {
         self.long = want_long;
         self.next_id += 1;
         out.push(Intent::Market {
+            instrument: ctx.instrument,
             id: OrderId(self.next_id),
             side: if want_long { Side::Buy } else { Side::Sell },
             qty: QtyLots(1),

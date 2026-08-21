@@ -82,6 +82,7 @@ impl Strategy for Answers {
 
 fn ctx() -> Context {
     Context {
+        instrument: oq_types::InstrumentId::new(1),
         tick: oq_engine::Tick {
             last: PriceTicks(6_000_000),
             ..oq_engine::Tick::default()
@@ -149,6 +150,7 @@ fn answering(intents: Vec<Intent>) -> Trader<Answers, Accepting> {
 
 fn limit(id: u64) -> Intent {
     Intent::Limit {
+        instrument: oq_types::InstrumentId::new(1),
         id: OrderId(id),
         side: Side::Buy,
         price: PriceTicks(6_000_000),
@@ -236,6 +238,7 @@ fn a_close_intent_becomes_a_reduce_only_order() {
     // The strategy's offset is how it says "get me out", and dropping
     // it turns an exit into an entry in the opposite direction.
     let mut t = trader(vec![Intent::Limit {
+        instrument: oq_types::InstrumentId::new(1),
         id: OrderId(1),
         side: Side::Sell,
         price: PriceTicks(6_000_000),

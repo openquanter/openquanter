@@ -230,6 +230,13 @@ pub struct RunResult {
     /// how often — a reconstruction with holes in it produces plausible
     /// queues that are wrong, and nothing downstream can tell.
     pub depth_refused: u64,
+    /// Orders for an instrument this run does not hold.
+    ///
+    /// Refused and reported to the strategy through `on_placed`, not
+    /// retargeted. Non-zero means a strategy asked for something this
+    /// run could not do — which is a strategy that needs a
+    /// multi-instrument account, not a run that should have guessed.
+    pub misrouted_orders: u64,
     /// Depth updates handed to a matcher that does not read one.
     ///
     /// **Non-zero is a wrong run, not a slow one.** It means the caller
@@ -375,6 +382,7 @@ where
 
     let tier = kernel.state().holding().engine.tier();
     let mut tick_count = 0usize;
+    let mut misrouted = 0u64;
     let mut depth_applied = 0u64;
     let mut depth_refused = 0u64;
     let mut depth_unused = 0u64;
@@ -490,6 +498,7 @@ where
         }
 
         let ctx = Context {
+            instrument: config.instrument,
             tick,
             position: summary.qty,
             entry: summary.entry,
@@ -514,6 +523,20 @@ where
         strategy.on_tick(&ctx, &mut intents);
 
         for intent in &intents {
+            // An order for an instrument this run does not hold is
+            // refused and the strategy is told, rather than being sent
+            // to the only holding there is. Silently retargeting it
+            // would fill an order the account never placed, on a book
+            // the strategy was not looking at.
+            if let Some(wanted) = intent.instrument()
+                && wanted != config.instrument
+            {
+                misrouted += 1;
+                if let Some(id) = intent_id(intent) {
+                    strategy.on_placed(id, false);
+                }
+                continue;
+            }
             let event = match *intent {
                 Intent::Limit {
                     id,
@@ -521,6 +544,7 @@ where
                     price,
                     qty,
                     offset,
+                    ..
                 } => Event::Submit {
                     id,
                     side,
@@ -534,6 +558,7 @@ where
                     side,
                     qty,
                     offset,
+                    ..
                 } => Event::Submit {
                     id,
                     side,
@@ -607,6 +632,15 @@ where
         depth_applied,
         depth_refused,
         depth_unused,
+        misrouted_orders: misrouted,
+    }
+}
+
+/// The order id an intent carries, for the two that place one.
+const fn intent_id(intent: &Intent) -> Option<OrderId> {
+    match intent {
+        Intent::Limit { id, .. } | Intent::Market { id, .. } => Some(*id),
+        Intent::Cancel(_) | Intent::CancelAll => None,
     }
 }
 
@@ -673,6 +707,7 @@ mod tests {
             if !self.done && ctx.position.is_zero() && ctx.working == 0 {
                 self.done = true;
                 out.push(Intent::Market {
+                    instrument: oq_types::InstrumentId::new(1),
                     id: OrderId::new(1),
                     side: Side::Buy,
                     qty: QtyLots(self.qty),
@@ -717,12 +752,14 @@ mod tests {
             if !self.placed {
                 self.placed = true;
                 out.push(Intent::Market {
+                    instrument: oq_types::InstrumentId::new(1),
                     id: OrderId::new(1),
                     side: Side::Buy,
                     qty: QtyLots(1),
                     offset: oq_types::Offset::Open,
                 });
                 out.push(Intent::Limit {
+                    instrument: oq_types::InstrumentId::new(1),
                     id: OrderId::new(2),
                     side: Side::Buy,
                     price: PriceTicks(1),
@@ -918,7 +955,7 @@ mod stream_tests {
         fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
             self.n += 1;
             if self.n % 50 == 0 {
-                out.push(Intent::market(
+                out.push(ctx.market(
                     oq_types::OrderId(self.n as u64),
                     if self.n % 100 == 0 {
                         oq_types::Side::Sell
@@ -1023,12 +1060,14 @@ mod hedge_mode_tests {
             }
             self.opened = true;
             out.push(Intent::Market {
+                instrument: oq_types::InstrumentId::new(1),
                 id: OrderId::new(1),
                 side: Side::Buy,
                 qty: QtyLots(200),
                 offset: Offset::Open,
             });
             out.push(Intent::Market {
+                instrument: oq_types::InstrumentId::new(1),
                 id: OrderId::new(2),
                 side: Side::Sell,
                 qty: QtyLots(200),
@@ -1165,6 +1204,7 @@ mod depth_path_tests {
             if !self.placed {
                 self.placed = true;
                 out.push(Intent::Limit {
+                    instrument: oq_types::InstrumentId::new(1),
                     id: OrderId(1),
                     side: Side::Buy,
                     price: PriceTicks(self.price),
@@ -1287,6 +1327,80 @@ mod depth_path_tests {
         assert_eq!(out.tier, "L0");
         assert_eq!(out.depth_applied, 0);
         assert_eq!(out.depth_unused, 1, "an ignored update must be visible");
+    }
+
+    /// An order for an instrument the run does not hold is refused, not
+    /// retargeted.
+    ///
+    /// The alternative is the one a single-holding account makes
+    /// tempting: send it to the only instrument there is. That fills an
+    /// order the strategy did not place, on a book it was not looking
+    /// at, and reports it as a fill like any other.
+    #[test]
+    fn an_order_for_another_instrument_is_refused_and_reported() {
+        struct Elsewhere {
+            placed: bool,
+            refused: Vec<OrderId>,
+        }
+        impl Strategy for Elsewhere {
+            fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+                if !self.placed {
+                    self.placed = true;
+                    out.push(Intent::market_on(
+                        InstrumentId::new(999),
+                        OrderId(1),
+                        Side::Buy,
+                        QtyLots(1),
+                    ));
+                }
+            }
+            fn on_placed(&mut self, id: OrderId, accepted: bool) {
+                if !accepted {
+                    self.refused.push(id);
+                }
+            }
+            fn name(&self) -> &str {
+                "elsewhere"
+            }
+        }
+
+        let mut s = Elsewhere {
+            placed: false,
+            refused: Vec::new(),
+        };
+        let out = run_stream(&config(1_000_000), &mut s, flat_ticks(4, 100));
+
+        assert_eq!(out.misrouted_orders, 1, "the order was refused");
+        assert!(out.fills.is_empty(), "and did not fill somewhere else");
+        assert_eq!(s.refused, vec![OrderId(1)], "and the strategy was told");
+    }
+
+    /// The same order on the instrument the run does hold goes through.
+    ///
+    /// Without this the test above passes for a run that refuses
+    /// everything.
+    #[test]
+    fn an_order_for_the_held_instrument_is_accepted() {
+        struct Here {
+            placed: bool,
+        }
+        impl Strategy for Here {
+            fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+                if !self.placed {
+                    self.placed = true;
+                    out.push(ctx.market(OrderId(1), Side::Buy, QtyLots(1)));
+                }
+            }
+            fn name(&self) -> &str {
+                "here"
+            }
+        }
+
+        let mut s = Here { placed: false };
+        let out = run_stream(&config(1_000_000), &mut s, flat_ticks(4, 100));
+
+        assert_eq!(out.misrouted_orders, 0);
+        assert!(!out.fills.is_empty(), "a market order fills");
     }
 
     /// Raising the tier without giving it anything new must not change

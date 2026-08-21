@@ -172,6 +172,7 @@ impl Strategy for Probe {
                 reference.0 - reference.0 * self.away_bps / 10_000,
             ));
             out.push(Intent::Limit {
+                instrument: ctx.instrument,
                 id: OrderId(self.next_id),
                 side: Side::Buy,
                 price,

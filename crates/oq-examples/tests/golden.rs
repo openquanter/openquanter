@@ -33,10 +33,11 @@ struct BuyAndHold {
 }
 
 impl Strategy for BuyAndHold {
-    fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
         if !self.bought {
             self.bought = true;
             out.push(Intent::Market {
+                instrument: ctx.instrument,
                 id: OrderId::new(1),
                 side: Side::Buy,
                 qty: QtyLots(10),
@@ -99,6 +100,7 @@ impl Strategy for MartingaleLadder {
             self.rungs = 1;
             let id = self.id();
             out.push(Intent::Market {
+                instrument: ctx.instrument,
                 id,
                 side: Side::Buy,
                 qty: QtyLots(self.base_qty),
@@ -117,6 +119,7 @@ impl Strategy for MartingaleLadder {
             self.rungs += 1;
             let id = self.id();
             out.push(Intent::Market {
+                instrument: ctx.instrument,
                 id,
                 side: Side::Buy,
                 qty: QtyLots(qty),
@@ -237,6 +240,7 @@ impl Strategy for Cross {
         self.long = want;
         self.next_id += 1;
         out.push(Intent::Market {
+            instrument: ctx.instrument,
             id: OrderId::new(self.next_id),
             side: if want { Side::Buy } else { Side::Sell },
             qty: QtyLots(1),
