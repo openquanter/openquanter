@@ -25,7 +25,10 @@ use oq_engine::Tick;
 
 use crate::matcher::{DepthOutcome, Matcher};
 use oq_margin::{Contract, FundingRate, MarginedPosition, TierTable};
-use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Side, Working};
+use oq_types::{
+    Balances, Cash, Currency, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Side,
+    Working,
+};
 
 /// Something the core produced.
 ///
@@ -155,7 +158,20 @@ pub struct State {
     /// An account-level choice: it decides what a fill *means*, and the
     /// venue applies it to the account rather than per instrument.
     pub mode: PositionMode,
-    pub balance: Cash,
+    /// What the account holds, by currency.
+    ///
+    /// Private, because every read has to say which currency it means
+    /// and `balance()` is the one that answers "the one this account
+    /// prices itself in". A `pub` field would let a caller add to a
+    /// currency the margin model does not know it holds.
+    balances: Balances,
+    /// The currency margin, equity and liquidation are computed in.
+    ///
+    /// A holding settling in something else can be *held* — see
+    /// [`Balances`] — and cannot yet be counted toward equity, because
+    /// that needs a rate and an instant it was true at. Until then this
+    /// is the currency the account is solvent or not in.
+    pub settlement: Currency,
     pub realized: Cash,
     pub funding: Cash,
     /// Trading fees charged so far, positive.
@@ -214,7 +230,8 @@ impl State {
                 mark: PriceTicks::ZERO,
             },
             mode: PositionMode::OneWay,
-            balance: starting_balance,
+            balances: Balances::of(Currency::usdt(), starting_balance),
+            settlement: Currency::usdt(),
             realized: Cash::ZERO,
             funding: Cash::ZERO,
             now: Nanos::ZERO,
@@ -256,7 +273,7 @@ impl State {
             self.holding.contract,
             self.holding.entry,
             self.holding.qty,
-            self.balance,
+            self.balance(),
         )
     }
 
@@ -265,6 +282,43 @@ impl State {
     pub fn with_mode(mut self, mode: PositionMode) -> Self {
         self.mode = mode;
         self
+    }
+
+    /// What the account holds in the currency it prices itself in.
+    ///
+    /// The number every margin and liquidation decision is made
+    /// against. A balance in another currency is held and not counted,
+    /// which [`State::balances`] reports and this deliberately does not
+    /// — a total across currencies needs a rate, and one computed from
+    /// a stale rate is wrong while looking like a number.
+    #[must_use]
+    pub fn balance(&self) -> Cash {
+        self.balances.get(self.settlement)
+    }
+
+    /// Everything the account holds, by currency.
+    #[must_use]
+    pub const fn balances(&self) -> &Balances {
+        &self.balances
+    }
+
+    /// Move the settlement balance by `amount`, signed.
+    ///
+    /// One entry point for both directions, because a fee that credited
+    /// and a profit that debited would each read as ordinary arithmetic
+    /// at the call site.
+    pub fn credit(&mut self, amount: Cash) {
+        self.balances.add(self.settlement, amount);
+    }
+
+    /// Credit a currency this account does not price itself in.
+    ///
+    /// Held, reported, and **not** counted toward equity. This is the
+    /// half of multi-currency support that does not need a rate: an
+    /// account can receive a payout in something it does not settle in,
+    /// and pretending otherwise loses the payout.
+    pub fn credit_in(&mut self, currency: Currency, amount: Cash) {
+        self.balances.add(currency, amount);
     }
 
     /// Match with a different fidelity tier.
@@ -297,7 +351,7 @@ impl State {
             self.holding.contract,
             self.holding.short_entry,
             self.holding.short_qty,
-            self.balance,
+            self.balance(),
         )
     }
 
@@ -309,7 +363,7 @@ impl State {
     /// against.
     #[must_use]
     pub fn equity(&self) -> Cash {
-        self.balance.add(self.unrealized())
+        self.balance().add(self.unrealized())
     }
 
     /// Unrealized profit at the current mark, across both legs.
@@ -392,7 +446,7 @@ impl State {
                     .contract
                     .unrealized(self.holding.entry, fill.price, closed_signed);
             self.realized = self.realized.add(pnl);
-            self.balance = self.balance.add(pnl);
+            self.credit(pnl);
         }
 
         if new.0 == 0 {
@@ -471,7 +525,7 @@ impl State {
             .contract
             .unrealized(entry, fill.price, signed_closed);
         self.realized = self.realized.add(pnl);
-        self.balance = self.balance.add(pnl);
+        self.credit(pnl);
 
         let left = QtyLots(held.0 - signed_closed.0);
         if long_leg {
@@ -523,8 +577,8 @@ impl State {
                 self.holding.short_qty,
             ));
         self.realized = self.realized.add(pnl);
-        self.balance = self.balance.add(pnl);
-        let equity = self.balance;
+        self.credit(pnl);
+        let equity = self.balance();
         // Reported as the net exposure that was closed out, which is the
         // number a reader compares against the position they thought
         // they had.
@@ -604,7 +658,7 @@ impl Kernel {
                         id,
                         reason: RejectReason::DuplicateId,
                     });
-                } else if self.state.balance.0 <= 0 {
+                } else if self.state.balance().0 <= 0 {
                     // A liquidated account does not get to keep trading.
                     self.outputs.push(Output::Rejected {
                         id,
@@ -635,7 +689,7 @@ impl Kernel {
                 if !self.state.holding.qty.is_zero() {
                     let settlement = FundingRate::new(at, rate, mark)
                         .settle(self.state.holding.contract, self.state.holding.qty);
-                    self.state.balance = self.state.balance.add(settlement.amount);
+                    self.state.credit(settlement.amount);
                     self.state.funding = self.state.funding.add(settlement.amount);
                     self.outputs.push(Output::Funded {
                         amount: settlement.amount,
@@ -650,7 +704,7 @@ impl Kernel {
             Event::Time(at) => self.state.now = at,
             Event::MarginDeposit { amount, at } => {
                 self.state.now = at;
-                self.state.balance = self.state.balance.add(Cash(amount));
+                self.state.credit(Cash(amount));
             }
             Event::VenueFill(fill) => self.on_venue_fill(&fill),
             Event::Depth(_) => unreachable!("handled before the match"),
@@ -698,7 +752,7 @@ impl Kernel {
             .fee_schedule
             .charge(self.state.holding.contract, fill);
         self.state.fees = self.state.fees.add(fee);
-        self.state.balance = self.state.balance.sub(fee);
+        self.state.credit(fee.neg());
         self.state.apply_fill(fill);
         self.outputs.push(Output::Filled(*fill));
         // The venue's fill can be what makes the account liquidatable,
@@ -740,7 +794,7 @@ impl Kernel {
                 .fee_schedule
                 .charge(self.state.holding.contract, fill);
             self.state.fees = self.state.fees.add(fee);
-            self.state.balance = self.state.balance.sub(fee);
+            self.state.credit(fee.neg());
             self.state.apply_fill(fill);
             self.working.retain(|w| *w != fill.order);
             self.outputs.push(Output::Filled(*fill));
@@ -882,7 +936,7 @@ impl Kernel {
             entry: self.state.holding.entry,
             short_qty: self.state.holding.short_qty,
             short_entry: self.state.holding.short_entry,
-            balance: self.state.balance,
+            balance: self.state.balance(),
             realized: self.state.realized,
             funding: self.state.funding,
             fees: self.state.fees,
@@ -1389,7 +1443,7 @@ mod hedge_tests {
         // Both entered at the same price, so the long's gain and the
         // short's loss are the same size and cancel.
         assert_eq!(s.unrealized(), Cash::ZERO);
-        assert_eq!(s.equity(), s.balance);
+        assert_eq!(s.equity(), s.balance());
 
         // Entered on opposite sides of the mark they do not cancel —
         // they add, which is the case a netted view cannot express.
@@ -1400,6 +1454,51 @@ mod hedge_tests {
         assert!(
             both_winning.unrealized() > Cash::ZERO,
             "a long bought below the mark and a short sold above it are both ahead"
+        );
+    }
+
+    /// **What `Cash` alone could not express.**
+    ///
+    /// An account receives a payout in something it does not settle in.
+    /// Before this, the amount had to be added to the one balance there
+    /// was — silently converting at a rate of 1 — or dropped. Now it is
+    /// held, reported, and kept out of equity, because counting it needs
+    /// a rate and an instant it was true at.
+    #[test]
+    fn a_currency_the_account_does_not_settle_in_is_held_and_not_counted() {
+        let mut s = state();
+        let opening = s.balance();
+        let btc = oq_types::Currency::new("BTC").expect("valid");
+
+        let before = s.equity();
+        s.credit_in(btc, Cash::from_units(7));
+
+        assert_eq!(s.balances().get(btc), Cash::from_units(7), "it is held");
+        assert_eq!(
+            s.equity(),
+            before,
+            "and not counted: totalling it needs a rate this account has not been given"
+        );
+        assert_eq!(s.balance(), opening, "the settlement balance is untouched");
+        assert_eq!(
+            s.balances().len(),
+            2,
+            "the account has touched two currencies"
+        );
+    }
+
+    /// The settlement currency is the one the account is solvent in.
+    #[test]
+    fn margin_is_decided_in_the_settlement_currency() {
+        let mut s = state();
+        let opening = s.balance();
+        let eur = oq_types::Currency::new("EUR").expect("valid");
+        s.credit_in(eur, Cash::from_units(1_000_000));
+
+        assert_eq!(
+            s.balance(),
+            opening,
+            "a million euros does not make a USDT account solvent"
         );
     }
 }
