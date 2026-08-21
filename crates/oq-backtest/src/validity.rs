@@ -449,6 +449,10 @@ mod tests {
             equity_curve: Vec::new(),
             max_adverse_ticks: 0,
             margin_usage: margin,
+            tier: "L0",
+            depth_applied: 0,
+            depth_refused: 0,
+            depth_unused: 0,
         }
     }
 
@@ -639,6 +643,10 @@ mod tier_tests {
             equity_curve: Vec::new(),
             max_adverse_ticks: 0,
             margin_usage: MarginUsage::NotTracked,
+            tier: "L0",
+            depth_applied: 0,
+            depth_refused: 0,
+            depth_unused: 0,
         }
     }
 

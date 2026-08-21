@@ -23,7 +23,7 @@
 use crate::event::Event;
 use oq_engine::Tick;
 
-use crate::matcher::Matcher;
+use crate::matcher::{DepthOutcome, Matcher};
 use oq_margin::{Contract, FundingRate, MarginedPosition, TierTable};
 use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Side, Working};
 
@@ -262,6 +262,29 @@ impl State {
     #[must_use]
     pub fn with_mode(mut self, mode: PositionMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Match with a different fidelity tier.
+    ///
+    /// The default is L0, the frozen anchor. A tier given nothing the
+    /// one below it lacked answers identically -- so this changes
+    /// results only when it is also handed the data the tier exists to
+    /// read, which is the property that makes the choice safe to expose.
+    ///
+    /// # Panics
+    /// If the matcher is for a different instrument than this state.
+    /// Two instruments sharing one account is a position attributed to
+    /// the wrong book, and it would show up as a margin figure nobody
+    /// can trace.
+    #[must_use]
+    pub fn matching_with(mut self, matcher: Matcher) -> Self {
+        assert_eq!(
+            matcher.instrument(),
+            self.engine.instrument(),
+            "matcher is for a different instrument than the state it is going into"
+        );
+        self.engine = matcher;
         self
     }
 
@@ -713,6 +736,46 @@ impl Kernel {
     #[must_use]
     pub fn working(&self) -> &[OrderId] {
         &self.working
+    }
+
+    /// Hand the matcher a depth update.
+    ///
+    /// [`DepthOutcome::NotRead`] means the tier does not read depth —
+    /// not that the update was bad. A caller feeding an archive to an
+    /// L0 or L1 run is matching as that tier while holding the data for
+    /// a higher one, and saying so is what stops the run from looking
+    /// like an L2 that happened to agree with L1.
+    ///
+    /// # Not an event, and what that costs
+    ///
+    /// This does **not** go through [`Kernel::apply`], so it is not in
+    /// the journal, and replaying a journal from an L2 run reproduces
+    /// its orders but not the book they matched against. The fills will
+    /// differ, which is the one place in this kernel where replay is not
+    /// faithful.
+    ///
+    /// It is deliberate and it is temporary. An `Event` is a fixed-size
+    /// record and a depth update is a variable-length list of levels;
+    /// putting one in the schema is a format change with a version
+    /// behind it, not a field. Until that happens, an L2 run's evidence
+    /// is its archive plus its journal rather than its journal alone —
+    /// stated here rather than discovered by someone whose replay
+    /// disagreed with their run.
+    pub fn apply_depth(&mut self, update: &oq_engine::DepthUpdate) -> DepthOutcome {
+        self.state.engine.on_depth(update)
+    }
+
+    /// Seed the venue book from a snapshot. Returns whether the tier
+    /// keeps one.
+    ///
+    /// Not an event either, for the same reason as `apply_depth`.
+    pub fn install_snapshot(
+        &mut self,
+        update_id: u64,
+        bids: &[oq_engine::Level],
+        asks: &[oq_engine::Level],
+    ) -> bool {
+        self.state.engine.install_snapshot(update_id, bids, asks)
     }
 
     /// Rest an order directly, bypassing the event path.

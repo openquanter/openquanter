@@ -485,6 +485,10 @@ mod tests {
             equity_curve: curve.iter().map(|&c| Cash(c)).collect(),
             max_adverse_ticks: 0,
             margin_usage: crate::run::MarginUsage::NotTracked,
+            tier: "L0",
+            depth_applied: 0,
+            depth_refused: 0,
+            depth_unused: 0,
         };
         for _ in 0..liquidations {
             r.liquidations.push(crate::run::Liquidation {

@@ -29,7 +29,10 @@ pub use fidelity::{
 /// resolving for code written before it moved out.
 pub use oq_strategy as strategy;
 pub use oq_strategy::{Context, Ending, Intent, Strategy};
-pub use run::{Liquidation, MarginMode, MarginUsage, RunConfig, RunResult, run, tick_at};
+pub use run::{
+    Liquidation, MarginMode, MarginUsage, Observation, RunConfig, RunResult, Tier, run,
+    run_observations, run_stream, tick_at,
+};
 pub use sweep::{Candidate, SweepReport, returns, sweep};
 pub use validity::{
     Assumptions, FidelityReport, Participation, report as fidelity_report, report_at,
