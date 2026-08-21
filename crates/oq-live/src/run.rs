@@ -936,6 +936,29 @@ where
                 "heartbeat        {ticks} ticks, {} resting{pending}{waiting}",
                 trader.working()
             );
+            // Why the tick count is what it is.
+            //
+            // A run that stops producing ticks looks the same from
+            // outside whether the feed went quiet or the events kept
+            // arriving and were folded into a window that never closed.
+            // Every number that separates those two was already being
+            // counted, and none of it was ever read — so the question
+            // could be answered only by measuring gaps in the journal
+            // afterwards, and only by someone who already suspected.
+            //
+            // `ooo` is the one that decides it. An event whose exchange
+            // timestamp goes backwards is clamped to the high-water mark
+            // and lands in the window already open, so a stream of them
+            // advances nothing while the connection looks healthy.
+            let c = agg.counts();
+            println!(
+                "feed             depth {}, trades {}, ooo {}, quiet {}, pre-trade {}",
+                c.depth_applied,
+                c.trades,
+                c.out_of_order,
+                c.quiet_windows,
+                c.windows_before_first_trade
+            );
         }
     }
 
