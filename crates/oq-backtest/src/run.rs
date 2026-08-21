@@ -21,8 +21,8 @@
 use oq_core::{Event, Kernel, Output, State};
 use oq_engine::Tick;
 use oq_margin::{Contract, FundingSchedule, TierTable};
-use oq_strategy::{Context, Intent, Strategy};
-use oq_types::{Cash, Fill, InstrumentId, Nanos, PriceTicks, QtyLots, Stamp};
+use oq_strategy::{Context, Ending, Intent, Strategy};
+use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Stamp};
 
 /// Whether the venue is allowed to close the account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,12 +274,20 @@ where
     let mut next_order_id = 1u64;
     let mut last_funding = Nanos(i64::MIN);
 
+    // Orders the kernel has finished with, waiting to be reported to the
+    // strategy. An order ending is a different event from its last fill
+    // and cannot be inferred from one: a limit order fills in pieces,
+    // and only the matcher knows which piece was the last.
+    let mut ended: Vec<(OrderId, Ending)> = Vec::new();
+
     let mut tick_count = 0usize;
     for tick in ticks {
         tick_count += 1;
         let event = Event::Tick(tick);
         let mut tick_fills: Vec<Fill> = Vec::new();
-        for out in kernel.apply(&event) {
+        let outputs: Vec<Output> = kernel.apply(&event).to_vec();
+        note_endings(&outputs, kernel.working(), &mut ended);
+        for out in &outputs {
             match out {
                 Output::Filled(f) => {
                     fills.push(*f);
@@ -380,6 +388,11 @@ where
         for fill in &tick_fills {
             strategy.on_fill(fill, &ctx, &mut intents);
         }
+        // Then the orders that ended, in the order a live host reports
+        // them: the fill first, the end of the order after it.
+        for (id, ending) in ended.drain(..) {
+            strategy.on_ended(id, ending, &mut intents);
+        }
         strategy.on_tick(&ctx, &mut intents);
 
         for intent in &intents {
@@ -417,10 +430,13 @@ where
                 },
                 Intent::CancelAll => {
                     for id in kernel.working().to_vec() {
-                        kernel.apply(&Event::Cancel {
-                            id,
-                            stamp: tick.stamp,
-                        });
+                        let outputs: Vec<Output> = kernel
+                            .apply(&Event::Cancel {
+                                id,
+                                stamp: tick.stamp,
+                            })
+                            .to_vec();
+                        note_endings(&outputs, kernel.working(), &mut ended);
                     }
                     continue;
                 }
@@ -441,6 +457,7 @@ where
                     strategy.on_placed(id, !refused);
                 }
             }
+            note_endings(&outputs, kernel.working(), &mut ended);
         }
         let _ = next_order_id;
     }
@@ -475,6 +492,25 @@ where
 #[must_use]
 pub fn tick_at(ns: i64, last: i64, high: i64, low: i64) -> Tick {
     Tick::trades_only(Stamp::synthetic(ns), last, high, low)
+}
+
+/// Orders the kernel has just finished with.
+///
+/// An order that the kernel reported on and that is no longer resting is
+/// over. Asking the working set rather than reading the report is what
+/// makes a partial fill — a report about an order that is still there —
+/// come out as nothing at all, which is exactly right.
+fn note_endings(outputs: &[Output], working: &[OrderId], ended: &mut Vec<(OrderId, Ending)>) {
+    for out in outputs {
+        let (id, ending) = match out {
+            Output::Filled(f) => (f.order, Ending::Filled),
+            Output::Cancelled(id) => (*id, Ending::Cancelled),
+            _ => continue,
+        };
+        if !working.contains(&id) && !ended.iter().any(|(seen, _)| *seen == id) {
+            ended.push((id, ending));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -539,6 +575,78 @@ mod tests {
             ticks.push(tick_at(200 + i, p, p, p));
         }
         ticks
+    }
+
+    /// Records what it is told about the end of its own orders.
+    ///
+    /// Places two on the first tick — one that fills at once and one
+    /// that rests far below the market — and withdraws the resting one
+    /// later, so both ways an order can end are exercised by one run.
+    struct EndingWatcher {
+        placed: bool,
+        ticks: usize,
+        cancel_at: usize,
+        ended: Vec<(OrderId, Ending)>,
+    }
+
+    impl Strategy for EndingWatcher {
+        fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
+            self.ticks += 1;
+            if !self.placed {
+                self.placed = true;
+                out.push(Intent::Market {
+                    id: OrderId::new(1),
+                    side: Side::Buy,
+                    qty: QtyLots(1),
+                    offset: oq_types::Offset::Open,
+                });
+                out.push(Intent::Limit {
+                    id: OrderId::new(2),
+                    side: Side::Buy,
+                    price: PriceTicks(1),
+                    qty: QtyLots(1),
+                    offset: oq_types::Offset::Open,
+                });
+            }
+            if self.ticks == self.cancel_at {
+                out.push(Intent::Cancel(OrderId::new(2)));
+            }
+        }
+        fn on_ended(&mut self, id: OrderId, ending: Ending, _out: &mut Vec<Intent>) {
+            self.ended.push((id, ending));
+        }
+        fn name(&self) -> &str {
+            "ending-watcher"
+        }
+    }
+
+    /// Both ways an order ends reach the strategy, and neither reaches
+    /// it twice.
+    ///
+    /// A strategy that has to infer this from fills gets it wrong in
+    /// both directions: it never learns about an order that was
+    /// cancelled, and it decides a partially filled one is over. The
+    /// live host reports the venue's answer; this is the same answer
+    /// from the matcher, so a strategy written against it behaves the
+    /// same in both.
+    #[test]
+    fn a_strategy_is_told_when_each_of_its_orders_ends() {
+        let mut watcher = EndingWatcher {
+            placed: false,
+            ticks: 0,
+            cancel_at: 50,
+            ended: Vec::new(),
+        };
+        run(&config(10_000), &mut watcher, &falling_market());
+
+        assert_eq!(
+            watcher.ended,
+            vec![
+                (OrderId::new(1), Ending::Filled),
+                (OrderId::new(2), Ending::Cancelled),
+            ],
+            "both endings, once each, in the order they happened"
+        );
     }
 
     #[test]

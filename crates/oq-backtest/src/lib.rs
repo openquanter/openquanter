@@ -28,7 +28,7 @@ pub use fidelity::{
 /// The strategy contract, re-exported so `oq_backtest::strategy::…` keeps
 /// resolving for code written before it moved out.
 pub use oq_strategy as strategy;
-pub use oq_strategy::{Context, Intent, Strategy};
+pub use oq_strategy::{Context, Ending, Intent, Strategy};
 pub use run::{Liquidation, MarginMode, MarginUsage, RunConfig, RunResult, run, tick_at};
 pub use sweep::{Candidate, SweepReport, returns, sweep};
 pub use validity::{
