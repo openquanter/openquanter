@@ -31,3 +31,4 @@ DepthUpdate.event_ms             # same, on a depth message
 Listing.inst_id                  # OKX's own instrument id, carried so a caller can round-trip it
 PboReport.logits                 # the per-split distribution; its doc says it is more informative than the headline, and that is a consumer's call
 MacdValue.histogram              # the third MACD line; a strategy reads it, the catalogue's MACD happens not to
+Drift.worst_bin                  # which bin the index came from; the headline says how much drifted, this says where
