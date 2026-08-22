@@ -45,7 +45,7 @@ commitments.
 |---|---|---|---|
 | **M0** | Foundations: repository, capture, statistics | 3–6 pw | Mostly landed |
 | **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
-| **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | **Mostly built; G3, G7's parity half and G11 are blocked on inputs this project cannot reach** |
+| **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | **Mostly built. G3 and G7's parity half have now been measured rather than blocked — neither passed, both by a stated margin. G11 was withdrawn** |
 | **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Half built, entry triggers unmet** |
 | **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered, and further along than "a first L1 exists": L1 is built with latency as distributions, L2 measures both the queue and the taker's walk from a reconstructed book, and a backtest reaches it from a captured archive. What is left is calibration against recorded fills, which is blocked on the fills M3's trigger asks for, and the probabilistic queue model that the stated order puts after it. Its depth requirement was a bare "6 months" with no argument behind it; now stated by what the data is for |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
@@ -169,7 +169,7 @@ input this project cannot reach, the second has not been written.
 | Adoption | **Classic-strategy catalogue** (RSI, MACD, Bollinger, Donchian, grid, dual-thrust) | Built — teaching references, each one documenting where it breaks rather than claiming an edge |
 | Gate | **G3 throughput ≥8× the interpreted baseline** | **Measured, not met — 7.13× against a target of 8×.** No longer blocked: run on one machine, over 608 days of BTCUSDT trades (2024-09-01 to 2026-04-30, 149,546,989 observations), with both engines given the identical observation count and the same rule — vnpy's `DoubleMaStrategy`, whose two copies were checked byte-identical rather than assumed so. The predecessor took 647.4 s; this engine took 128.4 s per tick (5.04×) and 90.8 s at its best batch (7.13×). Take the predecessor's data-decode phase out of its time and the comparison is 5.67×, which is the fairer number for *engine* throughput and the lower one. Three things the figure hides are recorded with it: the baseline is Cython-compiled rather than interpreted, so the bar is higher than the goal's wording suggests; batching stops helping after 512 and is 18% **slower** at 4096, so the remaining gap is not on the language boundary but inside the engine; and the batch that produced 7.13× also dropped fills from 6,045,548 to 292,083, so the speed is quoted against a strategy that has stopped trading |
 | Gate | **G7 re-passing parity after conversion** | **Half met, half answered in the negative.** The mode half is met and tested. The parity half no longer shares G3's blocker, and running it produced a result rather than a pass: a batch large enough to reach G3's throughput does not preserve the fill sequence, because orders from a batch are submitted at its end. `compare_modes` reports the divergence rather than asserting there is none, which is the right shape for it — but it means the goal as written asks for two things that trade against each other, and the trade should be stated in the goal instead of discovered by running it |
-| Gate | **G11 external cold start ≤ 30 minutes** | **Blocked** — needs a person who has not seen this repository. A prior blocker was found and removed: the quickstart's first instruction was `cargo install oq-cli`, and every published `oq-*` is a `0.0.1` name placeholder, so the trial would have failed in its first minute for a reason that had nothing to do with the reader |
+| Gate | ~~**G11 external cold start ≤ 30 minutes**~~ | **Withdrawn** — the reason is in [REQUIREMENTS](REQUIREMENTS.md). It did leave one real finding behind before it went: the quickstart's first instruction was `cargo install oq-cli`, and every published `oq-*` is a `0.0.1` name placeholder, so anyone following it failed in their first minute for a reason that had nothing to do with them. That was found by asking what an outsider would hit, and fixed as a bug — which is the form this kind of thing should take |
 
 ### M3 — Live trading
 
@@ -358,9 +358,10 @@ depends on the invariants established here.
   Rust, so no argument can name one and the subcommand could only ever be a
   worse `cargo run --example`. `oq` names both when asked, rather than
   reporting an unknown command.
-- **Adoption readiness (G11):** quickstart documentation, at least two example
-  strategies, sample dataset with golden tests, and a verified cold-start run
-  by someone outside the core team.
+- **Adoption readiness:** quickstart documentation, at least two example
+  strategies, and a sample dataset with golden tests. All three exist. The
+  fourth item here used to be a timed cold start by an outsider; `G11` was
+  withdrawn and the reason is in [REQUIREMENTS](REQUIREMENTS.md).
 
 **Exit gate.**
 
@@ -380,11 +381,15 @@ depends on the invariants established here.
   method, and `compare_modes` asserts `batch=1` produces an identical run
   rather than the documentation asserting it. Re-passing *parity* means
   against a predecessor baseline, which is the same blocker as G3.
-- **G11** initial verification: external cold start ≤ 30 minutes. **Three of
-  four.** Quickstart, five example strategies, and goldens over a
-  regenerable market all exist. The fourth is a cold start by someone
-  outside the core team, which is not an engineering task and cannot be
-  self-certified — it needs a person who has not seen this repository.
+- ~~**G11** initial verification~~ — **withdrawn**, not deferred. A
+  stopwatch on a first backtest measures the wrong thing: a tool worth
+  using is worth more than thirty minutes, and one that is not is not
+  worth one. It also measured it with an instrument that cannot work —
+  a single reader's trial is n=1 and varies more by who and what machine
+  than by anything here. What the goal was reaching for is real and is
+  kept as ordinary work: the quickstart, the five examples and the
+  goldens all exist, and a documented command that does not run is a bug
+  to fix when found, not a gate to fail.
 - **Beta release** with documented, if still unstable, APIs.
 
 **The two open gates have now been run, and neither came back a pass.** Both

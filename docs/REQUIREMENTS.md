@@ -251,7 +251,7 @@ one use among several rather than something the framework promises.
 | **G8** | HFT fidelity | L1 queue + latency + impact; L2 book reconstruction; stylized-facts test set passes | Fidelity test suite + calibration report |
 | **G9** | Inference | Single-row GBDT inference ≤ 10 µs in-process; Python/Rust prediction parity gate passes | Inference benchmark + parity test |
 | **G10** | RL environments | Vectorized batch environments with full seed propagation and reproducible training runs | Training throughput benchmark + reproduction test |
-| **G11** | Adoption readiness | Cold start to first backtest ≤ 30 minutes; public CI green; semantic versioning from 2.0 | External-user cold-start trial |
+| ~~**G11**~~ | ~~Adoption readiness~~ | **Withdrawn.** Its three clauses were a stopwatch and two restatements. "Cold start ≤ 30 minutes" measured the wrong thing — a good tool is worth more time and a bad one is not worth a minute — and measured it with the wrong instrument: one person's trial is n=1, varies more by reader and machine than by anything this project controls, and cannot be self-certified. "Public CI green" is what CI already enforces; "semantic versioning from 2.0" is a policy, and lives in [VERSIONING](VERSIONING.md). The number is kept so older references resolve and nobody assigns it again |
 | **G12** | Live gap attribution | A live run replays through the same kernel; the gap decomposes by cause; **the unexplained residual is reported alongside the bound `RunManifest`**. **Threshold deliberately unset** — it is fixed by the first real measurement rather than guessed now | Live journal replay + attribution report |
 
 ---
