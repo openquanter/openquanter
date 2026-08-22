@@ -69,6 +69,39 @@
 //! The practical reading: choose the batch by measuring the strategy that
 //! will run, not by taking 4,096 from the first table.
 //!
+//! # Where the time in a batched run actually goes
+//!
+//! Splitting that 149.5-million-tick run three ways — a strategy whose
+//! `on_batch` returns immediately, one that reads `t.last` and discards
+//! it, and the moving-average rule — separates costs that otherwise get
+//! attributed to whichever one is being blamed:
+//!
+//! ```text
+//! engine, plus building one Python object per tick   25.6 s   36.7%
+//! reading one attribute per tick                      4.0 s    5.7%
+//! the strategy's own arithmetic, in Python           40.1 s   57.6%
+//! ```
+//!
+//! The first line is what this crate can make cheaper, and it is a third
+//! of the total. The last is the user's own code and is not ours to
+//! optimise. So the ceiling on anything done at this boundary — a
+//! zero-copy batch, a buffer protocol, columns instead of objects — is
+//! about a third, and past that the run is bounded by Python executing
+//! the strategy.
+//!
+//! It also means a throughput ratio against another framework is only
+//! partly about the engines. A rule that computes little makes this side
+//! look faster; one that computes a lot dilutes the difference in Python
+//! that both sides pay. Quote such a ratio with the rule it was measured
+//! on, or it is a number about a strategy wearing an engine's name.
+//!
+//! One methodological note, because it nearly produced the opposite
+//! conclusion: measured once each in order, the do-nothing strategy came
+//! out *slowest*. It ran first and read nine gigabytes off a cold disk
+//! while the two after it read the page cache. The figures above are
+//! after a warm-up pass, two runs each, and a reversed-order repeat that
+//! moves them by 1.3% to 4.5%.
+//!
 //! Put beside the accuracy cost on the example crossover, the trade is
 //! legible rather than a matter of taste: a batch of 8 buys 2.8x for
 //! 1.3% of the strategy's edge; a batch of 64 buys 5.8x for 18% of it;
