@@ -35,16 +35,24 @@
 //! # What this skeleton is not
 //!
 //! It is not a feature store: no persistence, no registry, no
-//! materialisation, no scheduling. It is not a drift monitor — comparing
-//! a feature against *itself later* is a different problem from
-//! comparing two implementations of it now. Those are M5. This is the
-//! part that has to be right before any of them are worth building,
-//! because a store that materialises a skewed feature has industrialised
-//! the bug.
+//! materialisation, no scheduling. Those are M5.
+//!
+//! It *is* now a drift monitor, in [`drift`] — comparing a feature
+//! against itself later, which is a different problem from comparing two
+//! implementations of it now, and is why it is a separate module rather
+//! than another method on [`Consistency`]. Both can hold at once: two
+//! implementations agreeing perfectly while the market moves underneath
+//! them is the normal case, not a corner one.
+//!
+//! What has to be right before either is worth building is the part
+//! above — a store that materialises a skewed feature has industrialised
+//! the bug, and a monitor watching a leaky feature is watching the wrong
+//! thing carefully.
 
 #![forbid(unsafe_code)]
 
 pub mod builtin;
+pub mod drift;
 
 use oq_engine::Tick;
 
