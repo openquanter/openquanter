@@ -102,7 +102,7 @@ impl Strategy for MaCross {
         self.position_open = want_long;
         self.flips += 1;
         let id = self.id();
-        out.push(ctx.market(
+        out.push(Intent::market(
             id,
             if want_long { Side::Buy } else { Side::Sell },
             QtyLots(if ctx.position.0 == 0 {
@@ -130,11 +130,7 @@ fn main() {
         Contract::new(10_000),
         TierTable::example_btcusdt(),
         Cash::from_units(10_000),
-    )
-    // The fidelity report wants to know how close the account came to
-    // its maintenance requirement, and that costs throughput, so a run
-    // has to ask for it. See RunConfig::tracking_margin.
-    .tracking_margin();
+    );
 
     let mut strategy = MaCross::new();
     let result = run(&config, &mut strategy, &ticks);
@@ -155,23 +151,5 @@ fn main() {
         "One run of one parameter pair on one generated series says nothing about\n\
          whether this works. That is the point: the number above is a demonstration\n\
          of the API, not evidence. Evidence needs a sweep and a deflated Sharpe ratio."
-    );
-
-    // The result above is only worth acting on if the run could have
-    // happened. FR-MATCH-3 asks every backtest to say so; this is that
-    // report, and the participation line is the one that decides it.
-    println!();
-    print!(
-        "{}",
-        oq_backtest::fidelity_report(
-            &result,
-            &ticks,
-            // Sixty observations to a window. A strategy can be small
-            // over a day and enormous over a minute, and the minute is
-            // what invalidates a replay.
-            60,
-            oq_backtest::validity::DEFAULT_THRESHOLD,
-        )
-        .render()
     );
 }
