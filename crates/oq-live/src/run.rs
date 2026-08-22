@@ -1309,23 +1309,12 @@ const DRAIN_BUDGET: usize = 256;
 /// exactly on a minimum is landing under it half the time.
 /// The smallest quantity this venue will accept at this price.
 ///
-/// Public because a strategy needs it: the venue enforces a minimum
-/// notional as well as a step, and a size that satisfies the step alone
-/// is rejected. Discovered on a live run, not in a unit test.
+/// Kept as a free function because callers here read better for it; the
+/// rule itself belongs to the contract and lives there, so a strategy
+/// can ask the same question without depending on the live host.
+#[must_use]
 pub fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
-    if instrument.min_notional.0 <= 0 || price.0 <= 0 {
-        return QtyLots(1);
-    }
-    let Some(tick_cash) = instrument.tick_cash() else {
-        return QtyLots(1);
-    };
-    let per_lot = i128::from(price.0) * i128::from(tick_cash);
-    if per_lot <= 0 {
-        return QtyLots(1);
-    }
-    let need = i128::from(instrument.min_notional.0) * 11 / 10;
-    let lots = (need + per_lot - 1) / per_lot;
-    QtyLots(i64::try_from(lots).unwrap_or(1).max(1))
+    instrument.smallest_allowed(price)
 }
 
 /// The fill inside an order update, when there is one.

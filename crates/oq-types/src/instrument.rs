@@ -202,6 +202,40 @@ impl Instrument {
     /// wrong.
     ///
     /// Returns `None` when the scales are large enough that a tick is
+    /// The smallest quantity this contract will accept at this price.
+    ///
+    /// A venue enforces a minimum notional as well as a step, and a size
+    /// that satisfies the step alone is refused. Ten percent of headroom
+    /// over the floor, because the floor is checked against a price that
+    /// can move between sizing and arrival, and landing exactly on a
+    /// minimum lands under it half the time.
+    ///
+    /// Here rather than in the live host because it is a property of the
+    /// contract, and the callers who need it most are strategies. One
+    /// asked for a take-profit against a partly filled entry — five
+    /// hundredths of the intended size, worth 39.40 against a floor of
+    /// 50 — and got a refusal it could only respond to by asking again.
+    ///
+    /// Returns one lot when the contract declares no floor: a bound that
+    /// is not published cannot be respected, and refusing to size at all
+    /// would be worse than sizing at the step.
+    #[must_use]
+    pub fn smallest_allowed(&self, price: PriceTicks) -> QtyLots {
+        if self.min_notional.0 <= 0 || price.0 <= 0 {
+            return QtyLots(1);
+        }
+        let Some(tick_cash) = self.tick_cash() else {
+            return QtyLots(1);
+        };
+        let per_lot = i128::from(price.0) * i128::from(tick_cash);
+        if per_lot <= 0 {
+            return QtyLots(1);
+        }
+        let need = i128::from(self.min_notional.0) * 11 / 10;
+        let lots = (need + per_lot - 1) / per_lot;
+        QtyLots(i64::try_from(lots).unwrap_or(1).max(1))
+    }
+
     /// worth less than the smallest cash unit, because a rounded-down
     /// zero here would price every position at nothing.
     #[must_use]
@@ -238,6 +272,73 @@ fn pow10(n: u8) -> Option<i128> {
         return None;
     }
     Some(10_i128.pow(u32::from(n)))
+}
+
+#[cfg(test)]
+mod floors {
+    use super::*;
+
+    fn btc() -> Instrument {
+        Instrument {
+            min_notional: Cash::from_units(50),
+            ..Instrument::linear(2, 4)
+        }
+    }
+
+    /// A size that satisfies the step and not the floor is refused by
+    /// the venue, so it has to be refused here first.
+    ///
+    /// The case that produced this: a take-profit against a partly
+    /// filled entry, five hundredths of the intended size, worth 39.40
+    /// against a floor of 50. The venue said no and the strategy could
+    /// only respond by asking again.
+    #[test]
+    fn a_size_below_the_floor_is_not_the_smallest_allowed() {
+        let i = btc();
+        let price = PriceTicks(7_800_000); // 78,000.00
+        let least = i.smallest_allowed(price);
+        let notional = |lots: i64| {
+            i128::from(lots) * i128::from(price.0) * i128::from(i.tick_cash().expect("scale"))
+        };
+        assert!(
+            notional(least.0) >= i128::from(i.min_notional.0),
+            "the smallest allowed is below the floor it exists to clear"
+        );
+        // And no larger than the rule asks for: one lot less no longer
+        // clears the floor *with its headroom*, which is the bound this
+        // is the smallest size for.
+        let with_room = i128::from(i.min_notional.0) * 11 / 10;
+        assert!(
+            notional(least.0 - 1) < with_room,
+            "larger than the rule asks for"
+        );
+    }
+
+    /// Headroom, because the floor is checked against a price that moves
+    /// between sizing and arrival.
+    #[test]
+    fn the_smallest_allowed_clears_the_floor_with_room() {
+        let i = btc();
+        let price = PriceTicks(7_800_000);
+        let least = i.smallest_allowed(price);
+        let notional =
+            i128::from(least.0) * i128::from(price.0) * i128::from(i.tick_cash().expect("scale"));
+        assert!(
+            notional >= i128::from(i.min_notional.0) * 105 / 100,
+            "landing exactly on a minimum lands under it half the time"
+        );
+    }
+
+    /// A contract that publishes no floor is sized at the step.
+    ///
+    /// Refusing to size at all would be worse: a bound nobody declared
+    /// cannot be respected, and a strategy that will not trade because
+    /// of one is stopped by nothing.
+    #[test]
+    fn no_declared_floor_means_the_step() {
+        let i = Instrument::linear(2, 4);
+        assert_eq!(i.smallest_allowed(PriceTicks(7_800_000)), QtyLots(1));
+    }
 }
 
 #[cfg(test)]
