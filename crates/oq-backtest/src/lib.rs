@@ -16,28 +16,9 @@
 #![forbid(unsafe_code)]
 
 pub mod deviation;
-pub mod fidelity;
 pub mod run;
-pub mod sweep;
-pub mod validity;
+pub mod strategy;
 
 pub use deviation::{DeviationReport, Verdict};
-pub use fidelity::{
-    Arm, Fidelity, StressReport, TailPoint, Unusable, Window, stress, tail_divergence,
-};
-/// The strategy contract, re-exported so `oq_backtest::strategy::…` keeps
-/// resolving for code written before it moved out.
-pub use oq_strategy as strategy;
-pub use oq_strategy::{Context, Ending, Intent, Strategy};
-pub use run::{
-    Liquidation, MarginMode, MarginUsage, Observation, RunConfig, RunResult, Tier, run,
-    run_observations, run_stream, tick_at,
-};
-pub use sweep::{Candidate, SweepReport, returns, sweep};
-pub use validity::{
-    Assumptions, FidelityReport, Participation, report as fidelity_report, report_at,
-};
-
-/// Re-exported because [`RunConfig::with_fees`] takes it. Configuring a
-/// run should not require naming a second crate.
-pub use oq_core::Fees;
+pub use run::{Liquidation, MarginMode, RunConfig, RunResult, run, tick_at};
+pub use strategy::{Context, Intent, Strategy};

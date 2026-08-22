@@ -22,11 +22,11 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::frame::Record;
 use crate::stream::{Software, StreamId};
+use crate::venue::binance_event_time_ns;
 use crate::writer::CaptureWriter;
 
 /// How the session decides when to stop.
@@ -46,28 +46,10 @@ pub struct SessionConfig {
     pub disk_floor_bytes: u64,
     /// How often to check free space, in records.
     pub disk_check_every: u64,
-    /// How long buffered records may stay in memory before being
-    /// written out.
-    ///
-    /// Flushing only on a record count is not enough: a stream that
-    /// produces one message a second would hold sixteen minutes of data
-    /// in a buffer, where a crash loses it *silently* — the messages
-    /// were received, so nothing marks them missing. It also leaves an
-    /// operator unable to tell a working low-rate capture from one that
-    /// never connected, because the file stays empty either way.
-    pub flush_interval: Duration,
     /// Wait between reconnection attempts.
     pub reconnect_wait: Duration,
     /// Give up after this many consecutive failed connections.
     pub max_consecutive_failures: u32,
-    /// How to read the exchange event time out of a payload.
-    ///
-    /// The loop is otherwise indifferent to what a venue sends, and this
-    /// is the one exception: a record has to be filed under the right
-    /// window. Supplied by the venue rather than called directly,
-    /// because a loop that names one exchange is not a loop that can
-    /// serve another — and this one did, until the seam existed.
-    pub event_time_ns: fn(&[u8]) -> Option<i64>,
 }
 
 impl SessionConfig {
@@ -88,18 +70,9 @@ impl SessionConfig {
             duration: None,
             disk_floor_bytes: 10 * 1024 * 1024 * 1024,
             disk_check_every: 1_000,
-            flush_interval: Duration::from_secs(5),
             reconnect_wait: Duration::from_secs(2),
             max_consecutive_failures: 10,
-            event_time_ns: |_| None,
         }
-    }
-
-    /// Read event times the way `venue` does.
-    #[must_use]
-    pub fn with_event_time(mut self, f: fn(&[u8]) -> Option<i64>) -> Self {
-        self.event_time_ns = f;
-        self
     }
 }
 
@@ -112,62 +85,6 @@ pub enum StopReason {
     DiskFloor,
     /// Too many consecutive connection failures.
     ConnectionLost,
-    /// SIGTERM or SIGINT arrived and the capture wound down on purpose.
-    Signalled,
-}
-
-/// Set by the signal handler, read by the capture loops.
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-
-/// True once a termination signal has been seen.
-pub fn shutdown_requested() -> bool {
-    SHUTDOWN.load(Ordering::Relaxed)
-}
-
-extern "C" fn on_signal(_sig: i32) {
-    // The only thing a signal handler may safely do here. Everything
-    // that actually matters -- flushing, sealing, fsync -- happens on
-    // the capture thread once it observes this.
-    SHUTDOWN.store(true, Ordering::Relaxed);
-}
-
-/// Arrange for SIGTERM and SIGINT to stop the capture cleanly.
-///
-/// Without this, the default disposition kills the process where it
-/// stands. Three things are lost every time, all of them silently:
-///
-/// * the `BufWriter`'s contents, up to the buffer size or the flush
-///   interval -- real records, gone;
-/// * the manifest, so the archive holds a file of unknown completeness
-///   and no way to tell a quiet market from a truncated capture;
-/// * the final `sync_all`, leaving the tail in the page cache where a
-///   host failure takes it.
-///
-/// Restarts are routine -- deploys, config changes, a watchdog
-/// replacing a dead stream -- so "only on shutdown" is not rare.
-///
-/// # Panics
-///
-/// Panics if the handler cannot be installed, which would mean the
-/// process cannot shut down cleanly and should not pretend otherwise.
-// The workspace warns on `unsafe_code` so that every use has to argue
-// for itself. This one: std exposes no signal API, and the alternative
-// to installing a handler is losing the buffer, the manifest and the
-// fsync on every restart. The unsafety is confined to one libc call
-// whose handler does a single relaxed atomic store.
-#[allow(unsafe_code)]
-pub fn install_signal_handlers() {
-    #[cfg(unix)]
-    // SAFETY: `on_signal` is async-signal-safe -- it performs a single
-    // relaxed atomic store and calls nothing.
-    unsafe {
-        for sig in [libc::SIGTERM, libc::SIGINT] {
-            assert!(
-                libc::signal(sig, on_signal as *const () as libc::sighandler_t) != libc::SIG_ERR,
-                "cannot install handler for signal {sig}"
-            );
-        }
-    }
 }
 
 /// What a session did.
@@ -185,14 +102,6 @@ pub struct SessionStats {
     pub elapsed: Duration,
     /// Why it stopped.
     pub stop: StopReason,
-    /// What the last failed connection attempt said, if one failed.
-    ///
-    /// `ConnectionLost` alone does not distinguish a venue that refused
-    /// the subscription from a network that went away, and those want
-    /// opposite responses: one is a typo in a symbol, the other is a
-    /// reason to wait. The venue usually says which in as many words,
-    /// and dropping the error threw that away.
-    pub last_error: Option<String>,
 }
 
 impl SessionStats {
@@ -213,6 +122,7 @@ impl SessionStats {
 
 /// Nanoseconds since the Unix epoch, from the host clock.
 ///
+/// The only wall-clock read in the capture path, and it is deliberate:
 /// `local_ts` exists to record when *this host* saw the message, which
 /// is what latency modelling needs and what no other clock can supply.
 #[must_use]
@@ -221,29 +131,6 @@ pub fn now_ns() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
-}
-
-/// The source of `local_ts`.
-///
-/// Injected rather than read directly, for the same reason the event
-/// kernel forbids clock reads: a test that reads the wall clock is not
-/// reproducible from `(seed, commit)`. This one was not hypothetical —
-/// the first version of these tests passed on the day they were written
-/// and failed the next morning, because fixtures dated one day met a
-/// session record stamped with the next.
-pub trait Clock {
-    /// Nanoseconds since the Unix epoch.
-    fn now_ns(&self) -> i64;
-}
-
-/// The host clock. What production uses.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_ns(&self) -> i64 {
-        now_ns()
-    }
 }
 
 /// A source of messages, so the loop can be tested without a network.
@@ -283,20 +170,6 @@ pub fn run<C: Connector>(
     connector: &mut C,
     writer: &mut CaptureWriter,
 ) -> io::Result<SessionStats> {
-    run_with_clock(config, connector, writer, &SystemClock)
-}
-
-/// Run a capture session against a supplied clock.
-///
-/// # Errors
-///
-/// As [`run`].
-pub fn run_with_clock<C: Connector, K: Clock>(
-    config: &SessionConfig,
-    connector: &mut C,
-    writer: &mut CaptureWriter,
-    clock: &K,
-) -> io::Result<SessionStats> {
     let started = Instant::now();
     let mut stats = SessionStats {
         payloads: 0,
@@ -305,19 +178,13 @@ pub fn run_with_clock<C: Connector, K: Clock>(
         outage: Duration::ZERO,
         elapsed: Duration::ZERO,
         stop: StopReason::DurationElapsed,
-        last_error: None,
     };
     let mut consecutive_failures = 0u32;
     let mut since_disk_check = 0u64;
-    let mut last_flush = Instant::now();
 
-    writer.append_session_start(clock.now_ns())?;
+    writer.append_session_start(now_ns())?;
 
     'outer: loop {
-        if shutdown_requested() {
-            stats.stop = StopReason::Signalled;
-            break;
-        }
         if let Some(limit) = config.duration
             && started.elapsed() >= limit
         {
@@ -331,9 +198,8 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 consecutive_failures = 0;
                 source
             }
-            Err(e) => {
+            Err(_) => {
                 consecutive_failures += 1;
-                stats.last_error = Some(e.to_string());
                 if consecutive_failures >= config.max_consecutive_failures {
                     stats.stop = StopReason::ConnectionLost;
                     break;
@@ -350,22 +216,12 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 stats.stop = StopReason::DurationElapsed;
                 break 'outer;
             }
-            // Checked here as well as in the outer loop: a healthy
-            // stream never leaves this loop, so an outer-loop-only
-            // check would wait for a disconnect that may never come.
-            // A silent stream still blocks in next_message() until its
-            // read timeout, but a stream with nothing to say also has
-            // nothing buffered to lose.
-            if shutdown_requested() {
-                stats.stop = StopReason::Signalled;
-                break 'outer;
-            }
 
             match source.next_message() {
                 Ok(payload) => {
-                    let local_ts = clock.now_ns();
+                    let local_ts = now_ns();
                     let exch_ts =
-                        (config.event_time_ns)(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
+                        binance_event_time_ns(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
                     stats.payload_bytes += payload.len() as u64;
                     writer.append(&Record {
                         kind: crate::frame::Kind::Payload,
@@ -374,11 +230,6 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                         payload,
                     })?;
                     stats.payloads += 1;
-
-                    if last_flush.elapsed() >= config.flush_interval {
-                        writer.flush()?;
-                        last_flush = Instant::now();
-                    }
 
                     since_disk_check += 1;
                     if since_disk_check >= config.disk_check_every {
@@ -395,7 +246,7 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                     stats.gaps += 1;
                     stats.outage += outage;
                     writer.append_gap(
-                        clock.now_ns(),
+                        now_ns(),
                         "connection lost",
                         None,
                         i64::try_from(outage.as_nanos()).unwrap_or(i64::MAX),
@@ -416,29 +267,6 @@ pub fn run_with_clock<C: Connector, K: Clock>(
 mod tests {
     use super::*;
     use crate::frame::decode_all;
-
-    /// A clock the test sets, so a fixture states the day it means
-    /// instead of inheriting whatever day the suite happens to run on.
-    struct FixedClock(std::cell::Cell<i64>);
-
-    impl FixedClock {
-        fn at(ns: i64) -> Self {
-            Self(std::cell::Cell::new(ns))
-        }
-    }
-
-    impl Clock for FixedClock {
-        fn now_ns(&self) -> i64 {
-            // Advance a microsecond per read so ordering is still
-            // strictly increasing, as a real clock would be.
-            let now = self.0.get();
-            self.0.set(now + 1_000);
-            now
-        }
-    }
-
-    /// The instant every fixture in this module is anchored to.
-    const FIXTURE_NS: i64 = 1_786_780_800_000_000_000;
 
     /// A source that yields a scripted set of messages, then fails.
     struct Scripted {
@@ -510,18 +338,16 @@ mod tests {
         config.reconnect_wait = Duration::from_millis(1);
         config.disk_floor_bytes = 0;
 
-        let clock = FixedClock::at(FIXTURE_NS);
-        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
+        let stats = run(&config, &mut connector, &mut writer).expect("run");
         writer.seal().expect("seal");
 
         assert_eq!(stats.payloads, 3, "every scripted message was written");
         assert_eq!(stats.gaps, 2, "each closed connection left a marker");
         assert_eq!(stats.stop, StopReason::ConnectionLost);
 
-        let bytes = std::fs::read(stream.file_for(
-            &root,
-            crate::day::Window::from_nanos(1_786_780_800_000_000_000, crate::day::Rotation::Daily),
-        ))
+        let bytes = std::fs::read(
+            stream.file_for(&root, crate::UtcDay::from_nanos(1_786_780_800_000_000_000)),
+        )
         .expect("read");
         let (records, remainder) = decode_all(&bytes).expect("decode");
         assert_eq!(remainder, 0);
@@ -561,104 +387,11 @@ mod tests {
         config.max_consecutive_failures = 1;
         config.reconnect_wait = Duration::from_millis(1);
 
-        let clock = FixedClock::at(FIXTURE_NS);
-        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
+        let stats = run(&config, &mut connector, &mut writer).expect("run");
         assert_eq!(stats.stop, StopReason::DiskFloor);
         assert_eq!(
             stats.payloads, 5,
             "stopped at the first check, not at the end"
-        );
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    /// A source that reports the size of the capture file as it goes, so
-    /// a test can see whether records reached the disk *during* the run
-    /// rather than only when it ended.
-    struct Watching {
-        messages: Vec<Vec<u8>>,
-        index: usize,
-        path: PathBuf,
-        size_seen_midway: std::rc::Rc<std::cell::Cell<u64>>,
-    }
-
-    impl MessageSource for Watching {
-        fn next_message(&mut self) -> io::Result<Vec<u8>> {
-            if self.index == self.messages.len() {
-                let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
-                self.size_seen_midway.set(size);
-                return Err(io::Error::other("scripted end"));
-            }
-            let message = self.messages[self.index].clone();
-            self.index += 1;
-            Ok(message)
-        }
-    }
-
-    struct WatchingConnector {
-        messages: Vec<Vec<u8>>,
-        path: PathBuf,
-        size_seen_midway: std::rc::Rc<std::cell::Cell<u64>>,
-        attempts: usize,
-    }
-
-    impl Connector for WatchingConnector {
-        type Source = Watching;
-
-        fn connect(&mut self) -> io::Result<Self::Source> {
-            if self.attempts > 0 {
-                return Err(io::Error::other("one connection only"));
-            }
-            self.attempts += 1;
-            Ok(Watching {
-                messages: self.messages.clone(),
-                index: 0,
-                path: self.path.clone(),
-                size_seen_midway: self.size_seen_midway.clone(),
-            })
-        }
-    }
-
-    #[test]
-    fn a_low_rate_stream_reaches_disk_without_waiting_for_the_record_threshold() {
-        // The failure this guards against: a stream producing one
-        // message a second holds sixteen minutes of data in a buffer
-        // when flushing is driven by a record count alone. A crash then
-        // loses messages that were received, so nothing marks them
-        // missing, and an empty file looks the same as a dead feed.
-        let (root, stream, mut writer) = setup("timedflush");
-        let path = stream.file_for(
-            &root,
-            crate::day::Window::from_nanos(1_786_780_800_000_000_000, crate::day::Rotation::Daily),
-        );
-        let seen = std::rc::Rc::new(std::cell::Cell::new(0u64));
-        let mut connector = WatchingConnector {
-            messages: (0..3)
-                .map(|i| depth(1_786_780_800_000 + i, i as u64))
-                .collect(),
-            path,
-            size_seen_midway: seen.clone(),
-            attempts: 0,
-        };
-
-        let mut config =
-            SessionConfig::new(&root, stream, Software::new("test", "commit"), "unused");
-        config.flush_interval = Duration::ZERO;
-        // Deliberately far above the message count: only the time-based
-        // flush can put anything on disk here.
-        config.disk_check_every = 1_000_000;
-        config.max_consecutive_failures = 1;
-        config.reconnect_wait = Duration::from_millis(1);
-
-        run_with_clock(
-            &config,
-            &mut connector,
-            &mut writer,
-            &FixedClock::at(FIXTURE_NS),
-        )
-        .expect("run");
-        assert!(
-            seen.get() > 0,
-            "records must reach the disk during the run, not only at the end"
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -672,7 +405,6 @@ mod tests {
             outage: Duration::ZERO,
             elapsed: Duration::from_secs(3_600),
             stop: StopReason::DurationElapsed,
-            last_error: None,
         };
         // 3600 bytes in an hour is 86_400 bytes a day.
         assert_eq!(stats.projected_bytes_per_day(), 86_400);
@@ -695,8 +427,7 @@ mod tests {
         config.reconnect_wait = Duration::from_millis(1);
         config.disk_floor_bytes = 0;
 
-        let clock = FixedClock::at(FIXTURE_NS);
-        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
+        let stats = run(&config, &mut connector, &mut writer).expect("run");
         assert_eq!(stats.payloads, 1);
         let sealed = writer.seal().expect("seal");
         // Day attribution fell back to local time rather than dropping

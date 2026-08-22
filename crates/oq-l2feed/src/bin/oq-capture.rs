@@ -18,12 +18,11 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use oq_l2feed::day::Rotation;
-use oq_l2feed::session::{SessionConfig, StopReason, install_signal_handlers, run};
+use oq_l2feed::session::{SessionConfig, StopReason, run};
 use oq_l2feed::stream::{Software, StreamId};
-use oq_l2feed::venue;
+use oq_l2feed::venue::{binance_perp_streams, binance_perp_url};
 use oq_l2feed::writer::CaptureWriter;
-use oq_l2feed::ws::{PollConnector, WsConnector};
+use oq_l2feed::ws::WsConnector;
 
 const USAGE: &str = "\
 oq-capture — record one market data stream verbatim
@@ -34,15 +33,10 @@ USAGE:
 OPTIONS:
     --root <DIR>          Archive root directory
     --symbol <SYMBOL>     Instrument, e.g. BTCUSDT
-    --stream <NAME>       depth | bookTicker | trade | forceOrder | markPrice
-                          (markPrice is polled over REST; the rest are streams)
+    --stream <NAME>       depth | bookTicker | aggTrade | markPrice | forceOrder
     --venue <NAME>        Venue label for the archive path [default: binance-perp]
     --minutes <N>         Stop after N minutes [default: run until interrupted]
     --floor-gb <N>        Stop when free space falls below N GiB [default: 10]
-    --rotation <WHEN>     daily | hourly [default: daily]
-                          Hourly suits a host that cannot hold two days of raw
-                          capture: the open file cannot be compressed, so the
-                          local peak is always about two rotation periods.
     --help                Print this message
 ";
 
@@ -66,16 +60,7 @@ fn real_main() -> Result<ExitCode, String> {
     let root = required(&args, "--root")?;
     let symbol = required(&args, "--symbol")?;
     let stream_name = required(&args, "--stream")?;
-    let venue_id = optional(&args, "--venue").unwrap_or_else(|| "binance-perp".to_string());
-    // The flag selects the implementation, not just the folder it files
-    // under. It used to do only the latter, which meant --venue okx
-    // wrote Binance data into an okx directory.
-    let venue = venue::by_id(&venue_id).ok_or_else(|| {
-        format!(
-            "unknown venue {venue_id:?}; known venues: {}",
-            venue::known_ids().join(", ")
-        )
-    })?;
+    let venue = optional(&args, "--venue").unwrap_or_else(|| "binance-perp".to_string());
     let minutes = optional(&args, "--minutes")
         .map(|v| {
             v.parse::<u64>()
@@ -90,97 +75,42 @@ fn real_main() -> Result<ExitCode, String> {
         .transpose()?
         .unwrap_or(10);
 
-    // Some data has a stream; some only has an endpoint to poll. Both
-    // go through the same capture path.
-    let socket = venue
-        .streams(&symbol)
+    let spec = binance_perp_streams(&symbol)
         .into_iter()
-        .find(|s| s.name == stream_name);
-    let poll = venue
-        .polls(&symbol)
-        .into_iter()
-        .find(|p| p.name == stream_name);
+        .find(|s| s.name == stream_name)
+        .ok_or_else(|| {
+            format!(
+                "unknown stream {stream_name:?}; expected one of depth, bookTicker, aggTrade, markPrice, forceOrder"
+            )
+        })?;
 
-    let (name, transport, url, poll_interval) = match (socket, poll) {
-        (Some(spec), _) => {
-            let transport = venue.transport(&spec);
-            let url = transport.url.clone();
-            (spec.name, Some(transport), url, None)
-        }
-        (None, Some(spec)) => (
-            spec.name,
-            None,
-            spec.url,
-            Some(Duration::from_secs(spec.interval_secs)),
-        ),
-        (None, None) => {
-            let mut known: Vec<String> =
-                venue.streams(&symbol).into_iter().map(|s| s.name).collect();
-            known.extend(venue.polls(&symbol).into_iter().map(|p| p.name));
-            return Err(format!(
-                "unknown stream {stream_name:?} for venue {venue_id}; expected one of {}",
-                known.join(", ")
-            ));
-        }
-    };
-
-    let stream = StreamId::new(venue.id(), &symbol, &name);
+    let stream = StreamId::new(&venue, &symbol, &spec.name);
     let software = Software::new(
         concat!("oq-l2feed ", env!("CARGO_PKG_VERSION")),
         option_env!("OQ_BUILD_COMMIT").unwrap_or("unknown"),
     );
 
-    let mut config = SessionConfig::new(&root, stream.clone(), software.clone(), &url)
-        .with_event_time(venue.event_time_reader());
+    let url = binance_perp_url(&spec.topic);
+    let mut config = SessionConfig::new(&root, stream.clone(), software.clone(), &url);
     config.duration = minutes.map(|m| Duration::from_secs(m * 60));
     config.disk_floor_bytes = floor_gb * 1024 * 1024 * 1024;
 
-    let rotation = optional(&args, "--rotation")
-        .map(|v| Rotation::parse(&v).ok_or_else(|| format!("unknown rotation {v:?}")))
-        .transpose()?
-        .unwrap_or(Rotation::Daily);
-
-    let mut writer = CaptureWriter::new(&root, stream, software)
-        .map_err(|e| e.to_string())?
-        .with_rotation(rotation);
-
-    // Installed before the first byte is written, so any termination
-    // from here on runs the flush-and-seal path instead of dropping the
-    // buffer on the floor.
-    install_signal_handlers();
+    let mut writer = CaptureWriter::new(&root, stream, software).map_err(|e| e.to_string())?;
+    // A silent socket must look different from a quiet market, or a
+    // half-open connection would be recorded as an uneventful hour.
+    let mut connector = WsConnector::new(&url, Duration::from_secs(60));
 
     eprintln!(
         "capturing {} {} from {url}",
         config.stream.symbol, config.stream.stream
     );
-    eprintln!("archive root {root}, rotating {rotation:?}, stopping below {floor_gb} GiB free");
+    eprintln!("archive root {root}, stopping below {floor_gb} GiB free");
 
-    let stats = match poll_interval {
-        Some(interval) => {
-            eprintln!("polling every {}s", interval.as_secs());
-            let mut connector = PollConnector::new(&url, interval);
-            run(&config, &mut connector, &mut writer)
-        }
-        None => {
-            // A silent socket must look different from a quiet market,
-            // or a half-open connection would be recorded as an
-            // uneventful hour.
-            let transport = transport.expect("a socket stream has a transport");
-            let mut connector = WsConnector::new(transport, Duration::from_secs(60));
-            run(&config, &mut connector, &mut writer)
-        }
-    }
-    .map_err(|e| e.to_string())?;
+    let stats = run(&config, &mut connector, &mut writer).map_err(|e| e.to_string())?;
     let sealed = writer.seal().map_err(|e| e.to_string())?;
 
     let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
     eprintln!("stopped: {:?}", stats.stop);
-    if let Some(why) = &stats.last_error {
-        // The venue's own words. A refused subscription and a network
-        // that went away are both `ConnectionLost`, and only this line
-        // says which.
-        eprintln!("  last connection error: {why}");
-    }
     eprintln!(
         "  {} payloads, {:.1} MiB, {} gap(s) totalling {:.1}s over {:.1} min",
         stats.payloads,
@@ -195,14 +125,14 @@ fn real_main() -> Result<ExitCode, String> {
     );
     eprintln!(
         "  sealed {} ({} records)",
-        sealed.window, sealed.manifest.records
+        sealed.day, sealed.manifest.records
     );
     eprintln!("  manifest {}", sealed.manifest_path.display());
 
     // A capture that stopped because the disk was filling is not a
     // success, even though it shut down cleanly.
     Ok(match stats.stop {
-        StopReason::DurationElapsed | StopReason::Signalled => ExitCode::SUCCESS,
+        StopReason::DurationElapsed => ExitCode::SUCCESS,
         StopReason::DiskFloor | StopReason::ConnectionLost => ExitCode::FAILURE,
     })
 }

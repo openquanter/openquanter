@@ -29,26 +29,16 @@ specifies how captured data is framed, sealed, verified, and archived.
 ## 2. Layout
 
 ```
-raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap          daily rotation
-raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>/<HH>.oqcap     hourly rotation
-                                          <HH>.manifest.json
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap        active day
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.oqcap.zst    sealed day
+raw/<venue>/<symbol>/<stream>/<YYYY-MM-DD>.manifest.json
 ```
 
-One file per venue, symbol, stream and **rotation period**. The period
-is a day by default and can be an hour; either way a day remains a
-browsable unit, as a file or as a directory. The split is deliberate on
-every axis:
+One file per venue, symbol, stream and UTC day. The split is deliberate
+on every axis:
 
-- **By period** because it gives archival a natural unit: seal, hash,
+- **By day** because it gives archival a natural unit: seal, hash,
   compress, transfer, verify, then let retention delete the local copy.
-  A day is the natural choice. An hour is for a capture host whose disk
-  cannot hold two periods of raw data — **the open file cannot be
-  compressed while it is being appended to, so the local peak is always
-  about two rotation periods**, and shortening the period is the only
-  lever that does not involve buying disk. Measured on four perpetual
-  symbols, a day of raw capture is 8 GiB at weekend rates and several
-  times that on an active weekday; two of those do not fit on a small
-  host, and two hours comfortably do.
 - **By stream** because streams have wildly different volumes and
   retention value. Incremental depth is gigabytes a day; the
   maintenance-margin rule table is bytes. Mixing them forces the cheap
@@ -101,38 +91,6 @@ interleaved in the stream so their position in time is unambiguous.
 A `gap` record is never omitted for being inconvenient. A reader must be
 able to tell "nothing happened in the market" from "we were not
 listening", and only an explicit marker makes that distinction possible.
-
-### A marker's position is part of what it says
-
-The marker does not say "this file has a gap somewhere". It says the
-capture stopped listening *at this point in the stream*, and readers use
-it that way: `oq-book-check` drops the book where it finds one and treats
-the next update as a bootstrap rather than as a sequence error. Presence
-alone is not enough. Any tool that rewrites a file must carry every
-control record with the data it sat between, or it moves the boundary
-between "declared" and "silently lost" without touching either.
-
-This is not hypothetical. `oq-resequence` first wrote the control records
-as a block at the front of the output. Four files damaged by a
-duplicate-writer incident then reported one undeclared break each, when
-in fact the repair had been complete:
-
-| file | before repair | markers written first | markers kept in place |
-|---|---|---|---|
-| BTCUSDT | 54 | 1 | 0 |
-| ETHUSDT | 56 | 1 | 0 |
-| BNBUSDT | 52 | 1 | 0 |
-| HYPEUSDT | 50 | 1 | 0 |
-
-Undeclared sequence breaks, measured with `oq-book-check`. Every file
-carried three gap markers.
-
-The residual break in each was the relocated marker, not a loss. Nothing
-from that hour was missing. The earlier record of this incident concluded
-that one break per instrument was churn no reordering could recover; that
-conclusion was wrong, and it was wrong in the direction that costs most —
-a tool reporting damage it had itself introduced, in a file it had just
-finished repairing correctly.
 
 ## 5. Sealing a day
 
@@ -200,42 +158,6 @@ object store that can hold the data and recompute a hash will do. Where
 a given deployment archives to is deployment configuration, not part of
 the format.
 
-### Staging adds a deadline the direct pipeline does not have
-
-A capture host behind a lossy link often cannot reach the archive at
-all, and the archive is usually not reachable from the internet either.
-Putting an object store between them lets each side speak only to a
-third party: the capture host uploads and forgets, the archive pulls and
-keeps. `scripts/archive-capture.py` is the first half and
-`scripts/pull-capture.py` the second.
-
-The cost is that a staging bucket has an expiry, and the moment one
-exists, **the pipeline has a deadline instead of a backlog**. Direct
-transfer degrades safely — an archive host that is down for a month
-finds the data waiting, because retention is a function of verified
-archival. Through staging, an archive host that is down past the expiry
-finds nothing, and capture cannot be redone.
-
-So the pulling side is where the failure mode moved, and it needs two
-things the pushing side does not:
-
-- **A schedule with margin.** The interval must be short enough that
-  several consecutive failures still fit inside the expiry. The run is
-  idempotent — an object already local at the same size is skipped — so
-  a frequent schedule costs nothing when there is nothing to do.
-- **A status that outlives the run.** Silence is the failure mode here,
-  and a log nobody reads is silence. `scripts/pull-capture-cron.sh`
-  leaves `.last-success` / `.last-failure` in the archive root so
-  "when did this last work?" is answerable without reading a log.
-
-That wrapper branches on the pull's exit status, which is part of its
-interface: `0` every object is local, `1` some object could not be
-fetched, `3` another run holds the lock and this one did nothing. The
-third is not a failure — a first backfill outlasts the interval that
-starts the next run, so overlap is the normal state of an archive that
-is catching up, and reporting it as loss trains whoever is watching to
-ignore the alert that matters.
-
 ## 7. Crash safety
 
 The active file is append-only. A process that dies mid-write leaves a
@@ -271,73 +193,3 @@ capture, and a stopped capture is a permanent hole.
 | Parquet / columnar | Excellent for analysis, wrong for capture: it buffers, imposes a schema on data whose schema the venue controls, and cannot represent a message it fails to parse. Convert after sealing |
 | Database ingestion | Couples capture uptime to database uptime, and makes the archive a backup problem rather than a file |
 | Compressed stream written live | Interleaves compression latency with receive latency and makes a torn tail unrecoverable rather than truncating cleanly |
-
-## 10. Venue behaviour worth knowing
-
-Three findings from the first live capture. They are recorded here
-because each one is invisible until data is already being collected, and
-each one produces an archive that looks healthy while being wrong.
-
-### A subscription that succeeds proves nothing
-
-The venue's `SUBSCRIBE` confirms any stream name without validating it.
-A name invented for a test — `btcusdt@thisDoesNotExist` — returns
-success and then silence, exactly like a real stream in a quiet market.
-
-Half the documented streams were found delivering nothing at all while
-their raw counterparts worked: aggregated trades, klines, tickers, mark
-price and the array fan-outs were silent; incremental depth, best bid
-and offer, and raw trades were fine.
-
-**Consequence for capture:** never infer health from a successful
-connection. A stream that has produced no records for longer than its
-expected quiet period is a fault, and the capture process should be able
-to say so. Where a stream has no working form, poll the REST endpoint
-that carries the same data and record the polls through the same path —
-a failed poll is a disconnect, and belongs in the archive as a gap.
-
-### The publish cadence can be fixed, so volume scales with message size
-
-Incremental depth on this venue arrives on a fixed cadence — measured at
-26 or 28 ms across 4411 consecutive messages, with a single 34 ms
-outlier and no other value. The book does not push on every change; it
-publishes a batch on a clock.
-
-**Consequence for planning:** an active market does not send *more*
-messages, it sends *larger* ones. Capacity estimates must scale the
-bytes per message, not the message rate, and a rate measured in a quiet
-period is a floor rather than an average.
-
-### Buffered data is not captured data
-
-A writer that flushes on a record count alone will hold a low-rate
-stream in memory for a long time — at one message a second and a
-thousand-record threshold, over sixteen minutes. A crash there loses
-messages that were *received*, so no gap marker records their absence
-and the archive is silently short.
-
-**Consequence:** flush on a timer as well as a count. The capture
-process should also be observable from outside — a file that never grows
-must mean a fault, not a buffer.
-
-### Not every record on the trade stream is a trade
-
-Binance publishes `{"e":"trade",…,"p":"0","q":"0","X":"NA",…}` among the
-real ones — 19,725 in one day of BTCUSDT against 5.4 million trades.
-They carry trade ids and belong to the id chain, so a completeness check
-that follows those ids is right to count them; a price of zero is still
-not a price.
-
-The damage is not where it looks. Storing them costs nothing and they
-are part of the record. What breaks is the conversion: a window's low is
-the minimum of the prices in it, and one zero makes that zero. Real
-capture, before this was found, produced 1355 of 1409 minutes with a low
-of `0.00` and the high right beside it. A resting buy is triggered by
-the low, so a backtest reading it fills orders no venue would have
-filled — and the same parse runs in the live loop.
-
-**Consequence:** an adapter's parse must return "no trade" for a record
-declaring none, and callers must count those separately from records
-they could not read. The two look identical downstream and mean opposite
-things: one is the venue reporting nothing happened, the other is this
-build disagreeing with the venue about the format.

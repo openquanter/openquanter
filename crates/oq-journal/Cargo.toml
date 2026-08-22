@@ -1,6 +1,6 @@
 [package]
 name = "oq-journal"
-version.workspace = true
+version = "0.0.1"
 description = "Append-only sequenced event journal: audit trail, replay source, and recovery mechanism for the OpenQuanter trading framework"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oq-hash.workspace = true
-oq-types.workspace = true
+oq-hash = { path = "../oq-hash", version = "0.0.1" }
+oq-types = { path = "../oq-types", version = "0.0.1" }
 
 [lints]
 workspace = true

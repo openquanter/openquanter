@@ -23,4 +23,3 @@ dist/
 # Local-only scan configuration (never commit these)
 .secretscan-local
 .secretscan-allow
-.claude/worktrees/

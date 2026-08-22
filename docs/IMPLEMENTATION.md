@@ -143,13 +143,10 @@ scenarios is what turns operational scar tissue into a durable test asset.
 ### D9 — AI layered by evidence strength
 
 - **Inference (mature).** Train in Python, export to ONNX or compile
-  gradient-boosted trees, run in Rust with single-threaded intra/inter-op,
-  warm-up, and fixed shapes. A parity gate compares Python and Rust
-  predictions, because float32 threshold handling in tree models drifts
+  gradient-boosted trees, run in-process in Rust with single-threaded
+  intra/inter-op, warm-up, and fixed shapes. A parity gate compares Python and
+  Rust predictions, because float32 threshold handling in tree models drifts
   between implementations in ways that silently change trading decisions.
-
-  **Inference runs outside the kernel, and a prediction enters as a
-  journaled event.** See D14 — the reason is not primarily determinism.
 - **Training (gated).** Gym-style environments with inverted control and native
   vectorized batching. Gated on L1 fidelity: training in a low-fidelity
   environment produces policies that exploit the simulator.
@@ -215,217 +212,7 @@ Hashing the inputs costs microseconds and removes an entire class of
 misdiagnosis. The rule extends to golden tests: a golden baseline whose sample
 data changed is stale, not violated.
 
-### D14 — Model predictions are events, not calls
-
-Inference runs **outside** the kernel. A prediction is produced, submitted to
-the sequencer, journaled, and only then delivered — like any other input.
-Nothing in the kernel ever calls a model.
-
-The determinism argument for this is real but secondary. The primary reason is
-that a synchronous in-kernel call **would flatter every backtest**.
-
-In live trading a prediction always lags the market data that produced it:
-features have to be computed, the model has to run, the result has to travel.
-A backtest that calls the model inline hands the strategy a prediction with
-zero latency, from data the market has only just produced. That is the same
-class of lie as an account that never gets liquidated — a simulation quietly
-granting something the world does not offer. Making the prediction an event
-means it arrives after the data it was derived from, in backtest exactly as in
-production, and a strategy cannot accidentally be built on a timing advantage
-that will not exist when it trades.
-
-What follows from the decision:
-
-- **Replay never re-runs a model.** It replays the recorded prediction, so a
-  past run reproduces exactly even though the model that produced it may be
-  non-deterministic across machines, may have been retrained, or — in the case
-  of a remote language model — may be irreproducible in principle. The core
-  keeps its guarantee by not depending on the world keeping its.
-- **The kernel stays integer.** Floating-point results differ across CPUs in
-  the last bits; keeping inference outside is what lets the kernel remain
-  `i64` fixed point and therefore bit-identical across machines.
-- **The journal records what the model actually said.** "What did the model
-  predict at 14:32:07, and on what inputs" becomes answerable after the fact,
-  which is exactly the question an incident review asks first.
-- **A prediction event carries the model's identity and a hash of its input
-  features**, following D13. That distinguishes "the model changed" from "the
-  features changed" — without it, a differing prediction is unattributable.
-- **The Python/Rust parity gate (G9) falls out for free.** Replay a journal
-  through a second inference implementation and diff the prediction events
-  with `oq-parity`; no separate harness is needed.
-- **One code path.** In a backtest the inference component runs and emits
-  prediction events into the journal; in production it does the same. The
-  difference is the event producer, as everywhere else in this design.
-
-The cost is one event round-trip on the hot path and a larger journal. Against
-a 100 µs p99 budget the round-trip is affordable, and the journal growth is
-capacity planning rather than a design problem. Paying it buys a backtest that
-does not lie about when the strategy knew things.
-
 ---
-
-### D15 — A venue is an adapter, and one of the things it decides is what a day is
-
-The capture path stores payloads verbatim and parses only enough to place a
-record in a window. Everything a venue does differently lives behind one trait:
-which streams to subscribe, how a subscription is confirmed, how its payloads
-are shaped, the quoting precision of each instrument, and which archive window
-a record belongs to.
-
-That last one is the reason this is a design decision rather than a refactor.
-The archive's central invariant is that a file holds one whole period — the
-merge tool, the order-book check and the tick converter all lean on it — and
-dividing time by the UTC clock satisfies that invariant only for a market that
-never closes. A US equities session is six and a half hours inside a UTC day,
-mostly empty. A futures session opens the evening before and runs past
-midnight, so the clock rule turns one trading day into two files and every
-tool downstream inherits the split. The framework is not tied to an asset
-class, so the assumption had to come out of the archive core and into the
-venue, where a session actually belongs.
-
-No exchange calendar ships with it. Writing one without a venue to check it
-against would be guessing, and a wrong calendar is worse than an absent one
-because it looks authoritative. What exists is the seam and a default that
-reproduces the present behaviour exactly.
-
-The same reasoning made subscription and payload parsing part of the contract,
-each after a failure that argued for it. A venue that accepts any stream name
-without validating it will confirm a retired stream and then say nothing,
-which is indistinguishable from a quiet market — so the contract carries how a
-subscription is acknowledged, and silence past a deadline is an error. A
-payload reader written for one venue finds nothing in another and returns an
-empty result rather than failing — so parsing belongs to the venue too, or a
-perfectly readable archive converts to nothing and reports itself as empty.
-
-### D16 — Python is a binding, not a compromise
-
-The case against a Python tier was that it dilutes the zero-dependency
-claim. Checked against what the repository actually enforces, it does not,
-and the objection rests on a claim this project does not make.
-
-`scripts/check-composability.sh` sets a dependency budget **per crate**:
-twelve crates at zero, four at sixty. The README's claim is correspondingly
-specific — the *engine* has no third-party dependencies, and every crate
-that carries a tree is one that has to talk to something outside the
-process. `oq-l2feed` carries a TLS stack because it speaks to a venue.
-A binding crate would carry PyO3 because it speaks to Python. Neither
-changes the twelve zeros, and CI proves it on every pull request rather
-than asking anyone to believe it.
-
-So the reason to be careful about Python is not dependency hygiene. It is
-three other things, and they are worth naming because they are the ones
-that actually cost:
-
-**The Python surface becomes the API.** Whatever is exposed first is what
-users write against, and it freezes hardest. This is an argument for
-exposing a small surface early rather than a large one, not for exposing
-none.
-
-**Distribution stops being `cargo build`.** A binding ships as wheels, per
-platform, per interpreter. As of 2026 that means an `abi3` wheel for the
-minimum supported version, a version-specific `cp314t` wheel for
-free-threaded 3.14, and an `abi3t` wheel once 3.15 lands — PEP 803 was
-approved in 2026 and defines a stable ABI for free-threaded builds. This
-is real work and it is build infrastructure, not architecture.
-
-**A Rust-only path has to stay usable.** The engine must remain buildable
-and testable without a Python interpreter anywhere near it, or the Rust
-core quietly becomes an implementation detail of a Python library. The
-per-crate budgets already enforce the dependency half of this; the
-composability check's standalone-build pass enforces the rest.
-
-The most comparable project resolves it the same way. NautilusTrader runs
-a Rust core with PyO3 bindings and Python as the control plane, and keeps
-a pure-Rust path that runs without Python at all.
-
-**One risk this supersedes.** The register's entry about PyO3 callback
-overhead was written for a world with a global interpreter lock. PyO3
-v0.28 supports free-threaded Python 3.14 and the GIL-release API, and a
-module whose pipeline holds no shared Python state can declare
-`gil_used = false` and run on a free-threaded interpreter without
-re-enabling the lock. The overhead question is now measurable rather than
-structural, which is a different kind of risk and is recorded as one.
-
-**Sequencing, and the reason for it.** The narrow proposal — expose the
-statistics and the margin-deviation report, so a Python user can *evaluate
-their existing backtest* rather than migrate to a new one — is kept, not
-as an alternative to full bindings but as the first stage of them. Its
-merit is not that it is safer; it is that it is the shortest path to an
-outside user, and an outside user is one of M3's four entry conditions and
-the only one that cannot be bought with engineering time. Full bindings
-follow. Nothing about the small surface forecloses the large one.
-
-### D17 — No MainEngine: assembly lives in types, not in a registry
-
-Anyone arriving from the 1.x lineage looks first for a `MainEngine` — a central
-object holding gateways, apps, the event engine, the database and the OMS, with
-the parts reaching each other at runtime through `get_gateway(name)` and
-`add_app(obj)`. There is none here, and the absence is a decision rather than an
-omission.
-
-**Assembly lives in `oq-live`**, whose job is stated differently: the gate
-decides whether an order may be sent, the gateway knows how to send it, the
-stream says what happened, and **none of them know about each other**; this
-crate is where they meet, and the meeting is the point. `Session` is **the only
-path that can send an order** — correct ordering is not something the caller
-remembers, it is the absence of another route.
-
-Four differences in shape. The first three are ordinary Rust practice:
-
-| | MainEngine | Here |
-|---|---|---|
-| Composition | runtime registration, `add_gateway(obj)` | compile-time generics, `Session<E: Execution>` |
-| Ownership | one object holds everything, `&mut` from all sides | components own their parts; messages move ownership |
-| Communication | a shared event-bus object | channels; nobody owns "the engine" |
-| The wiring diagram | implicit in registration order | it is the code in `main`, and every connection is readable |
-
-The first two are not stylistic in Rust: a hub that every subsystem needs `&mut`
-on pushes you into `Rc<RefCell<_>>` or `Arc<Mutex<_>>`, **trading compile-time
-errors for runtime panics and deadlocks**.
-
-**The fourth is the one that matters here.** A hub anything can reach into and
-mutate is exactly where "who changed this state" stops having an answer — and
-the kernel's entire premise is that state moves only by event
-([D1](#d1--pure-deterministic-state-machine-core)). The moment a component
-can call the hub and change state directly, that change is not journalled, the
-replay disagrees, and the
-[attribution](REQUIREMENTS.md#310-live-gap-attribution--fr-attrib) chain is
-broken. **A MainEngine and "every cent accounted for" are structurally in
-conflict.** That is not a preference.
-
-**Dynamic dispatch is still used where it belongs**: which venue to connect to
-is a configuration question answered at runtime, and `Box<dyn Account>` is the
-right tool. **Which one is a runtime question; what the graph looks like is a
-compile-time one** — the problem with a MainEngine was never that it used
-dynamic dispatch, but that it made the whole graph mutable at runtime.
-
-The trait is `Account` rather than `Execution` for a reason worth recording,
-because the first attempt got it wrong. `Execution` says how to send an order,
-and that is not enough to run: before the first order there is a clock to agree
-on, an instrument whose precision and grid come from the deployment, a position
-mode to discover, a balance and a book of resting orders to read, and a stream
-to hear the answers on. Those were reached for on a concrete `Binance`, in nine
-places inside the runner, so an adapter could implement `Execution` in full and
-still be unusable — which is what happened: an OKX client existed, could not be
-run, and **nothing said what it still owed**, because the missing part had no
-name.
-
-One of those nine is worth naming on its own. The runner built client order ids
-to `IdRules::BINANCE`, a compiled-in constant — 36 characters with punctuation.
-OKX allows 32, alphanumeric. An OKX adapter would therefore have been rejected
-at submission, *after* the strategy had already decided to trade, by a rule the
-runner had no business holding an opinion about.
-
-`Account` is that list, and the list is now checkable: `oq-gateway` carries a
-test venue implementing the trait against nothing but the trait. If a method
-arrives whose only sensible implementation is Binance's, it stops compiling
-there rather than six months later in somebody's half-finished adapter.
-
-Market data is deliberately *not* folded in — it has its own seam,
-`oq_l2feed::Venue`, and merging them would couple a capture tool to an account
-credential. The two are tied by identity instead: the runner opens its feed with
-`venue.id()`, so the account side and the market side cannot disagree about
-which venue is being traded.
 
 ## 3. Technology choices
 
@@ -438,7 +225,7 @@ which venue is being traded.
 | Columnar data | `arrow-rs` + `parquet-rs` | Zero-copy interchange with the Python analysis ecosystem |
 | Numerics | `i64` fixed point on the hot path; decimal at ledger boundaries | Exact money arithmetic without float error; float never touches money |
 | Inference | ONNX runtime and compiled decision trees | Chosen per model class by measured latency, not by framework preference |
-| Testing | `criterion`, `proptest`, and a purpose-built fault simulator — all adopted | Benchmarks; generated-input invariants over the matching and margin properties `FR-MATCH-7` and `FR-MARGIN-7` name, which found a wrapping conversion that gave a large enough position no maintenance requirement at all; and `oq-sim`'s corpus driving the live books, which found a redelivered fill doubling a position. `proptest` is a dev-dependency in both crates, so the per-crate budgets are unchanged |
+| Testing | `proptest`, `criterion`, purpose-built fault simulator | Invariants, benchmarks, and whole-system fuzzing respectively |
 | Venue adapters | Written per venue against a thin contract | Universal abstraction layers hide exactly the venue-specific semantics that cause incidents |
 
 ---
@@ -448,8 +235,6 @@ which venue is being traded.
 | Crate | Responsibility | Milestone |
 |---|---|---|
 | `oq-types` | Domain types, `i64` fixed point, typestate order/position machines | M1 |
-| `oq-hash` | SHA-256 and CRC-32, shared by the journal, capture and parity | M1 |
-| `oq-examples` | Teaching examples and the seeded synthetic market they run on | M2 |
 | `oq-journal` | mmap journal, snapshots, replay, torn-tail tolerance | M1 |
 | `oq-core` | Sequencer, deterministic kernel, injected clock, sharding | M1 |
 | `oq-engine` | Matching: L0 (frozen anchor), L1, L2 | M1 / M4 |
@@ -458,15 +243,13 @@ which venue is being traded.
 | `oq-parity` | Trade-by-trade diff and difference attribution; baselines identified by the (commit, data hash, config hash) triple (D13) | M1 (built first) |
 | `oq-data` | Dual-timestamp Arrow layer, bitemporal reference data, strict as-of joins | M1–M2 |
 | `oq-l2feed` | Capture toolkit: incremental depth, BBO, trades, mark price, liquidations, rule tables | M0 |
-| `oq-book` | Order book rebuilt from incremental depth, shared by capture and matching | M0 / M4 |
-| `oq-ingest` | Captured archives folded into the tick format the engine replays | M0 |
 | `oq-strategy` | Tier A traits, indicator components | M2 |
 | `oq-py` | Tier B: compatibility mode and throughput mode | M2 |
 | `oq-stats` | DSR, PBO/CSCV, trial registry | M0 |
 | `oq-cli` | `backtest` / `sweep` / `live` / `replay` / `parity` / `data` | M2 |
 | `oq-sim` | Randomized whole-system fault simulation and scenario corpus | M1 onward |
 | `oq-risk` | RiskGate: limits, kill switch, reconciliation | M3 |
-| `oq-gateway` | Venue adapters, **execution conformance suite** (`conformance::check` drives an adapter through the placement contract using payloads it supplies), reconciliation protocol, order-ID attribution | M3 ★ |
+| `oq-gateway` | Venue adapters, conformance suite, reconciliation protocol, order-ID attribution | M3 ★ |
 | `oq-live` | Process assembly, snapshot recovery, graceful restart | M3 |
 | `oq-features` | Point-in-time feature layer, online/offline consistency metrics | M2 skeleton / M5 |
 | `oq-infer` | ONNX and compiled-tree inference, prediction parity gate | M5 |
@@ -508,40 +291,20 @@ openquanter/
       src/
         lib.rs
         book.rs         price-time priority order book
-        l0.rs           tick-replay matching
-        l1.rs, l2.rs    the rest of the ladder, each wrapping the one below
-    oq-book/
-      src/              depth application and the book both halves share
-    oq-l2feed/
-      src/
-        *.rs            framing, sealing, depth parsing, reconstruction
-        bin/            oq-capture, oq-book-check, oq-merge, oq-resequence
-    oq-ingest/
-      src/
-        agg.rs          windowed aggregation from archive to tick
-        bin/            oq-ingest, oq-tiers
-    oq-examples/
-      examples/         runnable teaching strategies
-      benches/          criterion benchmarks
-      tests/golden.rs   pins every number the documentation quotes
+        l0.rs           tick-replay matching; l1.rs, l2.rs follow
+        matching/       submodules appear as the ladder grows
     oq-gateway/
       src/
-        exec.rs         the connector contract every venue implements
-        binance.rs, okx.rs   one adapter each
-        conformance.rs  the suite both adapters answer to
+        contract.rs     the connector contract every venue implements
+        binance/        market_data.rs, orders.rs, user_stream.rs, reconcile.rs
     ...
-  docs/                 requirements, roadmap, formats, quickstart
-  scripts/              repository tooling: DCO check, secret scan,
-                        composability check, crate-name reservation
-  .github/workflows/    CI: test, hygiene, composability, throughput floor
+  docs/                 requirements, roadmap, implementation plan
+  scripts/              repository tooling (DCO check, name reservation)
+  examples/             example strategies
+  data/                 sample datasets and golden baselines
+  crates/*/tests/       integration tests, separate from in-module unit tests
+  crates/*/benches/     criterion benchmarks, tracked in CI
 ```
-
-Two things are deliberately *not* in this tree. There is no top-level
-`examples/` or `data/`: runnable examples are a crate, so they compile
-under `cargo test` and cannot rot, and the sample market is
-**generated from a seed** rather than stored, which is why golden tests
-can pin exact numbers without shipping a dataset or inheriting anyone's
-redistribution terms.
 
 Unit tests live beside the code they test, in a `#[cfg(test)]` module in
 the same file — the Rust convention, and it keeps an invariant next to
@@ -570,8 +333,8 @@ uncaptured days are permanently lost):
 |---|---|---|
 | Required | Incremental depth updates + REST snapshot on connect + end-of-day snapshot | L2 book reconstruction; queue model input |
 | Required | Best bid/offer stream | True tick-level BBO — depth streams are coalesced and downsampled |
-| Required | Raw trades | What consumed the queue ahead of you: the other half of the queue model. Raw rather than aggregated — individual fills, not fills pre-grouped by price and time |
-| Required | Mark price / funding rate / index price | Margin engine input; liquidation uses mark price. Captured by **polling** where no stream carries it — see [Capture Format](CAPTURE-FORMAT.md) §10 |
+| Required | Aggregated trades | Volume consuming the queue ahead of you: the other half of the queue model |
+| Required | Mark price / funding rate / index price | Margin engine input; liquidation uses mark price |
 | Required | Forced liquidation stream | Scarce tail-behavior data, valuable even when rate-limited |
 | Recommended | Leverage and maintenance-margin tier tables (daily snapshot, bitemporal) | Margin rule source; rules change silently; storage cost is negligible |
 | Recommended | Open interest, long/short ratios (periodic REST) | Cheap research inputs |
@@ -594,7 +357,7 @@ does not belong on a shared or bandwidth-constrained link.
 | P1.6 | `oq-margin` skeleton | Tier tables bitemporal; per-tick usage and liquidation price; liquidation order path |
 | P1.7 | `oq-backtest` | End-to-end run on sample data with fidelity report |
 | P1.8 | `oq-sim` prototype | First three catalogue scenarios reproduce from seed |
-| P1.9 | Benchmarks in CI | **Landed.** `criterion` benches in `crates/oq-examples/benches/`, plus a CI job asserting a throughput floor. A floor rather than a tracked baseline, deliberately — see the [roadmap](ROADMAP.md#milestone-overview) |
+| P1.9 | Benchmarks in CI | `criterion` baselines tracked; regressions fail the build |
 
 **Gate:** G1 and G2 met; first public preview tag.
 
@@ -608,9 +371,9 @@ does not belong on a shared or bandwidth-constrained link.
 | P2.4 | `oq-data` | Dual-timestamp layer, bitemporal store, strict as-of joins, leakage tests |
 | P2.5 | `oq-features` skeleton | One feature definition, two execution paths, consistency metric emitted |
 | P2.6 | `oq-cli` + `oq-stats` integration | Sweeps emit DSR/PBO by default; strict mode refuses over-threshold results |
-| P2.7 | Adoption readiness | Quickstart, two example strategies, sample dataset with goldens. The timed external cold start that used to close this row went with `G11` |
+| P2.7 | Adoption readiness | Quickstart, two example strategies, sample dataset with goldens, external cold start ≤ 30 min (G11) |
 
-**Gate:** G3, G4, G5, G7; beta release. (`G11` was withdrawn.)
+**Gate:** G3, G4, G5, G7, G11 initial; beta release.
 
 ### Phase 3 — Live trading (M3, trigger-gated)
 
@@ -658,7 +421,7 @@ Four layers, each answering a different question.
 | Layer | Question | Mechanism |
 |---|---|---|
 | **Unit** | Does this function do what it says? | Standard `cargo test`, fast, per-crate |
-| **Property** | Are the invariants preserved under arbitrary inputs? | Quantity conservation, price-time priority, no crossed book, non-negative margin, monotonic liquidation price — **all checked by `proptest` over generated inputs**. The first run found two things: a notional that wrapped, giving a large enough position no maintenance requirement at all; and a property written **too strongly** — a position posted with less margin than its own requirement genuinely does have a liquidation price above its entry, because it is on the wrong side of the line the instant it opens. That one was the assertion being wrong and the code being right; the property now carries the qualifier and the case it carved out is asserted as a property of its own |
+| **Property** | Are the invariants preserved under arbitrary inputs? | `proptest`: quantity conservation, price-time priority, no crossed book, non-negative margin, monotonic liquidation price |
 | **Golden** | Did observable behavior change? | Sample data replayed, full output compared; baselines carry the identity triple (D13) and regenerate only with recorded human confirmation |
 | **Parity** | Do two implementations or two modes agree? | `oq-parity` trade-by-trade diff with attribution; used for ports, refactors, throughput mode, and Python/Rust inference. A stale baseline is reported as stale, never as a difference |
 | **Simulation** | Does the whole system survive hostile conditions? | `oq-sim` randomized fault injection, every failure reproducible from `(seed, commit)` |
@@ -673,11 +436,8 @@ Rules that are not negotiable:
   or configuration moved, the output says so (D13) instead of blaming the code.
 - Public CI runs entirely on sample data. No quality gate may depend on a
   private dataset.
-- Benchmarks run in CI against a **floor**, and falling below it is a build
-  failure. The floor is set far below any real machine on purpose: shared
-  runners vary by several times from hour to hour, and a gate that fails on
-  noise gets disabled. Precise version-to-version comparison is `cargo bench`
-  on one machine, not a CI job.
+- Benchmarks run in CI with tracked baselines; a performance regression is a
+  build failure, not a note.
 
 ---
 
@@ -729,12 +489,7 @@ welcome as issues.
    question.
 3. **Second and third venue priority.** Driven by user demand; the connector
    contract should be validated by at least two structurally different venues
-   before 2.0. Partly answered since this was written: OKX is the second, on
-   both the capture and the order side, and each side has a conformance suite
-   both adapters pass. It found what a second venue is for — Binance answers a
-   refusal with an HTTP status, OKX answers one inside a 200 — which is the
-   kind of disagreement no amount of design settles. What is still open is the
-   third venue's priority, and OKX's signed half, which needs a live account.
+   before 1.0.
 4. **Queue model selection policy.** How the framework should choose between
    conservative and probabilistic queue models when calibration data is thin —
    currently a manual setting, arguably should be automatic with a warning.
