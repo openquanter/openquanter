@@ -440,8 +440,15 @@ is an independent check on the system currently trading.
 Balances. Nautilus reconciles orders, fills and positions and leaves
 balances to a separate path, and the same split applies here for now: a
 balance divergence with matching positions is a fee or funding
-accounting question, not an execution one, and answering it needs a model
-of both that this does not yet have.
+accounting question, not an execution one. The models are no longer the
+obstacle — `Fees` carries a maker and a taker rate and lets the maker
+side be negative, and funding is settled into the balance and tracked
+apart from it, so the local side can say what it thinks it was charged.
+What is missing is the comparison, and the reason it has not been built
+is that the venue's balance also moves for reasons no execution model
+sees: transfers, cross-collateral, sub-account movement. A divergence
+that can be explained by any of those is not evidence about execution,
+which is why this reconciles the things that are.
 
 Venues other than one. The design is written against Binance USDT-M
 because that is what runs; `DownloadBegin`/`DownloadEnd`, the three-valued

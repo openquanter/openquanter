@@ -166,12 +166,19 @@ under load — which is exactly when it must not.
 
 ## What is not here yet
 
-- The risk gate itself (`oq-risk`): limits, kill switch, and the
-  fatal-on-unknown-state startup check.
 - Order entry over WebSocket, which the venue also offers. REST first
   because its failure modes are the ones described above and are already
   understood; adding a second write path before the first is proven
   would double the surface without a reason.
-- Any venue other than Binance USD-M. The trait exists so that the
-  second one is an implementation rather than a rewrite; that claim is
-  unproven until a second one exists.
+- A venue whose signed half has been exercised, other than Binance
+  USD-M. The seam's claim — that a second venue is an implementation
+  rather than a rewrite — is no longer untested: `Execution` has a
+  second implementation (OKX), and a conformance suite drives both
+  adapters from payloads each one supplies, so it tests the contract
+  rather than one venue's bytes. It exists because the two venues
+  disagree about something that matters: Binance answers a refusal with
+  an HTTP status and OKX answers one inside a 200, so a classifier
+  written around the first silently mislabels the second. What is still
+  untested is OKX's signed half, which needs credentials and a live
+  account to exercise. The unsigned half is verified against the real
+  venue.

@@ -356,6 +356,8 @@ PyO3 是因为它要和 Python 说话。**两者都不改变那 12 个零**,而 
 | `oq-parity` | 逐笔 diff 与差异归因；基线由 (commit, 数据哈希, 配置哈希) 三元组标识（D13） | M1（最先做） |
 | `oq-data` | 双时戳 Arrow 层、双时间参考数据、严格 as-of join | M1–M2 |
 | `oq-l2feed` | 采集工具：增量深度、BBO、成交、标记价、强平、规则表 | M0 |
+| `oq-book` | 从增量深度重建出的订单簿，采集侧与撮合侧共用 | M0 / M4 |
+| `oq-ingest` | 把采集下来的归档折叠成引擎重放的 tick 格式 | M0 |
 | `oq-strategy` | Tier A trait、指标组件 | M2 |
 | `oq-py` | Tier B：兼容模式与达速模式 | M2 |
 | `oq-stats` | DSR、PBO/CSCV、试验登记 | M0 |
@@ -398,20 +400,27 @@ openquanter/
       src/
         lib.rs
         book.rs         价格时间优先的订单簿
-        l0.rs           tick 回放撮合；l1.rs、l2.rs 随后
-        matching/       阶梯长大后再拆子模块
+        l0.rs           tick 回放撮合
+        l1.rs、l2.rs     阶梯的其余部分，每一层包住下面一层
+    oq-book/
+      src/              深度的应用，以及两侧共用的那本簿
     oq-l2feed/
       src/
         *.rs            分帧、密封、深度解析、订单簿重建
-        bin/            oq-capture、oq-book-check
+        bin/            oq-capture、oq-book-check、oq-merge、oq-resequence
+    oq-ingest/
+      src/
+        agg.rs          从归档到 tick 的按窗口聚合
+        bin/            oq-ingest、oq-tiers
     oq-examples/
       examples/         可运行的教学策略
       benches/          criterion 基准
       tests/golden.rs   钉住文档引用的每一个数字
     oq-gateway/
       src/
-        contract.rs     每个交易所都要实现的连接器契约
-        binance/        market_data.rs、orders.rs、user_stream.rs、reconcile.rs
+        exec.rs         每个交易所都要实现的连接器契约
+        binance.rs、okx.rs   一家一个适配器
+        conformance.rs  两个适配器都要过的那套一致性测试
     ...
   docs/                 需求、路线图、格式规范、快速上手
   scripts/              仓库工具：DCO 检查、秘密扫描、
@@ -593,8 +602,12 @@ gap 标记并重拉快照；时钟偏移估计随数据归档。采集运行在�
    差异较大，做通用建模未必划算；藏在 trait 后面的交易所专用实现可能是更好的答案。
 2. **参考数据的分发。** 保证金分级表与合约规格体积小、会静默变化、且人人都需要。
    是否分发一份社区维护的双时间数据集、以什么条款分发，是开放问题。
-3. **第二、三个交易所的优先级。** 由用户需求驱动；1.0 之前连接器契约应至少被两个
-   结构上不同的交易所验证过（在 2.0 之前）。
+3. **第二、三个交易所的优先级。** 由用户需求驱动；2.0 之前，连接器契约应至少被两个
+   结构上不同的交易所验证过。这一条自写下之后已被回答了一部分：OKX 就是第二个，采集
+   侧和下单侧都有，而且两侧各有一套两个适配器都能通过的一致性测试。它也验证了"第二个
+   交易所"到底是干什么用的——Binance 用 HTTP 状态码回答拒单，OKX 把拒单包在 200 里，
+   这类分歧不是靠再多设计就能了结的。仍然敞着的是第三个交易所的优先级，以及 OKX
+   的签名那一半——它需要一个真实账户。
 4. **排队模型的选择策略。** 校准数据不足时，框架应如何在保守档与概率档之间选择
    ——目前是手动配置，或许应改为自动选择并给出告警。
 5. **Python 打包面。** Rust API 暴露多少给 Python 绑定。暴露全部会招致对内部实现
