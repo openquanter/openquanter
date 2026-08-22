@@ -19,7 +19,7 @@
 //! reused**, because a journal outlives the build that wrote it.
 
 use oq_engine::Tick;
-use oq_types::{InstrumentId, Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp};
+use oq_types::{Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp};
 
 /// Journal record kinds. Append-only; values are permanent.
 pub mod kind {
@@ -33,79 +33,15 @@ pub mod kind {
     pub const FUNDING: u16 = 4;
     pub const TIME: u16 = 5;
     pub const MARGIN_DEPOSIT: u16 = 6;
-    /// A fill the **venue** decided, rather than one the matcher
-    /// produced.
-    ///
-    /// The difference is the whole of what separates a backtest from a
-    /// live run: in a backtest the matcher decides which orders trade,
-    /// and live the venue does. Both end up as the same accounting, so
-    /// the kernel applies both the same way — but the journal records
-    /// which it was, because a replay that fed a venue fill back through
-    /// a matcher would book it twice.
-    pub const VENUE_FILL: u16 = 8;
-    /// A depth update from the venue, for a matcher that reads one.
-    ///
-    /// **The first variable-length kind.** Every other payload here is
-    /// a fixed size and decode refuses anything else, which is what
-    /// stops a truncated record being read as a valid shorter one. A
-    /// depth update is a list of levels, so it carries its own counts
-    /// and decode checks the byte count against them -- the same rule,
-    /// stated against a declared length rather than a constant.
-    ///
-    /// Recorded because it changes results. An L2 run's fills depend on
-    /// the book its orders queued in, and a journal without it replays
-    /// the orders into a different market. That is the difference
-    /// between a record of what happened and a record of what was
-    /// asked for.
-    pub const DEPTH: u16 = 9;
-    /// A tick that names its instrument.
-    ///
-    /// [`TICK`] is the same observation without one, which is what a
-    /// single-instrument account meant and every journal written before
-    /// routing existed still says. Both are read; only the one matching
-    /// the event is written.
-    pub const TICK_ON: u16 = 10;
-    /// A submission that names its instrument.
-    ///
-    /// [`SUBMIT`] is the same order without one. Appended like
-    /// [`TICK_ON`], so the shorter payload is a prefix of the longer and
-    /// one decoder reads both.
-    pub const SUBMIT_ON: u16 = 11;
 }
 
 /// An input to the core.
-///
-/// `Clone` but not `Copy`, since [`Event::Depth`] carries a list of
-/// levels. Everything else here is a handful of integers and copying it
-/// was free; a depth update is the one input whose size depends on what
-/// the venue sent, and pretending otherwise would mean either leaving
-/// it out of the journal or putting a fixed cap on how deep a book may
-/// be.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// A market observation.
-    Tick {
-        /// Which instrument it is of.
-        ///
-        /// `None` means "the account's only one", which is what every
-        /// journal written before instruments were routable says — and
-        /// says truthfully, since an account that held one instrument
-        /// had no other answer. A kernel holding several refuses it
-        /// rather than guessing, because guessing here marks a position
-        /// at another instrument's price.
-        instrument: Option<InstrumentId>,
-        tick: Tick,
-    },
+    Tick(Tick),
     /// Place an order.
     Submit {
-        /// Which instrument to place it on.
-        ///
-        /// `None` means "the account's only one", as it does for a
-        /// tick, and for the same reason: it is what every journal
-        /// written before routing says, truthfully. A process holding
-        /// several refuses it — an order placed on the wrong instrument
-        /// is not a near miss.
-        instrument: Option<InstrumentId>,
         id: OrderId,
         side: Side,
         /// A limit price, or `None` for a market order.
@@ -134,24 +70,6 @@ pub enum Event {
     Time(Nanos),
     /// Collateral added to or removed from the account.
     MarginDeposit { amount: i64, at: Nanos },
-    /// A fill the venue decided.
-    ///
-    /// Only meaningful under [`crate::kernel::Matching::Venue`]; a
-    /// simulated run produces its own fills and one arriving from
-    /// outside would be a second matcher.
-    VenueFill(oq_types::Fill),
-    /// A depth update from the venue.
-    ///
-    /// Read by [`Matcher::L2`](crate::matcher::Matcher::L2) and by no
-    /// other tier. A tier that does not keep a book reports it as
-    /// unread rather than failing: a run is allowed to be handed data
-    /// it does not use, and is not allowed to be silent about it.
-    ///
-    /// Boxed because it is the one variant that is not a handful of
-    /// integers, and an enum is as large as its largest arm -- every
-    /// tick in every journal would otherwise carry the footprint of a
-    /// book it does not hold.
-    Depth(Box<oq_engine::DepthUpdate>),
 }
 
 impl Event {
@@ -159,25 +77,12 @@ impl Event {
     #[must_use]
     pub const fn kind(&self) -> u16 {
         match self {
-            // Two kinds for one variant: an observation that names
-            // its instrument does not fit the payload every reader
-            // before it expects, and widening that payload in place
-            // would make an old reader decode a new record as a tick
-            // with a wrong volume rather than refusing it.
-            Self::Tick {
-                instrument: None, ..
-            } => kind::TICK,
-            Self::Tick { .. } => kind::TICK_ON,
-            Self::Submit {
-                instrument: None, ..
-            } => kind::SUBMIT,
-            Self::Submit { .. } => kind::SUBMIT_ON,
+            Self::Tick(_) => kind::TICK,
+            Self::Submit { .. } => kind::SUBMIT,
             Self::Cancel { .. } => kind::CANCEL,
             Self::Funding { .. } => kind::FUNDING,
             Self::Time(_) => kind::TIME,
             Self::MarginDeposit { .. } => kind::MARGIN_DEPOSIT,
-            Self::VenueFill(_) => kind::VENUE_FILL,
-            Self::Depth(_) => kind::DEPTH,
         }
     }
 
@@ -185,57 +90,19 @@ impl Event {
     #[must_use]
     pub const fn at(&self) -> Nanos {
         match self {
-            Self::Tick { tick, .. } => tick.stamp.exch,
+            Self::Tick(t) => t.stamp.exch,
             Self::Submit { stamp, .. } | Self::Cancel { stamp, .. } => stamp.exch,
             Self::Funding { at, .. } | Self::Time(at) | Self::MarginDeposit { at, .. } => *at,
-            // The venue's clock, not this process's. A fill is ordered
-            // by when it happened, and the local receive time is a
-            // property of the link rather than of the trade.
-            Self::VenueFill(f) => f.stamp.exch,
-            // The venue's event time, in the unit everything else here
-            // uses. A depth update carries milliseconds because that is
-            // what the venue sends; ordering against ticks needs
-            // nanoseconds, and converting at the boundary keeps one unit
-            // in the kernel.
-            Self::Depth(u) => Nanos(u.event_ms.saturating_mul(1_000_000)),
         }
     }
 
     /// Encode the payload (the kind travels in the record header).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        // The one variable-length payload, taken first because the match
-        // below is over a copy and a list of levels is not one.
-        //
-        // Layout: the four sequence fields, then a byte saying whether
-        // `prev_final_id` is present, then the two level counts, then
-        // the levels. Counts before the data, so a reader knows how much
-        // to expect before it reads it -- and can refuse a payload whose
-        // size disagrees with what it declared, which is the same rule
-        // the fixed-size kinds enforce against a constant.
-        if let Self::Depth(u) = self {
-            let mut out = Vec::with_capacity(41 + (u.bids.len() + u.asks.len()) * 16);
-            out.extend_from_slice(&u.event_ms.to_le_bytes());
-            out.extend_from_slice(&u.first_id.to_le_bytes());
-            out.extend_from_slice(&u.final_id.to_le_bytes());
-            out.extend_from_slice(&u.prev_final_id.unwrap_or(0).to_le_bytes());
-            out.push(u8::from(u.prev_final_id.is_some()));
-            out.extend_from_slice(&(u.bids.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(u.asks.len() as u32).to_le_bytes());
-            for level in u.bids.iter().chain(u.asks.iter()) {
-                out.extend_from_slice(&level.price.to_le_bytes());
-                out.extend_from_slice(&level.qty.to_le_bytes());
-            }
-            return out;
-        }
-
         let mut out = Vec::with_capacity(64);
         let put_i64 = |out: &mut Vec<u8>, v: i64| out.extend_from_slice(&v.to_le_bytes());
         match *self {
-            Self::Tick {
-                instrument,
-                tick: t,
-            } => {
+            Self::Tick(t) => {
                 put_i64(&mut out, t.stamp.exch.0);
                 put_i64(&mut out, t.stamp.local.0);
                 put_i64(&mut out, t.last.0);
@@ -244,15 +111,8 @@ impl Event {
                 put_i64(&mut out, t.bid.0);
                 put_i64(&mut out, t.ask.0);
                 put_i64(&mut out, t.volume.0);
-                // Appended, so the first 64 bytes are byte-identical to
-                // the older kind: one decoder reads both halves and the
-                // kind decides whether the tail is there.
-                if let Some(id) = instrument {
-                    out.extend_from_slice(&id.0.to_le_bytes());
-                }
             }
             Self::Submit {
-                instrument,
                 id,
                 side,
                 price,
@@ -282,14 +142,6 @@ impl Event {
                     Offset::Open => 0,
                     Offset::Close => 1,
                 });
-                // The instrument goes after the offset for the same
-                // reason the offset went after the stamp: each addition
-                // leaves the previous payload a prefix, so one decoder
-                // reads every generation and the kind says how far to
-                // read.
-                if let Some(id) = instrument {
-                    out.extend_from_slice(&id.0.to_le_bytes());
-                }
             }
             Self::Cancel { id, stamp } => {
                 out.extend_from_slice(&id.0.to_le_bytes());
@@ -302,32 +154,10 @@ impl Event {
                 put_i64(&mut out, mark.0);
             }
             Self::Time(at) => put_i64(&mut out, at.0),
-            Self::VenueFill(f) => {
-                put_i64(&mut out, f.stamp.exch.0);
-                put_i64(&mut out, f.stamp.local.0);
-                out.extend_from_slice(&f.instrument.0.to_le_bytes());
-                out.extend_from_slice(&f.order.0.to_le_bytes());
-                out.extend_from_slice(&f.trade.0.to_le_bytes());
-                put_i64(&mut out, f.price.0);
-                put_i64(&mut out, f.qty.0);
-                out.push(match f.side {
-                    Side::Buy => 0,
-                    Side::Sell => 1,
-                });
-                out.push(match f.offset {
-                    oq_types::Offset::Open => 0,
-                    oq_types::Offset::Close => 1,
-                });
-                out.push(match f.liquidity {
-                    oq_types::Liquidity::Maker => 0,
-                    oq_types::Liquidity::Taker => 1,
-                });
-            }
             Self::MarginDeposit { amount, at } => {
                 put_i64(&mut out, amount);
                 put_i64(&mut out, at.0);
             }
-            Self::Depth(_) => unreachable!("handled before the match"),
         }
         out
     }
@@ -345,55 +175,32 @@ impl Event {
                 .map(|s| i64::from_le_bytes(s.try_into().expect("8 bytes")))
         }
         match kind {
-            kind::TICK | kind::TICK_ON => {
-                let named = kind == kind::TICK_ON;
-                let expected = if named { 68 } else { 64 };
-                if payload.len() != expected {
+            kind::TICK => {
+                if payload.len() != 64 {
                     return None;
                 }
-                let instrument = if named {
-                    Some(InstrumentId(u32::from_le_bytes(
-                        payload.get(64..68)?.try_into().ok()?,
-                    )))
-                } else {
-                    None
-                };
-                Some(Self::Tick {
-                    instrument,
-                    tick: Tick {
-                        stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
-                        last: PriceTicks(i64_at(payload, 2)?),
-                        high: PriceTicks(i64_at(payload, 3)?),
-                        low: PriceTicks(i64_at(payload, 4)?),
-                        bid: PriceTicks(i64_at(payload, 5)?),
-                        ask: PriceTicks(i64_at(payload, 6)?),
-                        volume: oq_types::QtyLots(i64_at(payload, 7)?),
-                    },
-                })
+                Some(Self::Tick(Tick {
+                    stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
+                    last: PriceTicks(i64_at(payload, 2)?),
+                    high: PriceTicks(i64_at(payload, 3)?),
+                    low: PriceTicks(i64_at(payload, 4)?),
+                    bid: PriceTicks(i64_at(payload, 5)?),
+                    ask: PriceTicks(i64_at(payload, 6)?),
+                    volume: oq_types::QtyLots(i64_at(payload, 7)?),
+                }))
             }
-            kind::SUBMIT | kind::SUBMIT_LEGACY | kind::SUBMIT_ON => {
+            kind::SUBMIT | kind::SUBMIT_LEGACY => {
                 // Length is exact per kind rather than "either of two".
                 // Accepting both lengths under one kind would make a
                 // truncated new record indistinguishable from a valid old
                 // one, and decode is where that has to be caught — the
                 // whole point of refusing a wrong length is that a record
                 // is never quietly read as something it is not.
-                let expected = match kind {
-                    kind::SUBMIT_LEGACY => 42,
-                    kind::SUBMIT => 43,
-                    _ => 47,
-                };
+                let expected = if kind == kind::SUBMIT { 43 } else { 42 };
                 if payload.len() != expected {
                     return None;
                 }
-                let instrument = if kind == kind::SUBMIT_ON {
-                    Some(InstrumentId(u32::from_le_bytes(
-                        payload.get(43..47)?.try_into().ok()?,
-                    )))
-                } else {
-                    None
-                };
-                let offset = if kind != kind::SUBMIT_LEGACY {
+                let offset = if kind == kind::SUBMIT {
                     match payload[42] {
                         0 => Offset::Open,
                         1 => Offset::Close,
@@ -414,7 +221,6 @@ impl Event {
                 let rest = &payload[10..];
                 let price_raw = i64_at(rest, 0)?;
                 Some(Self::Submit {
-                    instrument,
                     id,
                     side,
                     price: has_price.then_some(PriceTicks(price_raw)),
@@ -461,115 +267,6 @@ impl Event {
                     at: Nanos(i64_at(payload, 1)?),
                 })
             }
-            kind::DEPTH => {
-                // The only kind whose length is declared rather than
-                // fixed, so the check is against the declaration: the
-                // header, then exactly the levels it says it carries.
-                // A payload that disagrees with its own counts is a
-                // truncation or a corruption, and reading it as a
-                // shorter book would put a queue behind levels that
-                // were never there.
-                const HEADER: usize = 8 + 8 + 8 + 8 + 1 + 4 + 4;
-                if payload.len() < HEADER {
-                    return None;
-                }
-                let at = |i: usize| -> Option<i64> {
-                    payload
-                        .get(i..i + 8)?
-                        .try_into()
-                        .ok()
-                        .map(i64::from_le_bytes)
-                };
-                let u64_at = |i: usize| -> Option<u64> {
-                    payload
-                        .get(i..i + 8)?
-                        .try_into()
-                        .ok()
-                        .map(u64::from_le_bytes)
-                };
-                let u32_at = |i: usize| -> Option<u32> {
-                    payload
-                        .get(i..i + 4)?
-                        .try_into()
-                        .ok()
-                        .map(u32::from_le_bytes)
-                };
-                let prev = u64_at(24)?;
-                let prev_final_id = match payload[32] {
-                    0 => None,
-                    1 => Some(prev),
-                    // A third value is a record this build cannot read,
-                    // not a `None` to fall back on.
-                    _ => return None,
-                };
-                let n_bids = u32_at(33)? as usize;
-                let n_asks = u32_at(37)? as usize;
-                let levels = n_bids.checked_add(n_asks)?;
-                if payload.len() != HEADER + levels.checked_mul(16)? {
-                    return None;
-                }
-                let mut read = Vec::with_capacity(levels);
-                for i in 0..levels {
-                    let o = HEADER + i * 16;
-                    read.push(oq_engine::Level {
-                        price: at(o)?,
-                        qty: at(o + 8)?,
-                    });
-                }
-                let asks = read.split_off(n_bids);
-                Some(Self::Depth(Box::new(oq_engine::DepthUpdate {
-                    event_ms: at(0)?,
-                    first_id: u64_at(8)?,
-                    final_id: u64_at(16)?,
-                    prev_final_id,
-                    bids: read,
-                    asks,
-                })))
-            }
-            kind::VENUE_FILL => {
-                // Exact length, like every other kind: a truncated
-                // record must not read as a valid shorter one.
-                // 8+8 stamp, 4 instrument, 8 order, 8 trade, 8 price,
-                // 8 qty, and three one-byte enums.
-                if payload.len() != 55 {
-                    return None;
-                }
-                let u32_at = |i: usize| -> Option<u32> {
-                    payload
-                        .get(i..i + 4)
-                        .map(|s| u32::from_le_bytes(s.try_into().expect("4")))
-                };
-                let u64_at = |i: usize| -> Option<u64> {
-                    payload
-                        .get(i..i + 8)
-                        .map(|s| u64::from_le_bytes(s.try_into().expect("8")))
-                };
-                Some(Self::VenueFill(oq_types::Fill {
-                    stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
-                    instrument: oq_types::InstrumentId(u32_at(16)?),
-                    order: OrderId(u64_at(20)?),
-                    trade: oq_types::TradeId(u64_at(28)?),
-                    price: PriceTicks(i64::from_le_bytes(payload.get(36..44)?.try_into().ok()?)),
-                    qty: oq_types::QtyLots(i64::from_le_bytes(
-                        payload.get(44..52)?.try_into().ok()?,
-                    )),
-                    side: match payload.get(52)? {
-                        0 => Side::Buy,
-                        1 => Side::Sell,
-                        _ => return None,
-                    },
-                    offset: match payload.get(53)? {
-                        0 => oq_types::Offset::Open,
-                        1 => oq_types::Offset::Close,
-                        _ => return None,
-                    },
-                    liquidity: match payload.get(54)? {
-                        0 => oq_types::Liquidity::Maker,
-                        1 => oq_types::Liquidity::Taker,
-                        _ => return None,
-                    },
-                }))
-            }
             _ => None,
         }
     }
@@ -581,16 +278,9 @@ mod tests {
 
     fn samples() -> Vec<Event> {
         vec![
-            Event::Tick {
-                instrument: None,
-                tick: Tick::quoted(Stamp::new(10, 12), 100, 110, 90, 99, 101),
-            },
-            Event::Tick {
-                instrument: None,
-                tick: Tick::trades_only(Stamp::new(20, 21), 100, 0, 0),
-            },
+            Event::Tick(Tick::quoted(Stamp::new(10, 12), 100, 110, 90, 99, 101)),
+            Event::Tick(Tick::trades_only(Stamp::new(20, 21), 100, 0, 0)),
             Event::Submit {
-                instrument: None,
                 id: OrderId::new(7),
                 side: Side::Buy,
                 price: Some(PriceTicks(950)),
@@ -599,7 +289,6 @@ mod tests {
                 offset: oq_types::Offset::Open,
             },
             Event::Submit {
-                instrument: None,
                 id: OrderId::new(8),
                 side: Side::Sell,
                 price: None,
@@ -621,185 +310,7 @@ mod tests {
                 amount: -12_345,
                 at: Nanos(80),
             },
-            Event::Depth(Box::new(oq_engine::DepthUpdate {
-                event_ms: 1_786_000_000_123,
-                first_id: 7_000,
-                final_id: 7_005,
-                prev_final_id: Some(6_999),
-                bids: vec![
-                    oq_engine::Level {
-                        price: 6_200_010,
-                        qty: 1_500,
-                    },
-                    oq_engine::Level {
-                        price: 6_200_000,
-                        qty: 2_500,
-                    },
-                ],
-                asks: vec![oq_engine::Level {
-                    price: 6_200_020,
-                    qty: 2_000,
-                }],
-            })),
         ]
-    }
-
-    fn depth(bids: Vec<oq_engine::Level>, asks: Vec<oq_engine::Level>) -> Event {
-        Event::Depth(Box::new(oq_engine::DepthUpdate {
-            event_ms: 1,
-            first_id: 2,
-            final_id: 3,
-            prev_final_id: None,
-            bids,
-            asks,
-        }))
-    }
-
-    fn level(price: i64, qty: i64) -> oq_engine::Level {
-        oq_engine::Level { price, qty }
-    }
-
-    /// The two sides survive as two sides.
-    ///
-    /// They are encoded as one run of levels behind two counts, so an
-    /// off-by-one in the split reads a bid as an ask -- which produces a
-    /// crossed book, prices that look plausible, and a queue measured
-    /// against the wrong side.
-    #[test]
-    fn the_sides_do_not_swap_across_the_round_trip() {
-        let e = depth(vec![level(99, 10), level(98, 20)], vec![level(101, 30)]);
-        let Event::Depth(back) = Event::decode(e.kind(), &e.encode()).expect("decodes") else {
-            panic!("wrong kind");
-        };
-        assert_eq!(back.bids, vec![level(99, 10), level(98, 20)]);
-        assert_eq!(back.asks, vec![level(101, 30)]);
-    }
-
-    /// An empty side is empty, not absent.
-    #[test]
-    fn a_one_sided_update_round_trips() {
-        for e in [
-            depth(vec![level(99, 10)], Vec::new()),
-            depth(Vec::new(), vec![level(101, 10)]),
-            depth(Vec::new(), Vec::new()),
-        ] {
-            assert_eq!(Event::decode(e.kind(), &e.encode()).expect("decodes"), e);
-        }
-    }
-
-    /// A payload that disagrees with its own counts is refused.
-    ///
-    /// This kind is the only one whose length is declared rather than
-    /// fixed, so the rule every other kind states against a constant --
-    /// a truncated record must not read as a valid shorter one -- has to
-    /// be stated against the declaration instead. Reading it anyway
-    /// would put a queue behind levels that were never there.
-    #[test]
-    fn a_payload_disagreeing_with_its_counts_is_refused() {
-        let e = depth(vec![level(99, 10), level(98, 20)], vec![level(101, 30)]);
-        let full = e.encode();
-
-        for cut in 1..=(3 * 16) {
-            let short = &full[..full.len() - cut];
-            assert!(
-                Event::decode(kind::DEPTH, short).is_none(),
-                "a payload {cut} bytes short must not decode"
-            );
-        }
-
-        let mut long = full.clone();
-        long.push(0);
-        assert!(Event::decode(kind::DEPTH, &long).is_none());
-
-        // A count claiming more levels than the bytes hold. The 16 MiB
-        // frame cap is the only thing between this and an allocation the
-        // checksum has not yet had a chance to reject.
-        let mut lying = full;
-        lying[33..37].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(Event::decode(kind::DEPTH, &lying).is_none());
-    }
-
-    /// The presence byte for `prev_final_id` takes two values.
-    ///
-    /// A third is a record this build cannot read. Falling back to
-    /// `None` would turn an unreadable record into a snapshot boundary,
-    /// and the book would accept the next update as a fresh start.
-    #[test]
-    fn an_unknown_presence_byte_is_refused() {
-        let e = depth(vec![level(99, 10)], Vec::new());
-        let mut bytes = e.encode();
-        bytes[32] = 2;
-        assert!(Event::decode(kind::DEPTH, &bytes).is_none());
-    }
-
-    /// A named tick and an unnamed one are different records.
-    ///
-    /// Same observation, different kinds, different lengths. Sharing a
-    /// kind would make a truncated named tick decode as a valid unnamed
-    /// one — the failure every fixed-length kind here is shaped to
-    /// prevent.
-    #[test]
-    fn a_named_tick_is_a_different_record_from_an_unnamed_one() {
-        let t = Tick::quoted(Stamp::new(10, 12), 100, 110, 90, 99, 101);
-        let anonymous = Event::Tick {
-            instrument: None,
-            tick: t,
-        };
-        let named = Event::Tick {
-            instrument: Some(InstrumentId::new(42)),
-            tick: t,
-        };
-
-        assert_ne!(anonymous.kind(), named.kind());
-        assert_eq!(anonymous.encode().len(), 64);
-        assert_eq!(named.encode().len(), 68);
-
-        // The first 64 bytes are identical, so one decoder reads both
-        // and the kind decides whether the tail is there.
-        assert_eq!(&named.encode()[..64], &anonymous.encode()[..]);
-
-        for e in [anonymous, named] {
-            assert_eq!(Event::decode(e.kind(), &e.encode()).expect("decodes"), e);
-        }
-    }
-
-    /// A journal written before instruments were routable still reads.
-    ///
-    /// Its ticks are 64 bytes under `kind::TICK`, and they decode to
-    /// "the account's only instrument" — which is what they meant when
-    /// they were written, not a default standing in for something
-    /// missing.
-    #[test]
-    fn an_older_tick_decodes_as_the_only_instrument() {
-        let bytes = Event::Tick {
-            instrument: None,
-            tick: Tick::trades_only(Stamp::new(20, 21), 100, 0, 0),
-        }
-        .encode();
-
-        let Some(Event::Tick { instrument, .. }) = Event::decode(kind::TICK, &bytes) else {
-            panic!("an older tick must still decode");
-        };
-        assert_eq!(instrument, None);
-    }
-
-    /// Each length belongs to one kind.
-    #[test]
-    fn a_tick_of_the_wrong_length_for_its_kind_is_refused() {
-        let named = Event::Tick {
-            instrument: Some(InstrumentId::new(1)),
-            tick: Tick::trades_only(Stamp::new(1, 1), 100, 0, 0),
-        }
-        .encode();
-
-        assert!(
-            Event::decode(kind::TICK, &named).is_none(),
-            "68 bytes is not an unnamed tick"
-        );
-        assert!(
-            Event::decode(kind::TICK_ON, &named[..64]).is_none(),
-            "64 bytes is not a named one"
-        );
     }
 
     #[test]
@@ -813,7 +324,6 @@ mod tests {
     #[test]
     fn a_market_order_stays_distinct_from_a_zero_price_limit() {
         let market = Event::Submit {
-            instrument: None,
             id: OrderId::new(1),
             side: Side::Buy,
             price: None,
@@ -822,7 +332,6 @@ mod tests {
             offset: oq_types::Offset::Open,
         };
         let zero_limit = Event::Submit {
-            instrument: None,
             id: OrderId::new(1),
             side: Side::Buy,
             price: Some(PriceTicks::ZERO),
@@ -847,7 +356,6 @@ mod tests {
     #[test]
     fn a_legacy_submit_decodes_as_an_open() {
         let modern = Event::Submit {
-            instrument: None,
             id: OrderId::new(9),
             side: Side::Buy,
             price: Some(PriceTicks(1_234_500)),
@@ -871,7 +379,6 @@ mod tests {
     #[test]
     fn a_legacy_length_under_the_modern_kind_is_refused() {
         let bytes = Event::Submit {
-            instrument: None,
             id: OrderId::new(9),
             side: Side::Buy,
             price: Some(PriceTicks(1_234_500)),
@@ -886,7 +393,6 @@ mod tests {
     #[test]
     fn a_close_survives_the_round_trip() {
         let e = Event::Submit {
-            instrument: None,
             id: OrderId::new(3),
             side: Side::Sell,
             price: None,

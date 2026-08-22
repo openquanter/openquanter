@@ -18,9 +18,9 @@
 
 set -uo pipefail
 
-BIN="${BIN:-$HOME/oq-capture}"
-ROOT="${ROOT:-$HOME/capture}"
-LOGDIR="${LOGDIR:-$HOME/oq/log/capture}"
+BIN="${BIN:-/home/ubuntu/oq-capture}"
+ROOT="${ROOT:-/home/ubuntu/capture}"
+LOGDIR="${LOGDIR:-/home/ubuntu/oq/log/capture}"
 FLOOR_GB="${FLOOR_GB:-8}"
 # Hourly, not daily: a daily file is only sealed at UTC midnight, so a
 # host that dies at 23:00 loses the day. Hourly bounds that to an hour.
@@ -95,15 +95,7 @@ sleep 2
 # Count only this root's generation. During an overlapping upgrade two
 # generations run at once, and a plain process-name count would report
 # double and never match the expected number.
-# Count by process name and archive root together. `pgrep -f` alone
-# matches anything whose command line contains the root — including this
-# script's own children while they are still being exec'd — which made
-# the count read one high and would have failed the heartbeat's
-# equality check at random.
-running=$(pgrep -x "$(basename "$BIN")" 2>/dev/null | while read -r pid; do
-  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "--root $ROOT " && echo x
-done | wc -l | tr -d ' ')
-running=${running:-0}
+running=$(pgrep -fc -- "--root $ROOT " 2>/dev/null) || running=0
 expected=0
 for entry in $PLAN; do
   streams=$(printf '%s' "${entry#*:*:}" | tr ',' ' ')
