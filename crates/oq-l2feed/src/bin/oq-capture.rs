@@ -175,12 +175,6 @@ fn real_main() -> Result<ExitCode, String> {
 
     let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
     eprintln!("stopped: {:?}", stats.stop);
-    if let Some(why) = &stats.last_error {
-        // The venue's own words. A refused subscription and a network
-        // that went away are both `ConnectionLost`, and only this line
-        // says which.
-        eprintln!("  last connection error: {why}");
-    }
     eprintln!(
         "  {} payloads, {:.1} MiB, {} gap(s) totalling {:.1}s over {:.1} min",
         stats.payloads,

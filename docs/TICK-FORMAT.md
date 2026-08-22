@@ -90,22 +90,6 @@ append-only.
 | 6 | 48 | ask, ticks | v1 |
 | 7 | 56 | cumulative volume, lots | v2 |
 
-### Zero is not a price
-
-`last` is never zero in a written record. The other price fields use zero
-for "unknown"; this one cannot, because the kernel takes it as the mark
-price without a guard, and a position marked at nothing liquidates at a
-leverage of 1x or more and understates minimum equity by the position's
-notional below that — silently, in both directions.
-
-A producer with no price does not write a record. `oq-ingest` carries the
-previous price across windows with no trade of their own, and writes
-nothing before the first trade. A reader may rely on this; a writer owes
-it.
-
-This became true when it was measured. A twelve-hour live capture carried
-`last = 0` on 56.4% of its ticks, and 8.0% of them had all three prices.
-
 ### The extensibility rule
 
 **A new field is appended and `record_len` grows. Nothing else changes,
@@ -185,60 +169,3 @@ as a mysterious behavioural difference.
 - **Not compressed.** The engine reads it hot; compression trades scan
   speed for disk, and disk is the cheaper of the two. Compress the
   capture archive instead — that is where the volume is.
-
-## 7. The columnar export
-
-`oq-data` writes the same ticks as Parquet, behind the optional
-`parquet` feature. This is the "export Parquet for that" of §6, made
-real.
-
-```text
-cargo run -p oq-data --features parquet --bin oq-data -- ticks.oqtk --parquet out.parquet
-```
-
-Eight `Int64` columns — `exch_ts`, `local_ts`, `last`, `high`, `low`,
-`bid`, `ask`, `volume` — zstd-compressed, with the instrument id and a
-schema version in the file's key-value metadata under
-`openquanter.instrument` and `openquanter.tick_schema`.
-
-Three decisions worth stating, because each has an obvious wrong answer:
-
-- **Both timestamps, neither optional.** Their difference is feed
-  latency. An export that keeps one leaves a reader unable to tell a slow
-  feed from a slow market, and the loss is silent.
-- **Integers, not scaled floats.** A float column reads more nicely and
-  is wrong; the scale belongs to the instrument, not to the price. Files
-  round-trip exactly, and a test holds every column to `Int64`.
-- **The feature is optional because the tree is ~90 crates**, more than
-  the rest of the workspace combined. `oq-data`'s default build still
-  carries zero third-party dependencies, and CI checks that separately
-  from the feature build.
-
-On 7.3 hours of captured BTC perpetual data — 262,365 ticks — the export
-is 4.06 MB against 16.79 MB native, or 24%, and reads in pandas without a
-custom reader:
-
-```python
-df = pd.read_parquet("out.parquet")
-latency_ms = (df.local_ts - df.exch_ts) / 1e6   # median 89.8, p99 102.1
-```
-**The 4.06 MB and the 24% predate the aggregator carrying `last` across
-windows, and are the only figures here that do.** The tick count does
-not move: ticks are dropped only before a capture's first trade, and
-`oq-ingest` now prints how many that was. Nor does 16.79 MB, which is
-that count times a 64-byte record — 262,365 × 64 = 16,791,360, exactly
-the figure quoted. The compressed size is the one number that depends
-on the *content* rather than the count, and the content changed: at a
-100 ms window this capture averages 0.48 trades per window, so more
-than half of its ticks previously carried `last = 0` and now carry the
-last traded price. A long run of a repeated constant compresses better
-than one alternating between zero and a price, so the export is
-expected to shrink and the ratio with it. Re-running the conversion
-settles it; the archive itself is unaffected, because what was wrong
-was the conversion and not the capture.
-
-
-The checksum is not carried across. Parquet has page-level integrity of
-its own, and asserting ours over bytes we no longer control would be a
-claim we cannot keep; `read_parquet` rebuilds a `TickStream`, which
-recomputes it.

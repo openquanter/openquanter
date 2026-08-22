@@ -46,9 +46,6 @@ pub struct CaptureWriter {
     grace_ns: i64,
     /// How often a new file is started.
     rotation: Rotation,
-    /// How this venue divides time into windows. `None` uses the clock,
-    /// which is right for a market that never closes.
-    window_of: Option<fn(i64, Rotation) -> Window>,
 }
 
 /// Default grace period after a day boundary: one minute, which covers
@@ -87,7 +84,6 @@ impl CaptureWriter {
             previous: None,
             grace_ns: i64::try_from(DEFAULT_GRACE.as_nanos()).unwrap_or(i64::MAX),
             rotation: Rotation::Daily,
-            window_of: None,
         })
     }
 
@@ -100,16 +96,6 @@ impl CaptureWriter {
     #[must_use]
     pub fn with_rotation(mut self, rotation: Rotation) -> Self {
         self.rotation = rotation;
-        self
-    }
-
-    /// Divide time the way `f` does rather than by the clock.
-    ///
-    /// For markets with sessions, where a trading day and a UTC day are
-    /// not the same thing.
-    #[must_use]
-    pub fn with_windowing(mut self, f: fn(i64, Rotation) -> Window) -> Self {
-        self.window_of = Some(f);
         self
     }
 
@@ -128,10 +114,7 @@ impl CaptureWriter {
     ///
     /// Propagates I/O failures from rotation and appending.
     pub fn append(&mut self, record: &Record) -> io::Result<Option<SealedDay>> {
-        let window = self.window_of.map_or_else(
-            || Window::from_nanos(record.day_ts(), self.rotation),
-            |f| f(record.day_ts(), self.rotation),
-        );
+        let window = Window::from_nanos(record.day_ts(), self.rotation);
 
         // A record for the day that just rolled over is normal, not an
         // error. Exchange timestamps and the host clock cross midnight
