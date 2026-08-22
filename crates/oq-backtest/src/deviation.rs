@@ -224,7 +224,6 @@ mod tests {
                 if self.covers == 0 && ctx.working == 0 {
                     let id = self.id();
                     out.push(Intent::Market {
-                        instrument: oq_types::InstrumentId::new(1),
                         id,
                         side: Side::Buy,
                         qty: QtyLots(2),
@@ -241,7 +240,6 @@ mod tests {
                     let id = self.id();
                     let qty = QtyLots(2 << self.covers.min(5));
                     out.push(Intent::Limit {
-                        instrument: oq_types::InstrumentId::new(1),
                         id,
                         side: Side::Buy,
                         price: oq_types::PriceTicks(next),

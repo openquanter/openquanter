@@ -27,23 +27,6 @@
 //! underlying one quantity unit is. It is 1.0 wherever the quantity is
 //! the underlying, which makes the common case explicit rather than
 //! assumed.
-//!
-//! # Precision is not the same as the grid
-//!
-//! A second distinction, and it was found the same way — by a venue
-//! refusing an order. How many decimal places a price *may* have and
-//! which prices are *allowed* are separate facts, and venues publish
-//! them separately. One contract quotes two decimal places and moves in
-//! steps of ten of them: 50339.10 is a price and 50339.04 is not,
-//! though both have two decimals and both round-trip through every
-//! parser here.
-//!
-//! Formatting to the precision therefore produces prices a venue
-//! rejects, and the rejection says the price was not increased by the
-//! tick size, which is a sentence that only makes sense once you know
-//! the two numbers are different. [`Instrument::price_tick`] and
-//! [`Instrument::qty_step`] carry the grid so the check can happen
-//! before the order is sent.
 
 use crate::fixed::{CASH_SCALE, Cash, PriceTicks, QtyLots};
 
@@ -69,27 +52,6 @@ pub struct Instrument {
     /// [`CONTRACT_SCALE`] itself means the quantity *is* the underlying.
     /// A tenth of that means one unit is 0.1 of it.
     pub contract_size: i64,
-    /// Smallest price increment, counted in the units
-    /// [`Instrument::price_scale`] implies.
-    ///
-    /// `1` means every representable price is allowed. A contract
-    /// quoting two decimals but moving in steps of 0.10 has `10` here,
-    /// and a price that is not a multiple of it is refused by the venue
-    /// however well it is formatted.
-    pub price_tick: i64,
-    /// Smallest quantity increment, in the units
-    /// [`Instrument::qty_scale`] implies. `1` allows every
-    /// representable quantity.
-    pub qty_step: i64,
-    /// Smallest notional the venue will accept for one order, in the
-    /// units [`Cash`] counts in. Zero means no floor is known.
-    ///
-    /// A venue constraint rather than a risk preference, which is why it
-    /// sits here beside the grid and not in the risk limits: it is a
-    /// property of the contract, the same as how finely it can be
-    /// priced. A strategy that has to learn it by being refused learns
-    /// it once per strategy.
-    pub min_notional: Cash,
 }
 
 impl Instrument {
@@ -104,9 +66,6 @@ impl Instrument {
             price_scale,
             qty_scale,
             contract_size: CONTRACT_SCALE,
-            price_tick: 1,
-            qty_step: 1,
-            min_notional: Cash(0),
         }
     }
 
@@ -118,77 +77,6 @@ impl Instrument {
             price_scale,
             qty_scale,
             contract_size,
-            price_tick: 1,
-            qty_step: 1,
-            min_notional: Cash(0),
-        }
-    }
-
-    /// The same contract, restricted to a grid.
-    ///
-    /// Defaults to no restriction rather than to a guess, because a
-    /// grid invented here would reject prices the venue accepts, and a
-    /// tool that refuses valid work is harder to trust than one that
-    /// forwards a refusal.
-    #[must_use]
-    pub const fn with_grid(mut self, price_tick: i64, qty_step: i64) -> Self {
-        self.price_tick = if price_tick > 0 { price_tick } else { 1 };
-        self.qty_step = if qty_step > 0 { qty_step } else { 1 };
-        self
-    }
-
-    /// The same contract, with the venue's order floor.
-    #[must_use]
-    pub const fn with_min_notional(mut self, min_notional: Cash) -> Self {
-        self.min_notional = min_notional;
-        self
-    }
-
-    /// Whether a price sits on this contract's grid.
-    #[must_use]
-    pub const fn price_on_grid(&self, price: PriceTicks) -> bool {
-        price.0 % self.price_tick == 0
-    }
-
-    /// Whether a quantity sits on this contract's grid.
-    #[must_use]
-    pub const fn qty_on_grid(&self, qty: QtyLots) -> bool {
-        qty.0 % self.qty_step == 0
-    }
-
-    /// The nearest allowed price at or below `price`.
-    ///
-    /// Downward for a reason: moving a buy's limit down and a sell's up
-    /// makes the order no more aggressive than asked for. Rounding to
-    /// nearest would sometimes improve the price a strategy chose,
-    /// which is a decision the strategy did not make.
-    #[must_use]
-    pub const fn snap_price_down(&self, price: PriceTicks) -> PriceTicks {
-        PriceTicks(price.0 - price.0.rem_euclid(self.price_tick))
-    }
-
-    /// The nearest allowed price at or above `price`.
-    #[must_use]
-    pub const fn snap_price_up(&self, price: PriceTicks) -> PriceTicks {
-        let r = price.0.rem_euclid(self.price_tick);
-        if r == 0 {
-            price
-        } else {
-            PriceTicks(price.0 + (self.price_tick - r))
-        }
-    }
-
-    /// The nearest allowed quantity at or above `qty`.
-    ///
-    /// Upward, because the floor a quantity usually has to clear is a
-    /// minimum, and rounding down lands under it.
-    #[must_use]
-    pub const fn snap_qty_up(&self, qty: QtyLots) -> QtyLots {
-        let r = qty.0.rem_euclid(self.qty_step);
-        if r == 0 {
-            qty
-        } else {
-            QtyLots(qty.0 + (self.qty_step - r))
         }
     }
 
@@ -202,40 +90,6 @@ impl Instrument {
     /// wrong.
     ///
     /// Returns `None` when the scales are large enough that a tick is
-    /// The smallest quantity this contract will accept at this price.
-    ///
-    /// A venue enforces a minimum notional as well as a step, and a size
-    /// that satisfies the step alone is refused. Ten percent of headroom
-    /// over the floor, because the floor is checked against a price that
-    /// can move between sizing and arrival, and landing exactly on a
-    /// minimum lands under it half the time.
-    ///
-    /// Here rather than in the live host because it is a property of the
-    /// contract, and the callers who need it most are strategies. One
-    /// asked for a take-profit against a partly filled entry — five
-    /// hundredths of the intended size, worth 39.40 against a floor of
-    /// 50 — and got a refusal it could only respond to by asking again.
-    ///
-    /// Returns one lot when the contract declares no floor: a bound that
-    /// is not published cannot be respected, and refusing to size at all
-    /// would be worse than sizing at the step.
-    #[must_use]
-    pub fn smallest_allowed(&self, price: PriceTicks) -> QtyLots {
-        if self.min_notional.0 <= 0 || price.0 <= 0 {
-            return QtyLots(1);
-        }
-        let Some(tick_cash) = self.tick_cash() else {
-            return QtyLots(1);
-        };
-        let per_lot = i128::from(price.0) * i128::from(tick_cash);
-        if per_lot <= 0 {
-            return QtyLots(1);
-        }
-        let need = i128::from(self.min_notional.0) * 11 / 10;
-        let lots = (need + per_lot - 1) / per_lot;
-        QtyLots(i64::try_from(lots).unwrap_or(1).max(1))
-    }
-
     /// worth less than the smallest cash unit, because a rounded-down
     /// zero here would price every position at nothing.
     #[must_use]
@@ -272,73 +126,6 @@ fn pow10(n: u8) -> Option<i128> {
         return None;
     }
     Some(10_i128.pow(u32::from(n)))
-}
-
-#[cfg(test)]
-mod floors {
-    use super::*;
-
-    fn btc() -> Instrument {
-        Instrument {
-            min_notional: Cash::from_units(50),
-            ..Instrument::linear(2, 4)
-        }
-    }
-
-    /// A size that satisfies the step and not the floor is refused by
-    /// the venue, so it has to be refused here first.
-    ///
-    /// The case that produced this: a take-profit against a partly
-    /// filled entry, five hundredths of the intended size, worth 39.40
-    /// against a floor of 50. The venue said no and the strategy could
-    /// only respond by asking again.
-    #[test]
-    fn a_size_below_the_floor_is_not_the_smallest_allowed() {
-        let i = btc();
-        let price = PriceTicks(7_800_000); // 78,000.00
-        let least = i.smallest_allowed(price);
-        let notional = |lots: i64| {
-            i128::from(lots) * i128::from(price.0) * i128::from(i.tick_cash().expect("scale"))
-        };
-        assert!(
-            notional(least.0) >= i128::from(i.min_notional.0),
-            "the smallest allowed is below the floor it exists to clear"
-        );
-        // And no larger than the rule asks for: one lot less no longer
-        // clears the floor *with its headroom*, which is the bound this
-        // is the smallest size for.
-        let with_room = i128::from(i.min_notional.0) * 11 / 10;
-        assert!(
-            notional(least.0 - 1) < with_room,
-            "larger than the rule asks for"
-        );
-    }
-
-    /// Headroom, because the floor is checked against a price that moves
-    /// between sizing and arrival.
-    #[test]
-    fn the_smallest_allowed_clears_the_floor_with_room() {
-        let i = btc();
-        let price = PriceTicks(7_800_000);
-        let least = i.smallest_allowed(price);
-        let notional =
-            i128::from(least.0) * i128::from(price.0) * i128::from(i.tick_cash().expect("scale"));
-        assert!(
-            notional >= i128::from(i.min_notional.0) * 105 / 100,
-            "landing exactly on a minimum lands under it half the time"
-        );
-    }
-
-    /// A contract that publishes no floor is sized at the step.
-    ///
-    /// Refusing to size at all would be worse: a bound nobody declared
-    /// cannot be respected, and a strategy that will not trade because
-    /// of one is stopped by nothing.
-    #[test]
-    fn no_declared_floor_means_the_step() {
-        let i = Instrument::linear(2, 4);
-        assert_eq!(i.smallest_allowed(PriceTicks(7_800_000)), QtyLots(1));
-    }
 }
 
 #[cfg(test)]
@@ -388,88 +175,5 @@ mod tests {
         // Rounding this to zero would price every position at nothing,
         // which reads as a flat account rather than as a bad definition.
         assert_eq!(Instrument::linear(9, 9).tick_cash(), None);
-    }
-}
-
-#[cfg(test)]
-mod grid {
-    use super::*;
-
-    /// The contract that produced this code: two decimal places, and a
-    /// tick of ten of them.
-    fn btc_testnet() -> Instrument {
-        Instrument::linear(2, 4).with_grid(10, 1)
-    }
-
-    #[test]
-    fn a_price_with_valid_precision_can_still_be_off_the_grid() {
-        // 50339.04 was refused by a real venue with "Price not
-        // increased by tick size" while having exactly the two decimal
-        // places the contract publishes. Both facts are true at once,
-        // which is why both are stored.
-        let i = btc_testnet();
-        assert!(!i.price_on_grid(PriceTicks(5_033_904)));
-        assert!(i.price_on_grid(PriceTicks(5_033_900)));
-    }
-
-    #[test]
-    fn snapping_never_makes_an_order_more_aggressive() {
-        // Down for a buy, up for a sell. Rounding to nearest would
-        // sometimes improve the price the strategy chose, which is a
-        // decision the strategy did not make.
-        let i = btc_testnet();
-        assert_eq!(
-            i.snap_price_down(PriceTicks(5_033_904)),
-            PriceTicks(5_033_900)
-        );
-        assert_eq!(
-            i.snap_price_up(PriceTicks(5_033_904)),
-            PriceTicks(5_033_910)
-        );
-    }
-
-    #[test]
-    fn snapping_a_price_already_on_the_grid_leaves_it_alone() {
-        let i = btc_testnet();
-        let exact = PriceTicks(5_033_910);
-        assert_eq!(i.snap_price_down(exact), exact);
-        assert_eq!(i.snap_price_up(exact), exact);
-    }
-
-    #[test]
-    fn quantities_snap_upward_because_the_floor_is_a_minimum() {
-        // Rounding a quantity down lands under the venue's minimum,
-        // and the refusal talks about notional rather than about
-        // rounding.
-        let i = Instrument::linear(2, 3).with_grid(1, 10);
-        assert_eq!(i.snap_qty_up(QtyLots(21)), QtyLots(30));
-        assert_eq!(i.snap_qty_up(QtyLots(30)), QtyLots(30));
-    }
-
-    #[test]
-    fn a_contract_with_no_stated_grid_allows_every_representable_value() {
-        // The default must not invent a restriction: a grid guessed
-        // here would refuse prices the venue accepts, and a tool that
-        // refuses valid work is harder to trust than one that forwards
-        // a refusal.
-        let i = Instrument::linear(2, 3);
-        assert!(i.price_on_grid(PriceTicks(5_033_904)));
-        assert!(i.qty_on_grid(QtyLots(7)));
-    }
-
-    #[test]
-    fn a_nonsense_grid_is_ignored_rather_than_dividing_by_zero() {
-        let i = Instrument::linear(2, 3).with_grid(0, -5);
-        assert_eq!((i.price_tick, i.qty_step), (1, 1));
-    }
-
-    #[test]
-    fn a_negative_price_snaps_the_same_way_it_reads() {
-        // Prices are not negative on the venues here, but rem_euclid
-        // rather than % is what keeps the arithmetic from turning a
-        // downward snap into an upward one if they ever are.
-        let i = btc_testnet();
-        assert_eq!(i.snap_price_down(PriceTicks(-14)), PriceTicks(-20));
-        assert_eq!(i.snap_price_up(PriceTicks(-14)), PriceTicks(-10));
     }
 }

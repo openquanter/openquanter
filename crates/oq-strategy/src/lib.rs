@@ -34,96 +34,38 @@
 //! std Rust, so writing a strategy compiles three small crates and
 //! nothing else — no journal, no margin tables, no venue client.
 
-pub mod indicator;
-
-pub use indicator::{Ema, Macd, MacdValue, Rsi, Sma, Warmup, Window};
-
-use oq_types::{Fill, InstrumentId, Offset, OrderId, PriceTicks, QtyLots, Side};
+use oq_types::{Fill, Offset, OrderId, PriceTicks, QtyLots, Side};
 
 /// What a strategy wants to happen next.
-///
-/// # Every order names its instrument
-///
-/// Not "the one the callback was about". A [`Fill`] carries an
-/// instrument and an intent that did not would be the one asymmetry in
-/// the pair — but the reason is sharper than symmetry: an implicit
-/// "current instrument" makes the same line of code place different
-/// orders depending on which callback it ran in, and nothing at the
-/// call site shows it. That is fine while an account holds one
-/// instrument and is a defect the moment it holds two.
-///
-/// [`Context`] builds these with its own instrument already filled in,
-/// so a single-instrument strategy writes `ctx.limit(..)` and never
-/// names one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
     /// Rest a limit order.
     Limit {
-        instrument: InstrumentId,
         id: OrderId,
         side: Side,
         price: PriceTicks,
         qty: QtyLots,
         /// Whether this adds to a position or reduces one. Only matters
         /// under hedge accounting, where a buy while short is ambiguous
-        /// without it; [`Context::limit`] defaults it to `Open`.
+        /// without it; [`Intent::limit`] defaults it to `Open`.
         offset: Offset,
     },
     /// Cross the spread now.
     Market {
-        instrument: InstrumentId,
         id: OrderId,
         side: Side,
         qty: QtyLots,
         offset: Offset,
     },
     /// Withdraw a resting order.
-    ///
-    /// No instrument: an order id is unique across the account, so the
-    /// order names its own holding. Requiring one would let a caller
-    /// name the wrong one and be refused for an order that exists.
     Cancel(OrderId),
-    /// Withdraw everything, on every instrument.
+    /// Withdraw everything.
     CancelAll,
-}
-
-impl Intent {
-    /// Which instrument this is for, or `None` when it is for all of
-    /// them or for an order that already names its own.
-    #[must_use]
-    pub const fn instrument(&self) -> Option<InstrumentId> {
-        match self {
-            Self::Limit { instrument, .. } | Self::Market { instrument, .. } => Some(*instrument),
-            Self::Cancel(_) | Self::CancelAll => None,
-        }
-    }
-}
-
-/// How an order ended.
-///
-/// Two outcomes, because an order that ends has either delivered its
-/// size or given it up, and no third thing. A rejection never reaches
-/// here: it is answered through [`Strategy::on_placed`], which is the
-/// callback for whether an order ever existed at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ending {
-    /// Every lot the order asked for arrived.
-    Filled,
-    /// The order left the book with size unfilled — cancelled by this
-    /// process, or expired at the venue.
-    Cancelled,
 }
 
 /// What the strategy is told before it decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
-    /// Which instrument this callback is about.
-    ///
-    /// The one [`Context::limit`] and [`Context::market`] fill in. A
-    /// strategy that holds only this instrument never has to name it;
-    /// one that holds several is told which it is being called for
-    /// rather than having to infer it from the price.
-    pub instrument: InstrumentId,
     /// The observation that triggered this call.
     pub tick: oq_engine::Tick,
     /// Signed position: positive long, negative short.
@@ -146,22 +88,13 @@ pub struct Context {
 }
 
 impl Intent {
-    /// A limit order on a named instrument, adding to a position.
+    /// A limit order that adds to a position.
     ///
-    /// [`Context::limit`] is the one a strategy usually wants: it fills
-    /// in the instrument the callback is about. This is for a caller
-    /// that means a particular one — the case the instrument field
-    /// exists for.
+    /// The common case, and the only one that exists under one-way
+    /// netting. Use the variant directly to close a specific leg.
     #[must_use]
-    pub const fn limit_on(
-        instrument: InstrumentId,
-        id: OrderId,
-        side: Side,
-        price: PriceTicks,
-        qty: QtyLots,
-    ) -> Self {
+    pub const fn limit(id: OrderId, side: Side, price: PriceTicks, qty: QtyLots) -> Self {
         Self::Limit {
-            instrument,
             id,
             side,
             price,
@@ -170,16 +103,10 @@ impl Intent {
         }
     }
 
-    /// A market order on a named instrument, adding to a position.
+    /// A market order that adds to a position.
     #[must_use]
-    pub const fn market_on(
-        instrument: InstrumentId,
-        id: OrderId,
-        side: Side,
-        qty: QtyLots,
-    ) -> Self {
+    pub const fn market(id: OrderId, side: Side, qty: QtyLots) -> Self {
         Self::Market {
-            instrument,
             id,
             side,
             qty,
@@ -192,28 +119,19 @@ impl Intent {
     pub const fn closing(self) -> Self {
         match self {
             Self::Limit {
-                instrument,
                 id,
                 side,
                 price,
                 qty,
                 ..
             } => Self::Limit {
-                instrument,
                 id,
                 side,
                 price,
                 qty,
                 offset: Offset::Close,
             },
-            Self::Market {
-                instrument,
-                id,
-                side,
-                qty,
-                ..
-            } => Self::Market {
-                instrument,
+            Self::Market { id, side, qty, .. } => Self::Market {
                 id,
                 side,
                 qty,
@@ -221,25 +139,6 @@ impl Intent {
             },
             other => other,
         }
-    }
-}
-
-impl Context {
-    /// A limit order on this callback's instrument, adding to a
-    /// position.
-    ///
-    /// The common case, and the reason a single-instrument strategy
-    /// never writes an instrument down: this one is already the right
-    /// answer. Use [`Intent::limit_on`] to mean a different one.
-    #[must_use]
-    pub const fn limit(&self, id: OrderId, side: Side, price: PriceTicks, qty: QtyLots) -> Intent {
-        Intent::limit_on(self.instrument, id, side, price, qty)
-    }
-
-    /// A market order on this callback's instrument.
-    #[must_use]
-    pub const fn market(&self, id: OrderId, side: Side, qty: QtyLots) -> Intent {
-        Intent::market_on(self.instrument, id, side, qty)
     }
 }
 
@@ -268,145 +167,6 @@ pub trait Strategy {
     /// never has to reconstruct one.
     fn on_fill(&mut self, _fill: &Fill, _ctx: &Context, _out: &mut Vec<Intent>) {}
 
-    /// Called when the venue has answered a submission — and only then.
-    ///
-    /// A strategy that treats "I asked" as "it is resting" believes it
-    /// holds exposure it does not have. That is not a hypothetical: a
-    /// teaching example in this repository did exactly that, set its
-    /// `placed` flag before the answer arrived, and went on to cancel an
-    /// order the risk gate had refused:
-    ///
-    /// ```text
-    /// refused        OrderId(1): OrderTooLarge { qty: 11, limit: 1 }
-    /// unknown order  OrderId(1) — not in this run's map
-    /// ```
-    ///
-    /// `accepted` is the venue's answer as a boolean, which is the one
-    /// place in this project it is reduced to two values — and it is safe
-    /// here precisely because it is not the whole answer. An unresolved
-    /// placement is **not reported through this callback at all**: nobody
-    /// knows yet, and telling a strategy `false` would be telling it the
-    /// order does not exist. The host resolves it and calls back when
-    /// there is an answer, or the strategy times out on its own, which
-    /// is what `Placed::Unknown` obliges every caller to do.
-    ///
-    /// In a backtest this fires immediately after a submission the kernel
-    /// accepted, so a strategy written against it behaves the same in
-    /// both — which is the point of having it in the trait rather than in
-    /// the live host.
-    fn on_placed(&mut self, _id: OrderId, _accepted: bool) {}
-
-    /// A withdrawal the venue did not accept.
-    ///
-    /// The order named here is **still resting**. A strategy that treats
-    /// asking as having happened is in the same position as one that
-    /// treats submitting as resting, and the consequence is worse:
-    /// re-pricing a take-profit means cancelling one and placing
-    /// another, so a failed cancel leaves two live orders closing the
-    /// same position, and the second fill opens the opposite side.
-    ///
-    /// No intents, deliberately. This arrives from inside the handling
-    /// of the intents the strategy just produced, and letting it produce
-    /// more would nest that handling inside itself. Record it and act on
-    /// the next observation — which is what the reference does, by
-    /// putting the failure on a queue its timer drains.
-    fn on_cancel_failed(&mut self, _id: OrderId, _why: &str) {}
-
-    /// The venue will send nothing further about this order.
-    ///
-    /// The end of an order's life, as distinct from a fill: a limit
-    /// order fills in pieces, and every piece but the last leaves the
-    /// order still resting and still the venue's to report on. A
-    /// strategy that forgets an order when it first fills stops
-    /// recognising the fills that follow, and the position those fills
-    /// build is held by nobody.
-    ///
-    /// Not a hypothetical. A strategy cleared its entry order on the
-    /// first partial fill; the remainder of that entry then arrived
-    /// carrying an id that matched nothing, was dropped, and each cycle
-    /// left the difference behind. Over eight hours the untracked
-    /// remainder grew to three and a half times the size the strategy
-    /// believed it held, and its take-profit covered a fifth of the
-    /// position it was supposed to close.
-    ///
-    /// So this is where an order's identity is released, and
-    /// [`Strategy::on_fill`] is where quantity is accumulated. The
-    /// reference implementation draws the same line: it keeps an order
-    /// in its lists while `is_active()` holds and removes it in the
-    /// order callback, never in the trade callback.
-    ///
-    /// `ending` separates the two ways an order can end, because they
-    /// mean opposite things: [`Ending::Filled`] says the size arrived,
-    /// [`Ending::Cancelled`] says it never will. A ladder placed on the
-    /// first is placed on a position that exists.
-    ///
-    /// Intents are allowed here — an order ending is often exactly when
-    /// the next one should be placed.
-    fn on_ended(&mut self, _id: OrderId, _ending: Ending, _out: &mut Vec<Intent>) {}
-
-    /// One historical observation, replayed before the run begins.
-    ///
-    /// **No intents can be produced here, and that is the point.** The
-    /// reference implementation warms its indicators from a day of
-    /// history and guards the whole load with a `preheating` flag that
-    /// every trading path has to remember to check. A callback that
-    /// cannot emit is the same rule enforced by the compiler instead.
-    ///
-    /// History arrives as ticks, in order, exactly as live data does, so
-    /// a strategy folds them with the code it already has — its bar
-    /// generator, its indicator windows — rather than a second path that
-    /// has to agree with the first.
-    ///
-    /// Called before [`Strategy::on_tick`] ever is, and never again.
-    ///
-    /// The default ignores history. A strategy that needs none — one
-    /// that decides from the current book — is not made to say so.
-    fn on_history(&mut self, _ctx: &Context) {}
-
-    /// One of this strategy's own fills, from a previous run.
-    ///
-    /// **No intents can be produced here**, for the same reason as
-    /// [`Strategy::on_history`]: replaying is not trading, and a
-    /// callback that cannot emit is that rule enforced by the compiler
-    /// rather than by a flag every path has to check.
-    ///
-    /// The fill carries the id this strategy issued for the order, so
-    /// an implementation recognises its own the same way it does live.
-    /// A strategy that folds this with the code it already runs ends in
-    /// the state it was in — which is the whole of what determinism
-    /// buys, spent on recovery instead of on testing.
-    ///
-    /// Without it a run can recover a *position* and not a *ladder*:
-    /// how many rungs had filled is the difference between resuming and
-    /// starting over on top of one.
-    fn on_history_fill(&mut self, _fill: &Fill, _ctx: &Context) {}
-
-    /// What this strategy is waiting for, named, for the record.
-    ///
-    /// A run that does nothing is the hardest one to explain, because
-    /// doing nothing leaves no trace: every record in the journal is
-    /// something that happened. A twelve-hour run placed no orders and
-    /// the reason — a gate whose threshold that deployment never
-    /// reached — was reachable only by reading the strategy's source,
-    /// which is the worst tool to reach for while something is going
-    /// wrong.
-    ///
-    /// Return the conditions between this strategy and its next action,
-    /// as `(name, value)`. Counters and thresholds, not prose: they are
-    /// journalled and compared across runs, and a sentence cannot be.
-    /// Typical entries are progress towards a warm-up (`bars`, `200`) or
-    /// whether a gate is currently armed (`volume_gate`, `1`).
-    ///
-    /// Called on a timer rather than per tick, so the cost is a snapshot
-    /// every thirty seconds and not a per-observation allocation.
-    ///
-    /// The default is empty: a strategy that says nothing is as
-    /// unexplainable as before, which is a choice its author makes
-    /// rather than one the framework makes for them.
-    fn waiting_on(&self) -> Vec<(&'static str, i64)> {
-        Vec::new()
-    }
-
     /// A name for reports.
     fn name(&self) -> &str;
 }
@@ -427,7 +187,6 @@ mod tests {
             if !self.done && ctx.position.is_zero() {
                 self.done = true;
                 out.push(Intent::Market {
-                    instrument: oq_types::InstrumentId::new(1),
                     id: OrderId::new(1),
                     side: Side::Buy,
                     qty: QtyLots(1),
@@ -445,7 +204,6 @@ mod tests {
     fn a_strategy_is_testable_without_a_host() {
         let mut s = BuyOnce { done: false };
         let ctx = Context {
-            instrument: oq_types::InstrumentId::new(1),
             tick: oq_engine::Tick::trades_only(Stamp::synthetic(0), 100, 100, 100),
             position: QtyLots::ZERO,
             entry: PriceTicks::ZERO,

@@ -8,11 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oq-book.workspace = true
 oq-hash.workspace = true
-oq-stats.workspace = true
 oq-types.workspace = true
-ruzstd = "0.8.2"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = "3.4"
 # For SIGTERM only. std has no signal API, and a capture that cannot
@@ -20,9 +17,6 @@ ureq = "3.4"
 # manifest. Already present transitively, so this adds no new crate.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-tungstenite = { version = "0.30", default-features = false }
 
 [lints]
 workspace = true

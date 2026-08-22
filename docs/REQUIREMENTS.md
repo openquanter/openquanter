@@ -16,13 +16,10 @@ do** and **how we will know it does it**. The sequencing lives in
 
 ## 1. Positioning
 
-**One sentence.** OpenQuanter exists so that **every cent between a backtest
-and the live run can be accounted for** — P&L you cannot explain is not P&L. To
-that end it is a deterministic, AI-native quantitative trading framework: a
-single Rust event core drives both backtesting and live trading, execution and
-margin fidelity are independently selectable, and machine learning is a
-first-class citizen rather than a bolt-on. **Those are the means; the first
-sentence is the end** — why that end, in [Why OpenQuanter exists](WHY.md).
+**One sentence.** OpenQuanter is a deterministic, AI-native quantitative
+trading framework: a single Rust event core drives both backtesting and live
+trading, execution and margin fidelity are independently selectable, and
+machine learning is a first-class citizen rather than a bolt-on.
 
 **Where it sits.** The framework space already has strong entries — a
 multi-asset Rust/Python engine with a mature message-bus architecture, a
@@ -177,25 +174,7 @@ the rest honestly.
 | FR-AI-4 | RL environments are gated on L1 fidelity: training against a low-fidelity simulator teaches models to exploit simulator artifacts. | Extended |
 | FR-AI-5 | LLM-driven research runs in a sandbox with a typed read-only tool API and a full audit log. LLM output is a *proposal*; hard limits always live in the engine. | Experimental |
 
-### 3.10 Live gap attribution — `FR-ATTRIB`
-
-This section is the requirement form of the purpose in §1. It was absent from
-this document — the README's first screen, the design pillars and roadmap M3
-all state it, and **the one document that defines acceptance did not**, which
-made it a capability with no gate.
-
-| ID | Requirement | Tier |
-|---|---|---|
-| FR-ATTRIB-1 | Every decision a live run makes, and its outcome, is journalled in a form sufficient to drive a deterministic replay. | Core |
-| FR-ATTRIB-2 | A live run can be replayed through **the same kernel** the backtest uses, producing what would have happened given the same events. | Core |
-| FR-ATTRIB-3 | The difference between the live result and the replayed result is decomposed **by cause**: slippage, queue position, funding against model, latency, fee tier, and events absent from the backtest model (partial fills, rejections, venue outages). | Core |
-| FR-ATTRIB-4 | Whatever will not decompose is reported as an **unexplained residual**, in currency and as a share of P&L. **The residual must never be silently absorbed into a named cause.** | Core |
-| FR-ATTRIB-5 | An attribution report is bound to a `RunManifest` (code, data, configuration), so that a third party can reproduce it on the same inputs. | Core |
-| FR-ATTRIB-6 | Failure to attribute — missing data, replay not possible — is reported as a failure and **must not degrade into a report showing a zero residual**. | Core |
-
----
-
-### 3.11 Operations and tooling — `FR-OPS`
+### 3.10 Operations and tooling — `FR-OPS`
 
 | ID | Requirement | Tier |
 |---|---|---|
@@ -243,16 +222,15 @@ one use among several rather than something the framework promises.
 | **G0** | Composability | Every crate builds and is usable standalone; engine crates carry zero third-party dependencies | `scripts/check-composability.sh` in CI |
 | **G1** | Core determinism | Replaying any journal reproduces outputs exactly; `(seed, commit)` reproduces any simulated scenario | Replay test suite in CI |
 | **G2** | Run-equivalence tooling | Any two runs can be compared trade by trade with every difference attributed; equality means identical time, price, quantity and side, with relative P&L error ≤ 1e-6 | `oq-parity` diff + attribution report |
-| **G3** | Backtest throughput | ≥ 8× over the interpreted/Cython baseline for a multi-year single-strategy run in throughput mode; compatibility mode need only not regress. **Measured on a strategy whose own per-observation arithmetic is negligible**, because otherwise this is not a statement about the engines: measurement showed 57.6% of a real run going into the strategy's own Python, which both sides pay alike, so a rule that computes little passes this and one that computes a lot fails it with no engine changed. A second figure on a representative strategy is reported alongside, as what a user would see | Same-machine, same-config benchmark, with the measured rule named |
+| **G3** | Backtest throughput | ≥ 8× over the interpreted/Cython baseline for a multi-year single-strategy run in throughput mode; compatibility mode need only not regress | Same-machine, same-config benchmark |
 | **G4** | Sweep throughput + statistics | 100 configurations in ≤ 30 minutes on a reference machine, with DSR and PBO emitted automatically | Sweep benchmark + statistics report |
 | **G5** | Margin fidelity | Tiered maintenance margin, mark-price liquidation paths, and funding-spike scenarios reproduce venue behavior; tail-divergence report produced | Recomputation of historical stress windows + spot-check against venue calculators |
-| **G6** | Live hot-path latency | p99 ≤ 100 µs from journal write to socket write | Histogram instrumentation. **The far boundary is not yet observable**: the HTTP client performs connect, write and read inside one call and does not report the instant bytes reach the wire, so measuring the call yields the venue's round trip — tens of milliseconds against a hundred microsecond budget. What is measured today is the in-process segment, from the journal flush returning to the client being called, and it is reported under that name rather than this gate's |
+| **G6** | Live hot-path latency | p99 ≤ 100 µs from journal write to socket write | HDR histogram instrumentation |
 | **G7** | Strategy portability | A strategy runs unchanged in compatibility mode; the same strategy in throughput mode meets G3 and re-passes G2 | Both modes benchmarked and parity-checked |
 | **G8** | HFT fidelity | L1 queue + latency + impact; L2 book reconstruction; stylized-facts test set passes | Fidelity test suite + calibration report |
 | **G9** | Inference | Single-row GBDT inference ≤ 10 µs in-process; Python/Rust prediction parity gate passes | Inference benchmark + parity test |
 | **G10** | RL environments | Vectorized batch environments with full seed propagation and reproducible training runs | Training throughput benchmark + reproduction test |
-| ~~**G11**~~ | ~~Adoption readiness~~ | **Withdrawn.** Its three clauses were a stopwatch and two restatements. "Cold start ≤ 30 minutes" measured the wrong thing — a good tool is worth more time and a bad one is not worth a minute — and measured it with the wrong instrument: one person's trial is n=1, varies more by reader and machine than by anything this project controls, and cannot be self-certified. "Public CI green" is what CI already enforces; "semantic versioning from 2.0" is a policy, and lives in [VERSIONING](VERSIONING.md). The number is kept so older references resolve and nobody assigns it again |
-| **G12** | Live gap attribution | A live run replays through the same kernel; the gap decomposes by cause; **the unexplained residual is reported alongside the bound `RunManifest`**. **Threshold deliberately unset** — it is fixed by the first real measurement rather than guessed now | Live journal replay + attribution report |
+| **G11** | Adoption readiness | Cold start to first backtest ≤ 30 minutes; public CI green; semantic versioning from 2.0 | External-user cold-start trial |
 
 ---
 

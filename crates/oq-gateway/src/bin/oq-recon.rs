@@ -31,7 +31,6 @@
 
 use std::time::Duration;
 
-use oq_gateway::record::Record;
 use oq_gateway::{
     Binance, Credentials, Expectation, ExpectedLeg, Part, SnapshotBuilder, Tolerance, Watcher,
     reconcile,
@@ -43,19 +42,13 @@ fn main() -> std::process::ExitCode {
         eprintln!(
             "usage: oq-recon <SYMBOL> [--expect-long QTY@PRICE] [--expect-short QTY@PRICE]\n\
              \x20                      [--order CLIENT_ID]... [--interval SECS] [--testnet]\n\
-             \x20      oq-recon <SYMBOL> --watch [--interval SECS] [--testnet]\n\
-             \x20      oq-recon <SYMBOL> --record FILE      [--testnet]\n\
-             \x20      oq-recon <SYMBOL> --against FILE     [--testnet]\n\n\
+             \x20      oq-recon <SYMBOL> --watch [--interval SECS] [--testnet]\n\n\
              Reads the account. Places nothing.\n\n\
              Default is a gate: it compares against the expectation you give and \n\
              exits non-zero on a position that does not match.\n\
              --watch observes instead, reporting what changes between reads and \n\
              never exiting on a difference — a gate that stops at the first one \n\
              sees a single event and then nothing.\n\n\
-             --record writes the account to a file; --against reads one back \n\
-             and exits non-zero on any difference. That pair is the cutover \n\
-             procedure's steps 2 and 5, which were otherwise an operator \n\
-             comparing two terminal outputs by eye with the position naked.\n\n\
              Exits 0 matched, 1 diverged, 2 bad arguments, 3 could not read \n\
              the account. 3 is not 0: not checking is not the same as passing."
         );
@@ -65,10 +58,6 @@ fn main() -> std::process::ExitCode {
     let symbol = args[0].to_uppercase();
     let mut expected = Expectation::default();
     let mut interval: Option<u64> = None;
-    // Where to write the account as it is now.
-    let mut record_to: Option<String> = None;
-    // A record to compare this reading against.
-    let mut against: Option<String> = None;
     let mut watching = false;
     let mut base = Binance::MAINNET;
 
@@ -104,22 +93,6 @@ fn main() -> std::process::ExitCode {
                 expected.working_orders.push(id.clone());
                 i += 1;
             }
-            "--record" => {
-                let Some(v) = args.get(i + 1) else {
-                    eprintln!("--record needs a path to write to");
-                    return std::process::ExitCode::from(2);
-                };
-                record_to = Some(v.clone());
-                i += 1;
-            }
-            "--against" => {
-                let Some(v) = args.get(i + 1) else {
-                    eprintln!("--against needs a path to read");
-                    return std::process::ExitCode::from(2);
-                };
-                against = Some(v.clone());
-                i += 1;
-            }
             "--interval" => {
                 let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) else {
                     eprintln!("--interval needs a number of seconds");
@@ -134,13 +107,6 @@ fn main() -> std::process::ExitCode {
             }
         }
         i += 1;
-    }
-
-    if record_to.is_some() && against.is_some() {
-        // Writing and comparing in one run would compare a record
-        // against itself, which passes always and proves nothing.
-        eprintln!("--record and --against are separate steps; run one, then the other");
-        return std::process::ExitCode::from(2);
     }
 
     let creds = match Credentials::from_env() {
@@ -165,26 +131,12 @@ fn main() -> std::process::ExitCode {
                 // Reported because a signature failure caused by drift
                 // reads as an authentication problem, and the number
                 // that would have explained it is this one.
-                eprintln!("venue clock offset: {offset} ms (round-trip midpoint)");
-                let round_trip = venue.round_trip_ms();
-                eprintln!("venue round trip: {round_trip} ms");
+                eprintln!("venue clock offset: {offset} ms");
                 if offset < -1_000 {
                     eprintln!(
                         "  the local clock is more than a second ahead of the venue; \
                          Binance allows only 1000 ms in that direction whatever \
                          recvWindow says, so signed requests may be refused"
-                    );
-                }
-                // Reported separately because it is a different fault
-                // with a different fix, and because the venue answers it
-                // with -1021, which names the clock. A request signed
-                // here arrives half a round trip later, and the venue
-                // measures the age of that timestamp against recvWindow.
-                if round_trip > 500 {
-                    eprintln!(
-                        "  the round trip to the venue is {round_trip} ms; a signed \
-                         request arrives with a timestamp already that old, and a \
-                         -1021 from here is the link rather than the clock"
                     );
                 }
                 synced = true;
@@ -215,22 +167,14 @@ fn main() -> std::process::ExitCode {
                 // A partial read is never diffed. Everything it had not
                 // reached would look like it had vanished from the venue.
                 watcher.incomplete();
-                // Stamped, and on the venue's clock — the same one every
-                // change line carries. Failures were the only lines here
-                // without a time, which put the record of an outage in
-                // the one form that cannot be lined up against anything
-                // else that happened. Fifteen hours of watching produced
-                // thirty-nine consecutive failed reads whose duration the
-                // log could not state.
-                let at = venue.venue_time_ms();
                 for (part, why) in &failed {
                     // The reason, not just the name. Unattended for weeks,
                     // the difference between a rate limit and a dropped
                     // link is the difference between backing off and
                     // fixing the network — and it is only in this string.
-                    eprintln!("  [{at}] read failed: {} — {why}", part.name());
+                    eprintln!("read failed: {} — {why}", part.name());
                 }
-                eprintln!("  [{at}] incomplete read, nothing compared");
+                eprintln!("incomplete read, nothing compared");
                 if interval.is_none() {
                     // Single-shot is the startup-gate mode. Exiting zero
                     // here would report "the account matches" on the
@@ -239,60 +183,6 @@ fn main() -> std::process::ExitCode {
                 }
             }
             Ok(snapshot) => {
-                // Recording and comparing come first, and both exit: a
-                // cutover step is a single question with a single
-                // answer, and a tool that then went on to watch would
-                // leave an operator waiting at the one point in the
-                // procedure where the position is naked.
-                if let Some(path) = &record_to {
-                    let record = Record::of(&snapshot);
-                    return match std::fs::write(path, record.render()) {
-                        Ok(()) => {
-                            println!("{}", describe(&snapshot));
-                            println!("recorded to {path}");
-                            std::process::ExitCode::SUCCESS
-                        }
-                        Err(e) => {
-                            // 3, not 1. The account was read fine; the
-                            // record is what does not exist, and a
-                            // cutover must not proceed on the strength
-                            // of a record nobody wrote.
-                            eprintln!("could not write {path}: {e}");
-                            std::process::ExitCode::from(3)
-                        }
-                    };
-                }
-                if let Some(path) = &against {
-                    let text = match std::fs::read_to_string(path) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            eprintln!("could not read {path}: {e}");
-                            return std::process::ExitCode::from(3);
-                        }
-                    };
-                    let recorded = match Record::parse(&text) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("{path} is not a record: {e}");
-                            return std::process::ExitCode::from(3);
-                        }
-                    };
-                    let now = Record::of(&snapshot);
-                    let differences = recorded.differences(&now);
-                    println!("{}", describe(&snapshot));
-                    if differences.is_empty() {
-                        println!(
-                            "matches {path}, recorded {} ms ago",
-                            now.read_at_ms.saturating_sub(recorded.read_at_ms)
-                        );
-                        return std::process::ExitCode::SUCCESS;
-                    }
-                    println!("{} difference(s) from {path}:", differences.len());
-                    for d in &differences {
-                        println!("  - {d}");
-                    }
-                    return std::process::ExitCode::from(1);
-                }
                 if watching {
                     let first = watcher.tally.reads == 0;
                     let changes = watcher.observe(&snapshot);
@@ -337,33 +227,6 @@ fn main() -> std::process::ExitCode {
 /// costs nothing at the call site and everything at 3am, when the log
 /// says a part is missing and cannot say whether the venue refused, the
 /// link dropped, or the request was throttled.
-/// How many times a part is attempted before a read is called
-/// incomplete.
-///
-/// Three, not more. The venue's transient failures cleared on a retry
-/// in the observed incident; a longer ladder would mostly add delay to
-/// the reads that were never going to succeed.
-const RETRIES: usize = 3;
-
-/// One part of a snapshot, so the retry loop can be written once rather
-/// than three times.
-enum Fetched {
-    Account(oq_gateway::AccountSnapshot),
-    Positions(Vec<oq_gateway::PositionSnapshot>),
-    OpenOrders(Vec<oq_gateway::OpenOrder>),
-}
-
-/// Whether the venue is likely to answer differently if asked again.
-///
-/// Only the venue's own "I could not answer" codes, and transport
-/// failures. A refusal — a bad signature, a symbol that does not exist,
-/// a permission the key does not have — is final, and retrying it wastes
-/// the window that a startup gate has.
-fn transient(e: &oq_gateway::VenueError) -> bool {
-    let text = e.to_string();
-    text.contains("-1007") || text.contains("-1000") || text.contains("Transport")
-}
-
 fn read(
     venue: &Binance,
     symbol: &str,
@@ -371,63 +234,17 @@ fn read(
     let mut b = SnapshotBuilder::new(symbol);
     let mut why: Vec<(Part, String)> = Vec::new();
 
-    // Each part is retried past the venue's own transient failures.
-    //
-    // Measured against Binance testnet from one host over 28 hours:
-    // 1,581 of 7,140 reads came back incomplete, and every one of them
-    // was the venue answering rather than the link failing —
-    // 2,702 `-1007 Timeout waiting for response from backend server`
-    // and 1,537 `-1000 An unknown error occurred`. Both are the venue
-    // saying its own backend did not answer in time.
-    //
-    // Without a retry a 22% failure rate means a fifth of a watch's
-    // reads compare nothing, and a startup gate fails on a venue that
-    // was merely busy. With one, the reason is still reported — the
-    // evidence of a venue struggling is worth keeping, and a retry that
-    // hid it would have hidden a real incident — but a read that
-    // succeeds on the second attempt is a read.
-    let mut attempts = 0usize;
-    for part in [Part::Account, Part::Positions, Part::OpenOrders] {
-        for attempt in 1..=RETRIES {
-            attempts += 1;
-            let outcome = match part {
-                Part::Account => venue.account().map(Fetched::Account),
-                Part::Positions => venue.positions(symbol).map(Fetched::Positions),
-                Part::OpenOrders => venue.open_orders(symbol).map(Fetched::OpenOrders),
-            };
-            match outcome {
-                Ok(Fetched::Account(a)) => {
-                    b = b.account(a);
-                    break;
-                }
-                Ok(Fetched::Positions(p)) => {
-                    b = b.positions(p);
-                    break;
-                }
-                Ok(Fetched::OpenOrders(o)) => {
-                    b = b.open_orders(o);
-                    break;
-                }
-                Err(e) => {
-                    if attempt == RETRIES || !transient(&e) {
-                        // A refusal that will not change is not retried:
-                        // a bad signature fails identically every time,
-                        // and three attempts at it is three times the
-                        // delay for the same answer.
-                        why.push((part, e.to_string()));
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(200 * attempt as u64));
-                }
-            }
-        }
+    match venue.account() {
+        Ok(a) => b = b.account(a),
+        Err(e) => why.push((Part::Account, e.to_string())),
     }
-    if attempts > 3 {
-        // More attempts than parts means the venue needed asking twice.
-        // Worth a line: a venue that answers on the second attempt is
-        // still a venue that did not answer on the first, and the trend
-        // in that number is what says whether it is getting worse.
-        eprintln!("  {attempts} request(s) for 3 parts");
+    match venue.positions(symbol) {
+        Ok(p) => b = b.positions(p),
+        Err(e) => why.push((Part::Positions, e.to_string())),
+    }
+    match venue.open_orders(symbol) {
+        Ok(o) => b = b.open_orders(o),
+        Err(e) => why.push((Part::OpenOrders, e.to_string())),
     }
 
     b.seal().map_err(|missing| explain(&missing, why))
