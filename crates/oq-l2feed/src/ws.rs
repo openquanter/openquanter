@@ -31,22 +31,7 @@ pub struct WsSource {
     /// connection and every reconnection, which is precisely the kind of
     /// small, regular loss that never shows up in a total.
     pending: VecDeque<Vec<u8>>,
-    /// How long silence may run before this end proves it is alive.
-    /// `None` on a venue that drives its own keepalive.
-    keepalive: Option<Duration>,
-    /// Consecutive silent reads. Reset by any frame at all, a pong
-    /// included, so this counts genuine silence rather than quiet market
-    /// data.
-    silent_rounds: u32,
 }
-
-/// How many silent rounds may pass before the connection is called dead.
-///
-/// A keepalive that is answered resets the count, so reaching this means
-/// nothing came back from several pings — a socket that is open and no
-/// longer carrying anything, which is the failure a bounded wait exists
-/// to turn into a reconnect.
-const SILENT_ROUNDS_ALLOWED: u32 = 3;
 
 impl MessageSource for WsSource {
     fn next_message(&mut self) -> io::Result<Vec<u8>> {
@@ -54,41 +39,7 @@ impl MessageSource for WsSource {
             return Ok(buffered);
         }
         loop {
-            let message = match self.socket.read() {
-                Ok(m) => m,
-                Err(e) if self.keepalive.is_some() && is_read_timeout(&e) => {
-                    self.silent_rounds += 1;
-                    if self.silent_rounds > SILENT_ROUNDS_ALLOWED {
-                        return Err(io::Error::other(
-                            "no data and no answer to a keepalive; treating the connection as dead",
-                        ));
-                    }
-                    // Silence on a quiet channel is ordinary. Say so, and
-                    // keep waiting: the alternative is a reconnect every
-                    // keepalive period and a gap in the archive each time.
-                    self.socket
-                        .send(Message::Ping(Vec::new().into()))
-                        .map_err(io::Error::other)?;
-                    continue;
-                }
-                // A read timeout keeps its kind. Wrapping it in
-                // `io::Error::other` erases `WouldBlock`, and a caller
-                // that polls with a short timeout then cannot tell "no
-                // data this instant" from "the connection is gone" — so
-                // it drops a healthy socket and opens another, once per
-                // quiet interval. Measured on a real feed: fourteen
-                // reconnections in two minutes on a contract that was
-                // simply not trading.
-                //
-                // The capture loop is unaffected: it counts any error as
-                // a disconnect without inspecting the kind, which is the
-                // right reading for the long timeout it uses.
-                Err(e) if is_read_timeout(&e) => {
-                    return Err(io::Error::new(io::ErrorKind::WouldBlock, e.to_string()));
-                }
-                Err(e) => return Err(io::Error::other(e)),
-            };
-            self.silent_rounds = 0;
+            let message = self.socket.read().map_err(io::Error::other)?;
             match message {
                 Message::Text(text) => return Ok(text.as_bytes().to_vec()),
                 Message::Binary(bytes) => return Ok(bytes.to_vec()),
@@ -145,7 +96,6 @@ impl WsConnector {
                 url: url.into(),
                 subscribe: Vec::new(),
                 ack: AckPolicy::None,
-                keepalive: None,
             },
             read_timeout,
         )
@@ -166,19 +116,12 @@ impl Connector for WsConnector {
                 .map_err(io::Error::other)?;
         }
 
-        let keepalive = self.transport.keepalive;
         let mut source = WsSource {
             socket,
             pending: VecDeque::new(),
-            keepalive,
-            silent_rounds: 0,
         };
         source.confirm(&self.transport.ack)?;
-        // The read has to wake up often enough to send the keepalive,
-        // so a venue that wants one shortens the wait rather than
-        // lengthening its own tolerance.
-        source
-            .set_read_timeout(keepalive.map_or(self.read_timeout, |k| k.min(self.read_timeout)))?;
+        source.set_read_timeout(self.read_timeout)?;
         Ok(source)
     }
 }
@@ -240,16 +183,6 @@ impl WsSource {
                     return Ok(());
                 }
                 Step::ConfirmedDiscarding => return Ok(()),
-                Step::Rejected => {
-                    // Reported now, with the venue's own words, rather
-                    // than waited out. A refusal will not become an
-                    // acceptance, and it is not data: queueing it would
-                    // write the error frame into the archive.
-                    return Err(io::Error::other(format!(
-                        "venue refused the subscription: {}",
-                        String::from_utf8_lossy(&payload).trim()
-                    )));
-                }
                 Step::KeepWaiting => {
                     // Data that arrived before the acknowledgement is
                     // still data.
@@ -268,8 +201,6 @@ enum Step {
     /// Subscription confirmed by a message that is only an
     /// acknowledgement.
     ConfirmedDiscarding,
-    /// The venue said no. Terminal, and not data.
-    Rejected,
     /// Not the acknowledgement; keep the message and keep waiting.
     KeepWaiting,
 }
@@ -282,37 +213,14 @@ fn classify(policy: &AckPolicy, payload: &[u8]) -> Step {
     match policy {
         AckPolicy::None => Step::ConfirmedKeeping,
         AckPolicy::FirstDataIsAck { .. } => Step::ConfirmedKeeping,
-        AckPolicy::Explicit {
-            marker,
-            reject_marker,
-            ..
-        } => {
+        AckPolicy::Explicit { marker, .. } => {
             if contains(payload, marker) {
                 Step::ConfirmedDiscarding
-            } else if contains(payload, reject_marker) {
-                Step::Rejected
             } else {
                 Step::KeepWaiting
             }
         }
     }
-}
-
-/// Whether a read failed because nothing arrived in time, as opposed to
-/// because the connection broke. Only the first is silence.
-/// Exposed for a test in another file; not part of the public contract.
-#[doc(hidden)]
-#[must_use]
-pub fn is_read_timeout_for_test(e: &tungstenite::Error) -> bool {
-    is_read_timeout(e)
-}
-
-fn is_read_timeout(e: &tungstenite::Error) -> bool {
-    matches!(
-        e,
-        tungstenite::Error::Io(io)
-            if io.kind() == io::ErrorKind::WouldBlock || io.kind() == io::ErrorKind::TimedOut
-    )
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -424,7 +332,6 @@ mod tests {
     fn an_explicit_ack_is_consumed_but_data_before_it_is_not() {
         let policy = AckPolicy::Explicit {
             marker: b"\"event\":\"subscribe\"".to_vec(),
-            reject_marker: b"\"event\":\"error\"".to_vec(),
             deadline: DEADLINE,
         };
         assert_eq!(
@@ -436,38 +343,6 @@ mod tests {
             classify(&policy, br#"{"arg":{},"data":[{"px":"1"}]}"#),
             Step::KeepWaiting,
             "data arriving before the ack must survive the wait"
-        );
-    }
-
-    /// A venue that answers explicitly answers both ways. Treating the
-    /// refusal as data waits out the whole deadline and then reports
-    /// that the subscription "was accepted but delivered nothing" — the
-    /// opposite of what happened — and files the error frame in the
-    /// archive on the way.
-    #[test]
-    fn an_explicit_refusal_is_neither_data_nor_something_to_wait_out() {
-        let policy = AckPolicy::Explicit {
-            marker: b"\"event\":\"subscribe\"".to_vec(),
-            reject_marker: b"\"event\":\"error\"".to_vec(),
-            deadline: DEADLINE,
-        };
-        let refusal = br#"{"event":"error","msg":"Wrong URL or channel:books,instId:BTC-USDTT-SWAP doesn't exist.","code":"60018"}"#;
-        assert_eq!(classify(&policy, refusal), Step::Rejected);
-    }
-
-    /// A venue with no distinct refusal to look for keeps the old
-    /// behaviour: an empty marker must not match every message and turn
-    /// the first book update into a refusal.
-    #[test]
-    fn an_empty_reject_marker_matches_nothing() {
-        let policy = AckPolicy::Explicit {
-            marker: b"\"event\":\"subscribe\"".to_vec(),
-            reject_marker: Vec::new(),
-            deadline: DEADLINE,
-        };
-        assert_eq!(
-            classify(&policy, br#"{"arg":{},"data":[{"px":"1"}]}"#),
-            Step::KeepWaiting
         );
     }
 
