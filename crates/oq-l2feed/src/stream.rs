@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::day::Window;
+use crate::day::UtcDay;
 
 /// Which stream a capture covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,17 +40,16 @@ impl StreamId {
         root.join(&self.venue).join(&self.symbol).join(&self.stream)
     }
 
-    /// Path of the capture file for `window`.
+    /// Path of the capture file for `day`.
     #[must_use]
-    pub fn file_for(&self, root: &Path, window: Window) -> PathBuf {
-        self.directory(root).join(window.relative_path("oqcap"))
+    pub fn file_for(&self, root: &Path, day: UtcDay) -> PathBuf {
+        self.directory(root).join(format!("{day}.oqcap"))
     }
 
-    /// Path of the manifest for `window`.
+    /// Path of the manifest for `day`.
     #[must_use]
-    pub fn manifest_for(&self, root: &Path, window: Window) -> PathBuf {
-        self.directory(root)
-            .join(window.relative_path("manifest.json"))
+    pub fn manifest_for(&self, root: &Path, day: UtcDay) -> PathBuf {
+        self.directory(root).join(format!("{day}.manifest.json"))
     }
 }
 
@@ -84,35 +83,17 @@ mod tests {
 
     #[test]
     fn paths_follow_the_documented_layout() {
-        use crate::day::{Rotation, UtcDay};
         let stream = StreamId::new("venue", "SYM", "depth");
         let root = Path::new("/archive/raw");
-
-        let daily = Window {
-            day: UtcDay(20_000),
-            hour: None,
-        };
         assert!(
             stream
-                .file_for(root, daily)
+                .file_for(root, UtcDay(20_000))
                 .ends_with("venue/SYM/depth/2024-10-04.oqcap")
         );
         assert!(
             stream
-                .manifest_for(root, daily)
+                .manifest_for(root, UtcDay(20_000))
                 .ends_with("venue/SYM/depth/2024-10-04.manifest.json")
-        );
-
-        // Hourly groups files in a directory per day, so a day stays a
-        // browsable unit even when it is many files.
-        let hourly = Window::from_nanos(
-            20_000 * 86_400_000_000_000 + 5 * 3_600_000_000_000,
-            Rotation::Hourly,
-        );
-        assert!(
-            stream
-                .file_for(root, hourly)
-                .ends_with("venue/SYM/depth/2024-10-04/05.oqcap")
         );
     }
 }

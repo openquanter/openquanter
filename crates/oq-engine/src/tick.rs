@@ -8,30 +8,6 @@
 //! price point and every order that would have been touched by an
 //! intra-window excursion is missed.
 //!
-//! # `high` and `low` must belong to *this* window
-//!
-//! The matcher treats them as the range an order could have been touched
-//! at during this window, and nothing checks that claim — it cannot be
-//! checked from a single record. A feed that instead reports a *running*
-//! extreme, over the current minute or session or day, will look correct
-//! in every respect and be wrong in the only way that matters: an order
-//! resting between the last price and a stale extreme fills against a
-//! price the market is no longer offering, and the fill is silent.
-//!
-//! This is not a hypothetical failure mode. A capture pipeline supplying
-//! per-minute running extremes was replayed against this engine, and a
-//! take-profit filled 1506 points above the market, closing a position
-//! that should have stayed open. Every later decision descended from it.
-//! The tell, once looked for, was obvious: `high` held one value across
-//! consecutive records while `low` moved — a running maximum in a
-//! falling market keeps the number it set minutes ago.
-//!
-//! If a source reports running extremes, reduce them to per-window ones
-//! before they reach here. The rule is short: a cumulative extreme
-//! belongs to the window that *moved* it, and every other window can
-//! claim no more than its own last price. Reconstruct at ingest, so the
-//! field means what its name says everywhere downstream.
-//!
 //! Zero has a meaning here, and it is "absent" rather than "free":
 //! a captured record with no top-of-book carries `bid = ask = 0`, and
 //! the matching rules fall back to trade prices. This convention comes
@@ -45,29 +21,11 @@ use oq_types::{PriceTicks, QtyLots, Stamp};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Tick {
     pub stamp: Stamp,
-    /// Last traded price, carried forward when this window had no trade
-    /// of its own.
-    ///
-    /// **Never zero in a published tick**, and alone among the prices
-    /// here in that. The others say "zero when unknown"; this one cannot,
-    /// because the kernel assigns `mark = tick.last` without a guard, and
-    /// a mark of zero is not an absent price — it is a position marked at
-    /// nothing. Under a leverage of 1× or more that is a liquidation, and
-    /// below it a minimum-equity figure understated by exactly the
-    /// position's notional, with nothing to say the number is unusable.
-    ///
-    /// So a producer that has no price does not publish. `oq-ingest`
-    /// carries the previous price across quiet windows and emits nothing
-    /// at all before the first trade; anything else building ticks owes
-    /// the same. This was not true until it was measured: a twelve-hour
-    /// live run carried `last = 0` on 56.4% of its ticks.
+    /// Last traded price in the window.
     pub last: PriceTicks,
-    /// Highest price reached inside **this** window; zero when unknown.
-    ///
-    /// Not a running high carried over from earlier windows — see the
-    /// module docs for what that costs.
+    /// Highest price reached inside the window; zero when unknown.
     pub high: PriceTicks,
-    /// Lowest price reached inside **this** window; zero when unknown.
+    /// Lowest price reached inside the window; zero when unknown.
     pub low: PriceTicks,
     /// Best bid at the end of the window; zero when unknown.
     pub bid: PriceTicks,

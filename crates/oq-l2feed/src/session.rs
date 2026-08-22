@@ -22,11 +22,11 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::frame::Record;
 use crate::stream::{Software, StreamId};
+use crate::venue::binance_event_time_ns;
 use crate::writer::CaptureWriter;
 
 /// How the session decides when to stop.
@@ -60,14 +60,6 @@ pub struct SessionConfig {
     pub reconnect_wait: Duration,
     /// Give up after this many consecutive failed connections.
     pub max_consecutive_failures: u32,
-    /// How to read the exchange event time out of a payload.
-    ///
-    /// The loop is otherwise indifferent to what a venue sends, and this
-    /// is the one exception: a record has to be filed under the right
-    /// window. Supplied by the venue rather than called directly,
-    /// because a loop that names one exchange is not a loop that can
-    /// serve another — and this one did, until the seam existed.
-    pub event_time_ns: fn(&[u8]) -> Option<i64>,
 }
 
 impl SessionConfig {
@@ -91,15 +83,7 @@ impl SessionConfig {
             flush_interval: Duration::from_secs(5),
             reconnect_wait: Duration::from_secs(2),
             max_consecutive_failures: 10,
-            event_time_ns: |_| None,
         }
-    }
-
-    /// Read event times the way `venue` does.
-    #[must_use]
-    pub fn with_event_time(mut self, f: fn(&[u8]) -> Option<i64>) -> Self {
-        self.event_time_ns = f;
-        self
     }
 }
 
@@ -112,62 +96,6 @@ pub enum StopReason {
     DiskFloor,
     /// Too many consecutive connection failures.
     ConnectionLost,
-    /// SIGTERM or SIGINT arrived and the capture wound down on purpose.
-    Signalled,
-}
-
-/// Set by the signal handler, read by the capture loops.
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-
-/// True once a termination signal has been seen.
-pub fn shutdown_requested() -> bool {
-    SHUTDOWN.load(Ordering::Relaxed)
-}
-
-extern "C" fn on_signal(_sig: i32) {
-    // The only thing a signal handler may safely do here. Everything
-    // that actually matters -- flushing, sealing, fsync -- happens on
-    // the capture thread once it observes this.
-    SHUTDOWN.store(true, Ordering::Relaxed);
-}
-
-/// Arrange for SIGTERM and SIGINT to stop the capture cleanly.
-///
-/// Without this, the default disposition kills the process where it
-/// stands. Three things are lost every time, all of them silently:
-///
-/// * the `BufWriter`'s contents, up to the buffer size or the flush
-///   interval -- real records, gone;
-/// * the manifest, so the archive holds a file of unknown completeness
-///   and no way to tell a quiet market from a truncated capture;
-/// * the final `sync_all`, leaving the tail in the page cache where a
-///   host failure takes it.
-///
-/// Restarts are routine -- deploys, config changes, a watchdog
-/// replacing a dead stream -- so "only on shutdown" is not rare.
-///
-/// # Panics
-///
-/// Panics if the handler cannot be installed, which would mean the
-/// process cannot shut down cleanly and should not pretend otherwise.
-// The workspace warns on `unsafe_code` so that every use has to argue
-// for itself. This one: std exposes no signal API, and the alternative
-// to installing a handler is losing the buffer, the manifest and the
-// fsync on every restart. The unsafety is confined to one libc call
-// whose handler does a single relaxed atomic store.
-#[allow(unsafe_code)]
-pub fn install_signal_handlers() {
-    #[cfg(unix)]
-    // SAFETY: `on_signal` is async-signal-safe -- it performs a single
-    // relaxed atomic store and calls nothing.
-    unsafe {
-        for sig in [libc::SIGTERM, libc::SIGINT] {
-            assert!(
-                libc::signal(sig, on_signal as *const () as libc::sighandler_t) != libc::SIG_ERR,
-                "cannot install handler for signal {sig}"
-            );
-        }
-    }
 }
 
 /// What a session did.
@@ -185,14 +113,6 @@ pub struct SessionStats {
     pub elapsed: Duration,
     /// Why it stopped.
     pub stop: StopReason,
-    /// What the last failed connection attempt said, if one failed.
-    ///
-    /// `ConnectionLost` alone does not distinguish a venue that refused
-    /// the subscription from a network that went away, and those want
-    /// opposite responses: one is a typo in a symbol, the other is a
-    /// reason to wait. The venue usually says which in as many words,
-    /// and dropping the error threw that away.
-    pub last_error: Option<String>,
 }
 
 impl SessionStats {
@@ -305,7 +225,6 @@ pub fn run_with_clock<C: Connector, K: Clock>(
         outage: Duration::ZERO,
         elapsed: Duration::ZERO,
         stop: StopReason::DurationElapsed,
-        last_error: None,
     };
     let mut consecutive_failures = 0u32;
     let mut since_disk_check = 0u64;
@@ -314,10 +233,6 @@ pub fn run_with_clock<C: Connector, K: Clock>(
     writer.append_session_start(clock.now_ns())?;
 
     'outer: loop {
-        if shutdown_requested() {
-            stats.stop = StopReason::Signalled;
-            break;
-        }
         if let Some(limit) = config.duration
             && started.elapsed() >= limit
         {
@@ -331,9 +246,8 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 consecutive_failures = 0;
                 source
             }
-            Err(e) => {
+            Err(_) => {
                 consecutive_failures += 1;
-                stats.last_error = Some(e.to_string());
                 if consecutive_failures >= config.max_consecutive_failures {
                     stats.stop = StopReason::ConnectionLost;
                     break;
@@ -350,22 +264,12 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 stats.stop = StopReason::DurationElapsed;
                 break 'outer;
             }
-            // Checked here as well as in the outer loop: a healthy
-            // stream never leaves this loop, so an outer-loop-only
-            // check would wait for a disconnect that may never come.
-            // A silent stream still blocks in next_message() until its
-            // read timeout, but a stream with nothing to say also has
-            // nothing buffered to lose.
-            if shutdown_requested() {
-                stats.stop = StopReason::Signalled;
-                break 'outer;
-            }
 
             match source.next_message() {
                 Ok(payload) => {
                     let local_ts = clock.now_ns();
                     let exch_ts =
-                        (config.event_time_ns)(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
+                        binance_event_time_ns(&payload).unwrap_or(crate::frame::NO_EXCH_TS);
                     stats.payload_bytes += payload.len() as u64;
                     writer.append(&Record {
                         kind: crate::frame::Kind::Payload,
@@ -518,10 +422,9 @@ mod tests {
         assert_eq!(stats.gaps, 2, "each closed connection left a marker");
         assert_eq!(stats.stop, StopReason::ConnectionLost);
 
-        let bytes = std::fs::read(stream.file_for(
-            &root,
-            crate::day::Window::from_nanos(1_786_780_800_000_000_000, crate::day::Rotation::Daily),
-        ))
+        let bytes = std::fs::read(
+            stream.file_for(&root, crate::UtcDay::from_nanos(1_786_780_800_000_000_000)),
+        )
         .expect("read");
         let (records, remainder) = decode_all(&bytes).expect("decode");
         assert_eq!(remainder, 0);
@@ -626,10 +529,7 @@ mod tests {
         // loses messages that were received, so nothing marks them
         // missing, and an empty file looks the same as a dead feed.
         let (root, stream, mut writer) = setup("timedflush");
-        let path = stream.file_for(
-            &root,
-            crate::day::Window::from_nanos(1_786_780_800_000_000_000, crate::day::Rotation::Daily),
-        );
+        let path = stream.file_for(&root, crate::UtcDay::from_nanos(1_786_780_800_000_000_000));
         let seen = std::rc::Rc::new(std::cell::Cell::new(0u64));
         let mut connector = WatchingConnector {
             messages: (0..3)
@@ -672,7 +572,6 @@ mod tests {
             outage: Duration::ZERO,
             elapsed: Duration::from_secs(3_600),
             stop: StopReason::DurationElapsed,
-            last_error: None,
         };
         // 3600 bytes in an hour is 86_400 bytes a day.
         assert_eq!(stats.projected_bytes_per_day(), 86_400);

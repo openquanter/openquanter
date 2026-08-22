@@ -1,6 +1,6 @@
 [package]
 name = "oq-core"
-version.workspace = true
+version = "0.0.1"
 description = "Deterministic event core for the OpenQuanter trading framework: sequencer, kernel, and recovery"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oq-engine.workspace = true
-oq-journal.workspace = true
-oq-margin.workspace = true
-oq-types.workspace = true
+oq-engine = { path = "../oq-engine", version = "0.0.1" }
+oq-journal = { path = "../oq-journal", version = "0.0.1" }
+oq-margin = { path = "../oq-margin", version = "0.0.1" }
+oq-types = { path = "../oq-types", version = "0.0.1" }
 
 [lints]
 workspace = true
