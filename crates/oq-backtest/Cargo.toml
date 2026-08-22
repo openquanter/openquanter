@@ -11,8 +11,6 @@ repository.workspace = true
 oq-core.workspace = true
 oq-engine.workspace = true
 oq-margin.workspace = true
-oq-stats.workspace = true
-oq-strategy.workspace = true
 oq-types.workspace = true
 
 [lints]

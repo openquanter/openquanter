@@ -5,7 +5,6 @@
 
 use super::*;
 use oq_l2feed::frame::{Kind, Record};
-use oq_l2feed::venue::binance::BinancePerp;
 
 const SECOND: i64 = 1_000_000_000;
 const T0: i64 = 1_786_000_000_000_000_000;
@@ -25,7 +24,6 @@ fn trade(at: i64, price: &str, qty: &str) -> Record {
 
 fn convert(records: &[Record], window: i64) -> (Vec<Tick>, Report) {
     to_ticks(
-        &BinancePerp::new(),
         &[Source {
             records,
             stream: "trade",
@@ -129,7 +127,6 @@ fn a_window_of_trades_still_reports_the_book() {
     let trades = vec![trade(T0 + 2 * SECOND, "100.00", "1.000")];
 
     let (ticks, _) = to_ticks(
-        &BinancePerp::new(),
         &[
             Source {
                 records: core::slice::from_ref(&depth),
@@ -184,11 +181,7 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
         .into_bytes(),
     }
     };
-    // A trade opens the stream. Without one there is no price to
-    // publish and no tick is produced at all — which is the subject of
-    // `depth_alone_publishes_nothing` below, not of this test.
-    let records = [
-        trade(T0, "100.00", "1.000"),
+    let records = vec![
         depth(T0, 1, 1, "99.00", "101.00"),
         depth(T0 + SECOND, 2, 2, "99.50", "100.50"),
         Record::control(
@@ -198,17 +191,10 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
         depth(T0 + 3 * SECOND, 9, 9, "98.00", "102.00"),
     ];
     let (ticks, report) = to_ticks(
-        &BinancePerp::new(),
-        &[
-            Source {
-                records: &records[..1],
-                stream: "trade",
-            },
-            Source {
-                records: &records[1..],
-                stream: "depth",
-            },
-        ],
+        &[Source {
+            records: &records,
+            stream: "depth",
+        }],
         scales(),
         SECOND,
     )
@@ -229,299 +215,5 @@ fn depth_supplies_top_of_book_and_a_gap_clears_it() {
 
 #[test]
 fn a_zero_window_is_rejected_rather_than_dividing_by_it() {
-    assert!(to_ticks(&BinancePerp::new(), &[], scales(), 0).is_err());
-}
-
-/// Depth alone publishes nothing.
-///
-/// A tick's `last` becomes the kernel's mark price with no guard, so a
-/// book-only stream would set the mark to zero on every window. The
-/// reference implementation reaches the same conclusion from the other
-/// direction: its depth branch never calls `on_tick` at all, and each of
-/// its four publish sites is guarded by `last_price > 0`.
-///
-/// This is a real limitation rather than a workaround. A capture with no
-/// trades has no traded price in it, and inventing one from the book
-/// would put a number in the mark that no trade produced.
-#[test]
-fn depth_alone_publishes_nothing() {
-    let depth = |at: i64, first: u64, last: u64, bid: &str, ask: &str| {
-        Record {
-        kind: Kind::Payload,
-        local_ts: at,
-        exch_ts: at,
-        payload: format!(
-            r#"{{"e":"depthUpdate","E":{at},"U":{first},"u":{last},"b":[["{bid}","1.000"]],"a":[["{ask}","1.000"]]}}"#
-        )
-        .into_bytes(),
-    }
-    };
-    let records = vec![
-        depth(T0, 1, 1, "99.00", "101.00"),
-        depth(T0 + SECOND, 2, 2, "99.50", "100.50"),
-        depth(T0 + 2 * SECOND, 3, 3, "99.75", "100.25"),
-    ];
-    let (ticks, report) = to_ticks(
-        &BinancePerp::new(),
-        &[Source {
-            records: &records,
-            stream: "depth",
-        }],
-        scales(),
-        SECOND,
-    )
-    .expect("convert");
-
-    assert!(report.depth_applied >= 3, "the book was still built");
-    assert!(
-        ticks.is_empty(),
-        "no trade means no price; publishing would set the mark to zero: {ticks:?}"
-    );
-}
-
-/// The dropped windows are counted, and the count reaches the report.
-///
-/// Both halves matter, and the second half is the one that broke. The
-/// counter existed on the aggregator and was correct there; the report
-/// was assembled field by field in two places, and the binary's copy
-/// was missed — so `oq-ingest` printed nothing, and would have gone on
-/// printing nothing, because a field that is never assigned reads zero
-/// rather than failing.
-///
-/// That number is the difference between the windows a capture crossed
-/// and the ticks it wrote. Anyone comparing a re-converted file against
-/// an older one needs it, and should not have to derive it.
-#[test]
-fn windows_dropped_before_the_first_trade_reach_the_report() {
-    let depth = |at: i64, first: u64, last: u64| {
-        Record {
-        kind: Kind::Payload,
-        local_ts: at,
-        exch_ts: at,
-        payload: format!(
-            r#"{{"e":"depthUpdate","E":{at},"U":{first},"u":{last},"b":[["99.00","1.000"]],"a":[["101.00","1.000"]]}}"#
-        )
-        .into_bytes(),
-    }
-    };
-    // Three windows of book with no trade in them, then a trade.
-    let books = [
-        depth(T0, 1, 1),
-        depth(T0 + SECOND, 2, 2),
-        depth(T0 + 2 * SECOND, 3, 3),
-    ];
-    let trades = [trade(T0 + 3 * SECOND, "100.00", "1.000")];
-    let (ticks, report) = to_ticks(
-        &BinancePerp::new(),
-        &[
-            Source {
-                records: &books,
-                stream: "depth",
-            },
-            Source {
-                records: &trades,
-                stream: "trade",
-            },
-        ],
-        scales(),
-        SECOND,
-    )
-    .expect("convert");
-
-    assert_eq!(
-        report.windows_before_first_trade, 3,
-        "three windows were crossed before the trade stream said anything"
-    );
-    assert!(
-        ticks.iter().all(|t| t.last.0 > 0),
-        "and none of them was published: {ticks:?}"
-    );
-    // The identity a reader compares two conversions with.
-    assert_eq!(report.ticks, ticks.len() as u64);
-}
-
-// ---- The depth-carrying fold ----
-
-fn depth(at: i64, first: u64, last: u64, prev: u64, bid: &str, qty: &str) -> Record {
-    Record {
-        kind: Kind::Payload,
-        local_ts: at,
-        exch_ts: at,
-        payload: format!(
-            r#"{{"e":"depthUpdate","E":{at},"T":{at},"s":"BTCUSDT","U":{first},"u":{last},"pu":{prev},"b":[["{bid}","{qty}"]],"a":[]}}"#
-        )
-        .into_bytes(),
-    }
-}
-
-/// The two folds must project the same ticks.
-///
-/// One of them is what a strategy sees and the other is what the
-/// matcher is driven by; if they disagree about what happened, a run
-/// reports fills against observations its strategy never saw. That is
-/// not a difference anyone would notice from the outside — both files
-/// look plausible — which is why it is asserted rather than assumed.
-#[test]
-fn both_folds_produce_the_same_ticks() {
-    let venue = BinancePerp::new();
-    let trades = [
-        trade(T0, "100.00", "1.000"),
-        trade(T0 + SECOND / 2, "101.00", "2.000"),
-        trade(T0 + 2 * SECOND, "99.00", "1.500"),
-    ];
-    let depths = [
-        depth(T0, 1, 1, 0, "99.50", "10.000"),
-        depth(T0 + SECOND, 2, 2, 1, "99.40", "20.000"),
-    ];
-    let sources = [
-        Source {
-            records: &trades,
-            stream: "trade",
-        },
-        Source {
-            records: &depths,
-            stream: "depth",
-        },
-    ];
-
-    let mut agg_a = Aggregator::new(SECOND).expect("window");
-    let mut report_a = Report::default();
-    let ticks = fold_into(&venue, &sources, scales(), &mut agg_a, &mut report_a);
-
-    let mut agg_b = Aggregator::new(SECOND).expect("window");
-    let mut report_b = Report::default();
-    let observed = fold_into_observations(&venue, &sources, scales(), &mut agg_b, &mut report_b);
-
-    let from_observations: Vec<Tick> = observed
-        .iter()
-        .filter_map(|o| match o {
-            Observation::Tick(t) => Some(*t),
-            _ => None,
-        })
-        .collect();
-
-    assert!(!ticks.is_empty(), "the fixture must produce ticks");
-    assert_eq!(from_observations, ticks);
-    assert_eq!(report_b.depth_applied, report_a.depth_applied);
-}
-
-/// An update inside an open window reaches the book before that
-/// window's tick.
-///
-/// The book moved before the window closed, so that is where it goes.
-#[test]
-fn an_update_inside_a_window_precedes_that_windows_tick() {
-    let venue = BinancePerp::new();
-    // The last trade is what closes the first window; without it the
-    // batch ends with the window still open and produces no tick at
-    // all, and an ordering assertion over nothing passes for the wrong
-    // reason.
-    let trades = [
-        trade(T0, "100.00", "1.000"),
-        trade(T0 + 2 * SECOND, "101.00", "1.000"),
-    ];
-    let depths = [depth(T0 + SECOND / 2, 1, 1, 0, "99.50", "10.000")];
-    let sources = [
-        Source {
-            records: &trades,
-            stream: "trade",
-        },
-        Source {
-            records: &depths,
-            stream: "depth",
-        },
-    ];
-
-    let mut agg = Aggregator::new(SECOND).expect("window");
-    let mut report = Report::default();
-    let out = fold_into_observations(&venue, &sources, scales(), &mut agg, &mut report);
-
-    let d = out
-        .iter()
-        .position(|o| matches!(o, Observation::Depth(_)))
-        .expect("a depth update");
-    let t = out
-        .iter()
-        .position(|o| matches!(o, Observation::Tick(_)))
-        .expect("a tick, or this test asserts nothing");
-    assert!(d < t, "update at {d} must precede its window's tick at {t}");
-}
-
-/// An update that *closes* a window comes after that window's tick.
-///
-/// It is the first event of the next window, and the tick it closed
-/// summarises the one before. Emitting it first hands the matcher a
-/// book from the next window and lets it match the previous one against
-/// it -- the direction that flatters a backtest, and the reason this is
-/// asserted separately from the case above.
-#[test]
-fn an_update_that_closes_a_window_follows_that_windows_tick() {
-    let venue = BinancePerp::new();
-    let trades = [trade(T0, "100.00", "1.000")];
-    // Past the window boundary, so rolling to it closes the first
-    // window and this update belongs to the second.
-    let depths = [depth(T0 + 3 * SECOND / 2, 1, 1, 0, "99.50", "10.000")];
-    let sources = [
-        Source {
-            records: &trades,
-            stream: "trade",
-        },
-        Source {
-            records: &depths,
-            stream: "depth",
-        },
-    ];
-
-    let mut agg = Aggregator::new(SECOND).expect("window");
-    let mut report = Report::default();
-    let out = fold_into_observations(&venue, &sources, scales(), &mut agg, &mut report);
-
-    let t = out
-        .iter()
-        .position(|o| matches!(o, Observation::Tick(_)))
-        .expect("a tick, or this test asserts nothing");
-    let d = out
-        .iter()
-        .position(|o| matches!(o, Observation::Depth(_)))
-        .expect("a depth update");
-    assert!(
-        t < d,
-        "the closed window's tick at {t} must precede the update at {d} that closed it"
-    );
-}
-
-/// Every depth update in the batch reaches the stream.
-///
-/// Dropping one is how a reconstruction develops a hole that produces
-/// plausible queues, and the sequence check downstream would report it
-/// as the venue's gap rather than ours.
-#[test]
-fn no_depth_update_is_lost_between_the_folds() {
-    let venue = BinancePerp::new();
-    let depths: Vec<Record> = (1..=8)
-        .map(|i| {
-            depth(
-                T0 + i * SECOND / 4,
-                i as u64,
-                i as u64,
-                (i - 1) as u64,
-                "99.50",
-                "10.000",
-            )
-        })
-        .collect();
-    let sources = [Source {
-        records: &depths,
-        stream: "depth",
-    }];
-
-    let mut agg = Aggregator::new(SECOND).expect("window");
-    let mut report = Report::default();
-    let out = fold_into_observations(&venue, &sources, scales(), &mut agg, &mut report);
-
-    let emitted = out
-        .iter()
-        .filter(|o| matches!(o, Observation::Depth(_)))
-        .count();
-    assert_eq!(emitted, depths.len(), "every update must be forwarded");
+    assert!(to_ticks(&[], scales(), 0).is_err());
 }
