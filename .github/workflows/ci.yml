@@ -89,6 +89,12 @@ jobs:
       - name: Dependency budgets and standalone builds
         run: scripts/check-composability.sh
 
+      # A publishable crate whose name nobody reserved is a name someone
+      # else can take. Offline: it compares the workspace against the
+      # reservation list, not against crates.io.
+      - name: Every publishable crate has a reserved name
+        run: scripts/check-crate-names.sh
+
   doc-facts:
     name: Documentation facts match the tree
     runs-on: ubuntu-latest

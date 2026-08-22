@@ -122,7 +122,7 @@ input this project cannot reach, the second has not been written.
 | Theme | Item | Status |
 |---|---|---|
 | Repository | Workspace, Apache-2.0, DCO, public CI | Built |
-| Repository | crates.io name reservations | Built (21 names, nothing published). The tree has since grown to 23: `oq-book` and `oq-env` were added after the reservations were made, so their names are not among them. Worth closing before anything is published, since a name is only reserved once |
+| Repository | crates.io name reservations | Built and complete: 25 names held, nothing published beyond the 0.0.1 placeholders. Every crate in the tree that can be published has its name, plus `oq-infer` and `oq-lab`, which do not exist yet. `oq-examples` is `publish = false` and needs none. The reservation script had drifted from what was actually reserved — `oq-hash` and `oq-ingest` were held but absent from its list, and `oq-book` was in neither — which is the failure mode a list maintained by hand has: it is only checked when someone publishes, and by then a name can be gone |
 | Capture | Incremental depth, BBO, trades, mark price, liquidations | Built, running continuously |
 | Capture | Dual timestamps, gap markers, recorded clock offset | Built |
 | Capture | Archival and verification (`oq-merge`, `oq-resequence`) | Built |
