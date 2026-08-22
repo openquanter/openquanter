@@ -70,7 +70,7 @@
 //! `self.position`, `self.equity`, `self.entry` — mirrored before each
 //! call rather than fetched across the boundary.
 
-use oq_backtest::{Context, Intent, MarginMode, RunConfig, Strategy, run};
+use oq_backtest::{Context, Intent, MarginMode, RunConfig, Strategy, run, run_stream};
 use oq_engine::Tick;
 use oq_margin::{Contract, TierTable};
 use oq_types::{Cash, InstrumentId, Offset, OrderId, QtyLots, Side};
@@ -434,12 +434,123 @@ fn strategy_name(py: Python<'_>, object: &Py<PyAny>) -> String {
         .unwrap_or_else(|| "python-strategy".to_owned())
 }
 
+/// A tick file, held by name rather than by contents.
+///
+/// # Why this holds a path and not an open reader
+///
+/// A reader is consumed by iterating it, so a source that owned one
+/// could be run exactly once — and [`compare_modes`] runs the same input
+/// twice by design. Holding the path lets every run open its own reader
+/// over the same bytes, which is also what makes a source reusable in a
+/// loop the caller writes.
+///
+/// # Why this is not a list
+///
+/// The alternative already existed: build `Tick` objects in Python and
+/// pass the list. That materialises one Python object per observation,
+/// which at the sizes this is for — hundreds of millions of ticks — is
+/// tens of gigabytes of interpreter heap before the first callback
+/// fires. A file is read a block at a time and never fully resident, so
+/// the run is bounded by the file rather than by memory.
+#[pyclass(name = "TickSource", frozen)]
+pub struct PyTickSource {
+    path: std::path::PathBuf,
+    /// Records the header claims, so `len()` costs no read.
+    #[pyo3(get)]
+    count: u64,
+    /// The instrument the file was written for.
+    #[pyo3(get)]
+    instrument: u64,
+}
+
+#[pymethods]
+impl PyTickSource {
+    /// The file this reads.
+    #[getter]
+    fn path(&self) -> String {
+        self.path.display().to_string()
+    }
+
+    fn __len__(&self) -> usize {
+        // Saturating rather than `as`: a header claiming more records
+        // than this platform can index is a corrupt file, and a silently
+        // wrapped length would turn it into a short run that looks fine.
+        usize::try_from(self.count).unwrap_or(usize::MAX)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TickSource({}, {} ticks, instrument {})",
+            self.path.display(),
+            self.count,
+            self.instrument
+        )
+    }
+}
+
+/// Open a tick file for a run, without reading it.
+///
+/// Only the header is read here, so opening a file of any size is
+/// immediate and a wrong path or a corrupt header fails now rather than
+/// halfway through a backtest.
+///
+/// ```python
+/// ticks = openquanter.load_ticks("btcusdt-2024.oqtk")
+/// result = openquanter.run_backtest(strategy, ticks, balance, batch=4096)
+/// ```
+///
+/// # Errors
+///
+/// Reports a missing file, a header that is not this format, or a
+/// version this build does not read.
+#[pyfunction]
+pub fn load_ticks(path: &str) -> PyResult<PyTickSource> {
+    let path = std::path::PathBuf::from(path);
+    // Opening a reader and dropping it reads and validates the header
+    // and nothing else, which is exactly the check wanted here.
+    let reader = oq_data::ticks::TickReader::open(&path)
+        .map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
+    let header = *reader.header();
+    Ok(PyTickSource {
+        path,
+        count: header.count,
+        instrument: header.instrument,
+    })
+}
+
+/// Write ticks to a file `load_ticks` can read.
+///
+/// The pair exists because a reader with no writer is a feature nobody
+/// can reach: the only other producer of this format converts captured
+/// venue archives, so a Python caller holding ticks from anywhere else
+/// had no way to make a file at all.
+///
+/// This takes a sequence, so it is bounded by memory in the way
+/// `load_ticks` exists to avoid. That is deliberate and is the division
+/// of labour: files are written once, from whatever the caller already
+/// has in hand, and read many times without ever being resident.
+/// Converting something too large to hold is a job for a converter that
+/// streams, not for this.
+///
+/// # Errors
+///
+/// Reports a path that cannot be written.
+#[pyfunction]
+#[pyo3(signature = (path, ticks, instrument = 1))]
+pub fn save_ticks(path: &str, ticks: &Bound<'_, PyAny>, instrument: u64) -> PyResult<usize> {
+    let series = ticks_from(ticks)?;
+    let bytes = oq_data::ticks::encode(instrument, &series);
+    std::fs::write(path, bytes).map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+    Ok(series.len())
+}
+
 /// Build the tick series the engine will run over, from Python.
 fn ticks_from(list: &Bound<'_, PyAny>) -> PyResult<Vec<Tick>> {
     let rows: Vec<PyTick> = list.extract().map_err(|_| {
         PyTypeError::new_err(
-            "ticks must be a sequence of Tick; build them with openquanter.Tick(...) \
-             or read them from a file with load_ticks()",
+            "ticks must be a sequence of Tick, or a TickSource; build them with \
+             openquanter.Tick(...), or read a file with load_ticks() — which is \
+             the one to use when the series is larger than memory",
         )
     })?;
     Ok(rows
@@ -564,7 +675,18 @@ pub fn run_backtest(
         )));
     }
 
-    let series = ticks_from(ticks)?;
+    // A file source streams; a sequence is materialised. Both reach the
+    // same engine — `run` is `run_stream` over a slice's iterator — so
+    // the two paths differ in where the ticks come from and in nothing
+    // else.
+    let source: Option<std::path::PathBuf> = ticks
+        .extract::<PyRef<'_, PyTickSource>>()
+        .ok()
+        .map(|s| s.path.clone());
+    let series = match &source {
+        Some(_) => Vec::new(),
+        None => ticks_from(ticks)?,
+    };
     let mut driven = PyDriven {
         name: strategy_name(py, &strategy),
         object: strategy,
@@ -589,7 +711,45 @@ pub fn run_backtest(
 
     // The engine holds no Python state, so the interpreter lock is not
     // needed for the parts of the run that are not calling back into it.
-    let result = py.detach(|| run(&config, &mut driven, &series));
+    let (result, read_error) = match &source {
+        None => (py.detach(|| run(&config, &mut driven, &series)), None),
+        Some(path) => {
+            // Opened here rather than in `load_ticks` so each run gets
+            // its own reader over the same file; see `PyTickSource`.
+            let reader = oq_data::ticks::TickReader::open(path)
+                .map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
+            py.detach(|| {
+                let mut failed = None;
+                // `map_while` stops at the first bad record rather than
+                // skipping it. A tick file that goes backwards or fails
+                // its checksum is not a file with one bad row in it —
+                // it is a file whose remaining rows have not been shown
+                // to be trustworthy, and a run that quietly continued
+                // would report a number for data it did not read.
+                let stream = reader.map_while(|r| match r {
+                    Ok(tick) => Some(tick),
+                    Err(e) => {
+                        failed = Some(e);
+                        None
+                    }
+                });
+                let result = run_stream(&config, &mut driven, stream);
+                (result, failed)
+            })
+        }
+    };
+
+    // Reported before the strategy's own failure only if the strategy
+    // did not fail: a strategy that raised did so while reading these
+    // ticks, and its exception is the more specific answer.
+    if driven.failure.is_none() {
+        if let Some(e) = read_error {
+            return Err(PyValueError::new_err(format!(
+                "the tick file stopped the run after {} ticks: {e}",
+                result.ticks
+            )));
+        }
+    }
 
     if let Some(why) = driven.failure {
         return Err(PyValueError::new_err(format!(
@@ -721,10 +881,13 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // them does not have to guess or hard-code 1e8.
     m.add("CASH_SCALE", oq_types::CASH_SCALE)?;
     m.add_class::<PyTick>()?;
+    m.add_class::<PyTickSource>()?;
     m.add_class::<PyContext>()?;
     m.add_class::<PyOrder>()?;
     m.add_class::<PyRunResult>()?;
     m.add_class::<PyModeComparison>()?;
+    m.add_function(wrap_pyfunction!(load_ticks, m)?)?;
+    m.add_function(wrap_pyfunction!(save_ticks, m)?)?;
     m.add_function(wrap_pyfunction!(run_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(compare_modes, m)?)?;
     Ok(())

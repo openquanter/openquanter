@@ -13,6 +13,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 oq-backtest.workspace = true
+# For the tick file reader behind `load_ticks`. Default features only:
+# `oq-data`'s columnar half is a ~90-crate opt-in and a wheel must never
+# pay for it, so this dependency costs nothing beyond workspace crates.
+oq-data.workspace = true
 oq-engine.workspace = true
 oq-margin.workspace = true
 oq-stats.workspace = true
