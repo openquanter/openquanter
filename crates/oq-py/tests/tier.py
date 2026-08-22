@@ -216,6 +216,66 @@ def main():
     except ValueError as e:
         check("a nonsense return value is refused, not ignored", "Order" in str(e))
 
+    # --- ticks from a file ------------------------------------------
+    #
+    # The property worth asserting is not that a file can be read. It is
+    # that reading one changes nothing: a run over a file and a run over
+    # the same ticks in a list must agree exactly, or every number
+    # measured through the streaming path belongs to a different engine
+    # than the one the list path tested.
+    import os
+    import tempfile
+
+    path = os.path.join(tempfile.mkdtemp(), "series.oqtk")
+    written = oq.save_ticks(path, series)
+    check("save_ticks writes every tick it was given", written == len(series))
+
+    source = oq.load_ticks(path)
+    check("load_ticks reads the count from the header", len(source) == len(series))
+    check("and does not read the file to do it", os.path.getsize(path) > len(source) * 8)
+
+    from_list = oq.run_backtest(Cross(), series, balance)
+    from_file = oq.run_backtest(Cross(), source, balance)
+    check(
+        "a run from a file matches a run from a list",
+        (
+            from_file.ticks == from_list.ticks
+            and from_file.fills == from_list.fills
+            and from_file.final_equity == from_list.final_equity
+        ),
+        f"{from_file!r} vs {from_list!r}",
+    )
+
+    # A source is reusable, which is what holding a path rather than an
+    # open reader buys. `compare_modes` depends on it.
+    again = oq.run_backtest(Cross(), source, balance)
+    check("a source can be run more than once", again.fills == from_file.fills)
+
+    cmp_file = oq.compare_modes(CrossBatched, source, balance, 64)
+    cmp_list = oq.compare_modes(CrossBatched, series, balance, 64)
+    check(
+        "compare_modes agrees across the two input paths",
+        cmp_file.compat_fills == cmp_list.compat_fills
+        and cmp_file.batched_fills == cmp_list.batched_fills,
+    )
+
+    try:
+        oq.load_ticks(path + ".missing")
+        check("a missing file is refused", False)
+    except ValueError:
+        check("a missing file is refused", True)
+
+    # A file that is not this format must fail on open, not partway
+    # through a run that has already reported numbers.
+    junk = os.path.join(os.path.dirname(path), "junk.oqtk")
+    with open(junk, "wb") as fh:
+        fh.write(b"not a tick file, not even close, but long enough" * 4)
+    try:
+        oq.load_ticks(junk)
+        check("a file that is not this format is refused on open", False)
+    except ValueError as e:
+        check("a file that is not this format is refused on open", "magic" in str(e).lower())
+
     print()
     if FAILURES:
         print(f"{len(FAILURES)} failure(s): {', '.join(FAILURES)}")
