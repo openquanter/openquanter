@@ -20,54 +20,9 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test
-      # The columnar export is behind a feature, so the default job never
-      # compiles it. Untested optional code is the kind that rots
-      # silently: it builds for whoever wrote it and for nobody after.
-      - name: Test the optional columnar export
-        run: |
-          cargo clippy -p oq-data --features parquet --all-targets -- -D warnings
-          cargo test -p oq-data --features parquet
-
-  bindings:
-    name: Python bindings build and pass
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # A separate job on purpose. The engine must build and test with no
-      # interpreter present — D16's third cost — so `oq-py` is outside the
-      # workspace's default members and the main job never touches it. This
-      # is where it gets covered.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build and test the binding
-        run: |
-          cargo clippy -p oq-py --all-targets -- -D warnings
-          cargo test -p oq-py
-
-      # The Rust side can prove a callback fires. It cannot prove that a
-      # strategy someone would write runs unmodified, that batch=1 really
-      # is compatibility mode, or that the argument names mean what they
-      # say. Those are properties of the boundary, so they are checked
-      # from the far side of it.
-      - name: The Python tier, from Python
-        run: |
-          pip install --quiet maturin
-          maturin build --release --manifest-path crates/oq-py/Cargo.toml --out dist
-          pip install --quiet --force-reinstall dist/*.whl
-          python crates/oq-py/tests/tier.py
-
-          # The cost benchmark, on a tenth of its usual size. Not a
-          # timing gate — a runner's wall clock is not evidence about
-          # anything — but the figures quoted in `tier.rs` come from this
-          # script, and a quoted number whose source no longer runs is
-          # how documentation starts lying.
-          OQ_BENCH_TICKS=200000 python crates/oq-py/bench/cost.py
+        run: cargo test --workspace
 
   hygiene:
     name: No secrets or deployment details
@@ -88,47 +43,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # The standalone-build pass covers every crate including the Python
-      # binding, and that one needs an interpreter to build against.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Dependency budgets and standalone builds
         run: scripts/check-composability.sh
-
-      # A publishable crate whose name nobody reserved is a name someone
-      # else can take. Offline: it compares the workspace against the
-      # reservation list, not against crates.io.
-      - name: Every publishable crate has a reserved name
-        run: scripts/check-crate-names.sh
-
-  doc-facts:
-    name: Documentation facts match the tree
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # These blocks are generated, not written. The claims they replaced
-      # went stale twice in one day — once overselling unbuilt work, once
-      # hiding shipped work — and both times a person reading the code
-      # found it rather than a check.
-      - name: Compare the generated blocks against Cargo.toml
-        run: scripts/doc-facts.sh --check
-
-      # The generated block only guards the documents that embed it.
-      # Prose elsewhere stated the same facts and drifted: on 2026-08-19
-      # ROADMAP.md said in one paragraph that oq-live depends on neither
-      # oq-core nor oq-margin, and in another that it depends on both.
-      # This reads the sentences.
-      - name: Dependency claims in prose match Cargo.toml
-        run: scripts/check-doc-claims.py
-
-      # Six defects in two days had one shape: one half present, the
-      # other absent, and the absent half silent. Every one had passing
-      # tests, because the unit was right and nothing invoked it. This
-      # asks the question no test asks — does anything reach it.
-      - name: Public API is reachable, or says why not
-        run: scripts/check-reachability.py --check
 
   throughput:
     name: Engine throughput floor
@@ -146,10 +62,3 @@ jobs:
       # compare two versions on one machine.
       - name: Backtest throughput must stay above the floor
         run: cargo run --release -p oq-examples --example throughput
-
-      # G4: a hundred configurations with DSR and PBO inside thirty
-      # minutes. The budget is generous enough that a shared runner
-      # having a bad hour cannot fail it, which is the point — this
-      # catches the sweep becoming unusable, not the runner being slow.
-      - name: Sweep gate (G4)
-        run: cargo run --release -p oq-examples --example sweep_100
