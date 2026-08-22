@@ -167,8 +167,8 @@ input this project cannot reach, the second has not been written.
 | Fidelity | Fidelity report and participation-rate flag | Built |
 | Adoption | Quickstart, seven example strategies, goldens | Built |
 | Adoption | **Classic-strategy catalogue** (RSI, MACD, Bollinger, Donchian, grid, dual-thrust) | Built — teaching references, each one documenting where it breaks rather than claiming an edge |
-| Gate | **G3 throughput ≥8× the interpreted baseline** | **Blocked** — needs a multi-year window and a same-machine predecessor run; the data is on production hosts and the capture is days old |
-| Gate | **G7 re-passing parity after conversion** | **Half blocked** — the mode half is met and tested; the parity half shares G3's blocker |
+| Gate | **G3 throughput ≥8× the interpreted baseline** | **Measured, not met — 7.13× against a target of 8×.** No longer blocked: run on one machine, over 608 days of BTCUSDT trades (2024-09-01 to 2026-04-30, 149,546,989 observations), with both engines given the identical observation count and the same rule — vnpy's `DoubleMaStrategy`, whose two copies were checked byte-identical rather than assumed so. The predecessor took 647.4 s; this engine took 128.4 s per tick (5.04×) and 90.8 s at its best batch (7.13×). Take the predecessor's data-decode phase out of its time and the comparison is 5.67×, which is the fairer number for *engine* throughput and the lower one. Three things the figure hides are recorded with it: the baseline is Cython-compiled rather than interpreted, so the bar is higher than the goal's wording suggests; batching stops helping after 512 and is 18% **slower** at 4096, so the remaining gap is not on the language boundary but inside the engine; and the batch that produced 7.13× also dropped fills from 6,045,548 to 292,083, so the speed is quoted against a strategy that has stopped trading |
+| Gate | **G7 re-passing parity after conversion** | **Half met, half answered in the negative.** The mode half is met and tested. The parity half no longer shares G3's blocker, and running it produced a result rather than a pass: a batch large enough to reach G3's throughput does not preserve the fill sequence, because orders from a batch are submitted at its end. `compare_modes` reports the divergence rather than asserting there is none, which is the right shape for it — but it means the goal as written asks for two things that trade against each other, and the trade should be stated in the goal instead of discovered by running it |
 | Gate | **G11 external cold start ≤ 30 minutes** | **Blocked** — needs a person who has not seen this repository. A prior blocker was found and removed: the quickstart's first instruction was `cargo install oq-cli`, and every published `oq-*` is a `0.0.1` name placeholder, so the trial would have failed in its first minute for a reason that had nothing to do with the reader |
 
 ### M3 — Live trading
@@ -387,18 +387,31 @@ depends on the invariants established here.
   self-certified — it needs a person who has not seen this repository.
 - **Beta release** with documented, if still unstable, APIs.
 
-**What blocks the two open gates, precisely.** Both G3 and G7's parity half
-need a same-machine run of the closed-source predecessor over a multi-year
-window. Neither is engineering effort:
+**The two open gates have now been run, and neither came back a pass.** Both
+G3 and G7's parity half needed a same-machine run of the closed-source
+predecessor over a multi-year window. That run happened, so both moved from
+blocked to measured:
 
-- The predecessor's fifteen-day parity baseline lives on the two production
-  hosts, which are running live trading and are not to be touched. The
-  229/229 result recorded earlier in this project's history is therefore
-  **historical**: it was real, and nothing currently reproduces it.
-- The capture this project has made for itself is seven calendar days —
-  2026-08-15 to 2026-08-21, of which five are complete — not multi-year. A
-  throughput ratio measured over a week would not be the number G3 names,
-  and quoting it as though it were would be worse than having no number.
+- G3 is **7.13× against a target of 8×** — short by 12%. Where the gap is
+  was measured too: batching stops improving past 512 and is slower at
+  4096, so what remains is not the cost of crossing into Python but
+  something inside the engine. That is more useful than "blocked", because
+  it names the place to look.
+- G7's parity half came back with **an answer in the negative** rather than
+  no answer. A batch's orders are submitted at the end of the batch, so a
+  batch large enough to reach G3's throughput necessarily changes the fill
+  sequence. The goal asks for two things that pull against each other, and
+  that belongs in the goal.
+- The predecessor's fifteen-day parity baseline still lives on the two
+  production hosts, which are running live trading and are not to be
+  touched. The 229/229 result recorded earlier is therefore still
+  **historical**: it was real, and nothing currently reproduces it. The
+  throughput run above did not need those hosts, because it did not need
+  that strategy — a public one on public exchange archives answers a
+  throughput question just as well, and can be quoted.
+- The capture this project has made for itself is still seven calendar days
+  — 2026-08-15 to 2026-08-21, of which five are complete. The measurement
+  above did not use it.
 
 What *is* measured, and reported under its own name rather than G3's: the
 Python tier's throughput mode runs at up to about 7x its compatibility mode
