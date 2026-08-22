@@ -62,6 +62,13 @@ jobs:
           pip install --quiet --force-reinstall dist/*.whl
           python crates/oq-py/tests/tier.py
 
+          # The cost benchmark, on a tenth of its usual size. Not a
+          # timing gate — a runner's wall clock is not evidence about
+          # anything — but the figures quoted in `tier.rs` come from this
+          # script, and a quoted number whose source no longer runs is
+          # how documentation starts lying.
+          OQ_BENCH_TICKS=200000 python crates/oq-py/bench/cost.py
+
   hygiene:
     name: No secrets or deployment details
     runs-on: ubuntu-latest
