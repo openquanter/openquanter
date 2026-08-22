@@ -156,24 +156,10 @@ impl Venue for OkxSwap {
         if !text.contains(r#""channel":"trades"#) {
             return None;
         }
-        // This venue names the aggressor directly, where the other says
-        // which side was the maker. Same fact, opposite spelling.
-        let aggressor = match quoted(text, r#""side":"#).as_deref() {
-            Some("buy") => Some(oq_types::Side::Buy),
-            Some("sell") => Some(oq_types::Side::Sell),
-            _ => None,
-        };
-        let trade = Trade {
+        Some(Trade {
             price: parse_fixed(&quoted(text, r#""px":"#)?, scales.price).ok()?,
             qty: parse_fixed(&quoted(text, r#""sz":"#)?, scales.qty).ok()?,
-            aggressor,
-        };
-        // The contract every adapter holds to: a message declaring a
-        // zero price or size is not a trade. Whether this venue emits
-        // such a record is not the point -- the rule cannot be one
-        // adapter's, or the pipeline's correctness depends on which
-        // venue it happens to be reading.
-        (trade.price > 0 && trade.qty > 0).then_some(trade)
+        })
     }
 
     /// The book arrives as `"bids"` and `"asks"` inside `"data"`, and
@@ -331,7 +317,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::super::binance::BinancePerp::new().event_time_ns(payload),
+            super::super::binance::BinancePerp.event_time_ns(payload),
             None,
             "the other venue's reader must not silently half-work on this shape"
         );
@@ -405,13 +391,11 @@ mod tests {
         assert_eq!(OkxSwap.trade_ids(okx), vec![2_836_635_170]);
         assert!(OkxSwap.trade_ids(binance).is_empty());
         assert_eq!(
-            super::super::binance::BinancePerp::new().trade_ids(binance),
+            super::super::binance::BinancePerp.trade_ids(binance),
             vec![12345]
         );
         assert!(
-            super::super::binance::BinancePerp::new()
-                .trade_ids(okx)
-                .is_empty(),
+            super::super::binance::BinancePerp.trade_ids(okx).is_empty(),
             "a quoted id must not be read as a bare one"
         );
     }

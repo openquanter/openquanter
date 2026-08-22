@@ -64,7 +64,7 @@ class Cos:
     the public domain happening to route internally.
     """
 
-    def __init__(self, secret_id, secret_key, appid, region,
+    def __init__(self, secret_id, secret_key, appid, region="ap-tokyo",
                  bucket_prefix="oq-capture", internal=True):
         self.sid = secret_id
         self.skey = secret_key
@@ -185,21 +185,6 @@ class Cos:
             conn.close()
 
 
-def require(env, key):
-    """A setting with no default, because the default would be a fact.
-
-    Where a bucket lives is not a secret the way a key is, but it is the
-    half of a deployment a reader cannot change and an attacker does not
-    have to guess. A default in source publishes it to everyone who
-    clones; an environment variable publishes it to whoever runs the
-    thing, which is the audience it was meant for.
-    """
-    value = env.get(key)
-    if not value:
-        raise SystemExit(f"{key} is not set; it has no default on purpose")
-    return value
-
-
 def from_env(path, internal=True):
     env = {}
     with open(path) as f:
@@ -211,7 +196,7 @@ def from_env(path, internal=True):
         env["COS_SECRET_ID"],
         env["COS_SECRET_KEY"],
         env["COS_APPID"],
-        require(env, "COS_REGION"),
+        env.get("COS_REGION", "ap-tokyo"),
         env.get("COS_BUCKET_PREFIX", "oq-capture"),
         internal=internal,
     )

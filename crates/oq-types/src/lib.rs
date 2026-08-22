@@ -24,14 +24,12 @@
 
 #![forbid(unsafe_code)]
 
-pub mod currency;
 pub mod fixed;
 pub mod ids;
 pub mod instrument;
 pub mod order;
 pub mod time;
 
-pub use currency::{Balances, Currency, RATE_SCALE, Rates};
 pub use fixed::{CASH_SCALE, Cash, PriceTicks, QtyLots, RATIO_SCALE, Ratio};
 pub use ids::{IdAllocator, InstrumentId, OrderId, SeqNo, StrategyId, TradeId};
 pub use instrument::{CONTRACT_SCALE, Instrument};
