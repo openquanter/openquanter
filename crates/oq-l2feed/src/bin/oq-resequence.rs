@@ -97,7 +97,7 @@ fn main() -> ExitCode {
         qty: u32::from(instrument.qty_scale),
     };
 
-    let bytes = match oq_l2feed::archive::read(&file) {
+    let bytes = match std::fs::read(&file) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("oq-resequence: cannot read {file}: {e}");
@@ -112,18 +112,41 @@ fn main() -> ExitCode {
         }
     };
 
-    let r = reorder(&records, venue.as_ref(), scales);
+    let mut keyed: Vec<(u64, &Record)> = Vec::new();
+    let mut controls: Vec<&Record> = Vec::new();
+    let mut unsequenced: Vec<&Record> = Vec::new();
+    for r in &records {
+        if r.kind == Kind::Control {
+            controls.push(r);
+        } else if let Ok(u) = venue.parse_depth(&r.payload, scales) {
+            keyed.push((u.final_id, r));
+        } else {
+            // Not a book update for this venue. Kept in arrival order
+            // rather than dropped: a file that mixed streams would
+            // otherwise lose whichever stream this tool does not
+            // sequence.
+            unsequenced.push(r);
+        }
+    }
+
+    let out_of_order = keyed.windows(2).filter(|w| w[1].0 < w[0].0).count();
+
+    // A stable sort keeps the first copy of a repeated id; dedup then
+    // drops the rest, because a repeat is one message recorded twice
+    // rather than two messages.
+    keyed.sort_by_key(|(id, _)| *id);
+    let before = keyed.len();
+    keyed.dedup_by_key(|(id, _)| *id);
+    let removed = before - keyed.len();
 
     println!("file             {file}");
     println!("records          {} (torn {torn})", records.len());
-    println!("  sequenced      {}", r.sequenced);
-    println!("  control        {}", r.controls);
-    println!("  unsequenced    {}", r.unsequenced);
-    println!("out of order     {}", r.out_of_order);
-    println!("repeats removed  {}", r.removed);
+    println!("  sequenced      {before}");
+    println!("  control        {}", controls.len());
+    println!("  unsequenced    {}", unsequenced.len());
+    println!("out of order     {out_of_order}");
+    println!("repeats removed  {removed}");
 
-    let out_of_order = r.out_of_order;
-    let removed = r.removed;
     if out_of_order == 0 && removed == 0 {
         println!();
         println!("verdict: NOTHING TO DO — already in order, with no repeats");
@@ -137,8 +160,14 @@ fn main() -> ExitCode {
     }
 
     let mut encoded = Vec::with_capacity(bytes.len());
-    for rec in &r.kept {
-        rec.encode(&mut encoded);
+    for r in &controls {
+        r.encode(&mut encoded);
+    }
+    for r in &unsequenced {
+        r.encode(&mut encoded);
+    }
+    for (_, r) in &keyed {
+        r.encode(&mut encoded);
     }
 
     let out = out.expect("checked above");
@@ -153,7 +182,7 @@ fn main() -> ExitCode {
     // one nothing downstream can tell is wrong, which is the whole
     // reason the field exists. Rebuild it where the layout says it goes,
     // and say so when the layout cannot be read.
-    match rebuild_manifest(&out, &venue_id, &encoded, &r.kept) {
+    match rebuild_manifest(&out, &venue_id, &encoded, &keyed, &controls, &unsequenced) {
         Ok(Some(path)) => println!("manifest         rebuilt at {path}"),
         Ok(None) => {
             println!();
@@ -174,93 +203,6 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The file put back into the venue's order.
-struct Reordered<'a> {
-    /// Every record that survives, in the order to write them.
-    kept: Vec<&'a Record>,
-    sequenced: usize,
-    controls: usize,
-    unsequenced: usize,
-    /// Sequenced records that arrived after a later one.
-    out_of_order: usize,
-    /// Repeated ids dropped.
-    removed: usize,
-}
-
-/// Sort by the venue's sequence, keeping every other record where it
-/// was.
-///
-/// A control record has no sequence number of its own, and its position
-/// *is* its meaning: a gap marker says the capture stopped listening
-/// **here**, and `oq-book-check` reads it positionally to tell a
-/// disconnect the capture declared from messages that went missing
-/// silently. Collecting the controls and writing them as a block would
-/// move every one of them to the top of the file, which turns a break
-/// the capture owned up to into `breaks nobody declared` — a repair that
-/// manufactures the appearance of data loss.
-///
-/// So each one is anchored to the last sequenced record that arrived
-/// before it and travels with it. `None` sorts first, which is where a
-/// `session_start` written before any data belongs. Records this tool
-/// does not sequence are anchored the same way, for the same reason.
-fn reorder<'a>(records: &'a [Record], venue: &dyn venue::Venue, scales: Scales) -> Reordered<'a> {
-    let mut keyed: Vec<(Option<u64>, &Record, bool)> = Vec::with_capacity(records.len());
-    let mut anchor: Option<u64> = None;
-    let mut sequenced = 0usize;
-    let mut controls = 0usize;
-    let mut unsequenced = 0usize;
-    let mut arrival: Vec<u64> = Vec::new();
-
-    for r in records {
-        if r.kind == Kind::Control {
-            controls += 1;
-            keyed.push((anchor, r, false));
-        } else if let Ok(u) = venue.parse_depth(&r.payload, scales) {
-            sequenced += 1;
-            anchor = Some(u.final_id);
-            arrival.push(u.final_id);
-            keyed.push((Some(u.final_id), r, true));
-        } else {
-            unsequenced += 1;
-            keyed.push((anchor, r, false));
-        }
-    }
-
-    let out_of_order = arrival.windows(2).filter(|w| w[1] < w[0]).count();
-
-    // Stable, so records sharing an anchor keep the order they arrived
-    // in — and so a file already in order comes out byte for byte the
-    // same.
-    keyed.sort_by_key(|(k, _, _)| *k);
-
-    // A repeated id is one message recorded twice, not two messages. The
-    // first copy is kept. Checked against everything seen rather than
-    // against the previous record, because an anchored control can sit
-    // between two copies of the same id.
-    let mut seen = std::collections::HashSet::new();
-    let mut kept = Vec::with_capacity(keyed.len());
-    let mut removed = 0usize;
-    for (key, r, is_sequenced) in keyed {
-        if is_sequenced {
-            let id = key.expect("a sequenced record carries its id");
-            if !seen.insert(id) {
-                removed += 1;
-                continue;
-            }
-        }
-        kept.push(r);
-    }
-
-    Reordered {
-        kept,
-        sequenced,
-        controls,
-        unsequenced,
-        out_of_order,
-        removed,
-    }
-}
-
 /// Write a manifest describing the reordered file, if its path says
 /// where in an archive it belongs.
 ///
@@ -271,7 +213,9 @@ fn rebuild_manifest(
     out: &str,
     venue_id: &str,
     encoded: &[u8],
-    kept: &[&Record],
+    keyed: &[(u64, &Record)],
+    controls: &[&Record],
+    unsequenced: &[&Record],
 ) -> std::io::Result<Option<String>> {
     let path = Path::new(out);
     let Some((stream, window, root)) = describe(path, venue_id) else {
@@ -279,7 +223,10 @@ fn rebuild_manifest(
     };
 
     let mut builder = ManifestBuilder::new();
-    for r in kept {
+    for r in controls.iter().chain(unsequenced.iter()) {
+        builder.observe(r);
+    }
+    for (_, r) in keyed {
         builder.observe(r);
     }
 
@@ -301,7 +248,7 @@ fn describe(path: &Path, venue_id: &str) -> Option<(StreamId, Window, std::path:
     let stream_at = parts.iter().rposition(|p| {
         matches!(
             *p,
-            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice" | "fundingRate"
+            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice"
         )
     })?;
 
@@ -356,170 +303,8 @@ fn symbol_from_path(path: &str) -> Option<String> {
     let idx = parts.iter().rposition(|p| {
         matches!(
             *p,
-            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice" | "fundingRate"
+            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice"
         )
     })?;
     parts.get(idx.checked_sub(1)?).map(|s| (*s).to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SCALES: Scales = Scales { price: 2, qty: 3 };
-
-    fn depth(u: u64) -> Record {
-        let payload = format!(
-            r#"{{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":{u},"u":{u},"pu":{},"b":[["100.0","1.0"]],"a":[]}}"#,
-            u - 1
-        );
-        Record {
-            kind: Kind::Payload,
-            local_ts: 1,
-            exch_ts: 1,
-            payload: payload.into_bytes(),
-        }
-    }
-
-    fn control(json: &str) -> Record {
-        Record {
-            kind: Kind::Control,
-            local_ts: 1,
-            exch_ts: 1,
-            payload: json.as_bytes().to_vec(),
-        }
-    }
-
-    fn gap() -> Record {
-        control(r#"{"type":"gap","reason":"disconnect"}"#)
-    }
-
-    fn start() -> Record {
-        control(r#"{"type":"session_start","venue":"binance-perp"}"#)
-    }
-
-    /// Payload that is not a book update — a trade sharing the file.
-    fn other() -> Record {
-        Record {
-            kind: Kind::Payload,
-            local_ts: 1,
-            exch_ts: 1,
-            payload: br#"{"e":"trade","t":7,"p":"1"}"#.to_vec(),
-        }
-    }
-
-    fn run(records: &[Record]) -> Reordered<'_> {
-        let venue = venue::by_id("binance-perp").expect("binance");
-        reorder(records, venue.as_ref(), SCALES)
-    }
-
-    /// Where a gap marker sits is what it means: the capture stopped
-    /// listening *here*. `oq-book-check` reads it positionally to
-    /// separate a disconnect the capture declared from messages that
-    /// went missing silently, so a repair that moves every control to
-    /// the top of the file manufactures the appearance of data loss —
-    /// measured, it turned a clean file into "1 break nobody declared".
-    #[test]
-    fn a_gap_marker_keeps_its_place_between_the_records_it_separated() {
-        let records = vec![
-            start(),
-            depth(10),
-            depth(11),
-            gap(),
-            // After the gap the ids jump, and these two arrived swapped.
-            depth(51),
-            depth(50),
-        ];
-        let r = run(&records);
-        let shape: Vec<String> = r
-            .kept
-            .iter()
-            .map(|rec| {
-                if rec.kind == Kind::Control {
-                    if String::from_utf8_lossy(&rec.payload).contains("\"type\":\"gap\"") {
-                        "gap".to_string()
-                    } else {
-                        "start".to_string()
-                    }
-                } else {
-                    let venue = venue::by_id("binance-perp").expect("binance");
-                    format!(
-                        "{}",
-                        venue
-                            .parse_depth(&rec.payload, SCALES)
-                            .expect("depth")
-                            .final_id
-                    )
-                }
-            })
-            .collect();
-        assert_eq!(
-            shape,
-            vec!["start", "10", "11", "gap", "50", "51"],
-            "the gap must still separate the records it separated before"
-        );
-        assert_eq!(r.out_of_order, 1);
-    }
-
-    /// A control written before any data has nothing to anchor to and
-    /// belongs at the front, which is where the session header goes.
-    #[test]
-    fn a_header_written_before_any_data_stays_first() {
-        let records = vec![start(), depth(20), depth(19)];
-        let r = run(&records);
-        assert_eq!(r.kept[0].kind, Kind::Control);
-        assert_eq!(r.controls, 1);
-    }
-
-    /// The tool must be inert on a healthy file. Anything else means
-    /// running it as a precaution is itself a risk.
-    #[test]
-    fn a_file_already_in_order_comes_out_byte_for_byte_the_same() {
-        let records = vec![start(), depth(10), gap(), depth(11), other(), depth(12)];
-        let r = run(&records);
-        assert_eq!(r.out_of_order, 0);
-        assert_eq!(r.removed, 0);
-
-        let mut before = Vec::new();
-        for rec in &records {
-            rec.encode(&mut before);
-        }
-        let mut after = Vec::new();
-        for rec in &r.kept {
-            rec.encode(&mut after);
-        }
-        assert_eq!(before, after, "a healthy file must survive untouched");
-    }
-
-    /// Two writers can leave the same id on either side of a control
-    /// record, so the duplicate check cannot look only at the record
-    /// before it.
-    #[test]
-    fn a_repeat_is_dropped_even_with_a_control_between_the_copies() {
-        let records = vec![depth(10), gap(), depth(10), depth(11)];
-        let r = run(&records);
-        assert_eq!(r.removed, 1);
-        assert_eq!(r.sequenced, 3, "the input had three sequenced records");
-        assert_eq!(
-            r.kept.len(),
-            3,
-            "one duplicate dropped, the gap and both distinct ids kept"
-        );
-    }
-
-    /// A file that mixed streams keeps the one this tool cannot
-    /// sequence, and keeps it where it was rather than in a block at the
-    /// front.
-    #[test]
-    fn a_record_this_tool_cannot_sequence_keeps_its_place() {
-        let records = vec![depth(10), other(), depth(12), depth(11)];
-        let r = run(&records);
-        assert_eq!(r.unsequenced, 1);
-        assert_eq!(r.kept.len(), 4);
-        assert_eq!(
-            r.kept[1].payload,
-            other().payload,
-            "it followed id 10 on the way in and still does"
-        );
-    }
 }

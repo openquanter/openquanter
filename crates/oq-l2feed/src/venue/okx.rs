@@ -141,13 +141,11 @@ impl Venue for OkxSwap {
     /// of decimal places; the conversion happens in the generator, not
     /// here, so this stays a lookup. See [`super::okx_instruments`].
     fn instrument(&self, symbol: &str) -> Option<Instrument> {
-        // A size on this venue is a count of contracts, not an amount of
-        // the underlying: one BTC-USDT-SWAP is 0.01 BTC. Dropping that
-        // and treating a size as coins is a hundredfold error that never
-        // announces itself — the number parses, sums, and is wrong.
-        let (price_scale, qty_scale, contract_size) =
-            super::okx_instruments::definition(&instrument_id(symbol))?;
-        Some(Instrument::sized(price_scale, qty_scale, contract_size))
+        let (price_scale, qty_scale) = super::okx_instruments::precision(&instrument_id(symbol))?;
+        Some(Instrument {
+            price_scale,
+            qty_scale,
+        })
     }
 
     /// Price and size are `"px"` and `"sz"`, nested under `"data"`.
@@ -156,24 +154,10 @@ impl Venue for OkxSwap {
         if !text.contains(r#""channel":"trades"#) {
             return None;
         }
-        // This venue names the aggressor directly, where the other says
-        // which side was the maker. Same fact, opposite spelling.
-        let aggressor = match quoted(text, r#""side":"#).as_deref() {
-            Some("buy") => Some(oq_types::Side::Buy),
-            Some("sell") => Some(oq_types::Side::Sell),
-            _ => None,
-        };
-        let trade = Trade {
+        Some(Trade {
             price: parse_fixed(&quoted(text, r#""px":"#)?, scales.price).ok()?,
             qty: parse_fixed(&quoted(text, r#""sz":"#)?, scales.qty).ok()?,
-            aggressor,
-        };
-        // The contract every adapter holds to: a message declaring a
-        // zero price or size is not a trade. Whether this venue emits
-        // such a record is not the point -- the rule cannot be one
-        // adapter's, or the pipeline's correctness depends on which
-        // venue it happens to be reading.
-        (trade.price > 0 && trade.qty > 0).then_some(trade)
+        })
     }
 
     /// The book arrives as `"bids"` and `"asks"` inside `"data"`, and
@@ -331,7 +315,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::super::binance::BinancePerp::new().event_time_ns(payload),
+            super::super::binance::BinancePerp.event_time_ns(payload),
             None,
             "the other venue's reader must not silently half-work on this shape"
         );
@@ -405,13 +389,11 @@ mod tests {
         assert_eq!(OkxSwap.trade_ids(okx), vec![2_836_635_170]);
         assert!(OkxSwap.trade_ids(binance).is_empty());
         assert_eq!(
-            super::super::binance::BinancePerp::new().trade_ids(binance),
+            super::super::binance::BinancePerp.trade_ids(binance),
             vec![12345]
         );
         assert!(
-            super::super::binance::BinancePerp::new()
-                .trade_ids(okx)
-                .is_empty(),
+            super::super::binance::BinancePerp.trade_ids(okx).is_empty(),
             "a quoted id must not be read as a bare one"
         );
     }
@@ -481,11 +463,6 @@ mod tests {
         // convert data they can read perfectly well.
         let i = OkxSwap.instrument("BTCUSDT").expect("listed");
         assert_eq!((i.price_scale, i.qty_scale), (1, 2));
-        // 0.01 BTC per contract. Were this the coin itself the value
-        // would be CONTRACT_SCALE, and every notional computed from a
-        // size here would be a hundred times too large.
-        assert_eq!(i.contract_size, 1_000_000);
-        assert_ne!(i.contract_size, oq_types::CONTRACT_SCALE);
         assert_eq!(OkxSwap.instrument("btcusdt"), OkxSwap.instrument("BTCUSDT"));
     }
 

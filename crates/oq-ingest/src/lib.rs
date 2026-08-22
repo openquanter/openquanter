@@ -30,14 +30,13 @@
 //! per-window amount. Emitting per-window volume would look more natural
 //! and would silently halve every difference.
 
-pub mod agg;
-pub use agg::{Aggregator, Counts};
-
-use oq_engine::{Observation, Tick};
+use oq_engine::Tick;
+use oq_l2feed::book::Book;
 use oq_l2feed::depth::Scales;
 use oq_l2feed::frame::{Kind, Record};
 use oq_l2feed::manifest::is_gap;
 use oq_l2feed::venue::Venue;
+use oq_types::{Nanos, PriceTicks, QtyLots, Stamp};
 
 /// How the conversion went, so a caller can tell a thin market from a
 /// broken read.
@@ -51,58 +50,10 @@ pub struct Report {
     pub trades: u64,
     /// Payloads this build could not read.
     pub unparseable: u64,
-    /// Payloads on the trade stream that declared no trade.
-    ///
-    /// Separate from `unparseable` because the two call for opposite
-    /// reactions: unreadable payloads mean this build disagrees with
-    /// the venue and something needs fixing, while these are the venue
-    /// saying nothing happened -- Binance publishes `"p":"0","q":"0"`
-    /// records among the real trades, thousands an hour. Counted
-    /// because a number that went from zero to thousands is worth
-    /// seeing, and silently dropping records is how a conversion loses
-    /// a third of a day without saying so.
-    pub non_trades: u64,
     /// Gap markers seen. The book is dropped at each one.
     pub gaps: u64,
-    /// Windows with no trade, carrying the previous price forward.
+    /// Windows with no trade, carrying only book state.
     pub quiet_windows: u64,
-    /// Windows that closed before this symbol had ever traded.
-    ///
-    /// These publish nothing: there is no price to carry, and a tick
-    /// whose price is zero becomes a mark price of zero in the kernel.
-    pub windows_before_first_trade: u64,
-    /// Events whose exchange timestamp went backwards.
-    ///
-    /// Large here means the streams are reordering against each other,
-    /// which is worth knowing before the numbers are believed.
-    ///
-    /// Always zero on the conversion path, and that is a fact rather
-    /// than an omission: [`to_ticks`] sorts its events before folding
-    /// them. It is copied rather than left unset, so that if the sort
-    /// ever goes away the counter starts reporting instead of going on
-    /// reading zero.
-    pub out_of_order: u64,
-}
-
-impl Report {
-    /// Take the aggregator's counters, and the tick count, as one act.
-    ///
-    /// Two callers reach this: [`to_ticks`], and the binary, which folds
-    /// an hour at a time and so cannot use it. They copied the fields
-    /// one by one in two places, and the second time a counter was added
-    /// the binary's copy was missed — so `oq-ingest` printed nothing for
-    /// it, and would have gone on printing nothing, because **a field
-    /// that is never assigned reads zero rather than failing**.
-    ///
-    /// A new counter is now copied in exactly one place.
-    pub fn absorb(&mut self, counts: crate::agg::Counts, ticks: usize) {
-        self.depth_applied = counts.depth_applied;
-        self.trades = counts.trades;
-        self.quiet_windows = counts.quiet_windows;
-        self.windows_before_first_trade = counts.windows_before_first_trade;
-        self.out_of_order = counts.out_of_order;
-        self.ticks = ticks as u64;
-    }
 }
 
 /// One source file, and what kind of records it holds.
@@ -139,74 +90,13 @@ pub fn to_ticks(
     scales: Scales,
     window_ns: i64,
 ) -> Result<(Vec<Tick>, Report), String> {
-    let mut agg = Aggregator::new(window_ns)?;
-    let mut report = Report::default();
-    let mut ticks = fold_into(venue, sources, scales, &mut agg, &mut report);
-    ticks.extend(agg.flush());
-    report.absorb(agg.counts(), ticks.len());
-    Ok((ticks, report))
-}
-
-/// Fold one batch of sources into an aggregator that outlives the call.
-///
-/// The batch exists because memory does. A day of one instrument's depth
-/// is millions of records and the parsed form is larger than the bytes on
-/// disk; loading a whole day at once cost more than the machine holding
-/// the data had — measured on the capture host as a process killed by the
-/// kernel after it had reported 2,114,759 depth records, on 1 GiB of RAM.
-///
-/// The archive is already written one file per hour, so an hour is the
-/// batch the data offers. Carrying the aggregator across batches is what
-/// makes that safe: the order book, the cumulative volume and the open
-/// window are state that spans hours, and per-hour calls that each
-/// started fresh would report an unknown quote at the top of every hour
-/// and restart the volume counter twenty-four times a day.
-///
-/// Ordering inside the batch is by exchange time, as before. Across
-/// batches it comes from the archive's own layout, which files a record
-/// under the event time it carries — so an hour's records belong to that
-/// hour and the boundary needs no reordering.
-pub fn fold_into(
-    venue: &dyn Venue,
-    sources: &[Source<'_>],
-    scales: Scales,
-    agg: &mut Aggregator,
-    report: &mut Report,
-) -> Vec<Tick> {
-    let mut events: Vec<Event> = Vec::new();
-    collect(venue, sources, scales, report, &mut events);
-
-    // Two streams recorded by two sockets arrive interleaved only by
-    // accident. Ordering by exchange time puts them back into the order
-    // the venue produced them, which is the order the book and the
-    // extremes both assume.
-    events.sort_by_key(|e| (e.at, e.local));
-
-    let mut ticks = Vec::new();
-    for event in &events {
-        let closed = match &event.kind {
-            EventKind::Gap => agg.on_gap(event.at, event.local),
-            EventKind::Depth(update) => agg.on_depth(event.at, event.local, update),
-            EventKind::Trade(t) => agg.on_trade(event.at, event.local, t),
-        };
-        ticks.extend(closed);
+    if window_ns <= 0 {
+        return Err("window must be positive".to_string());
     }
-    ticks
-}
 
-/// Read a batch of sources into time-stamped events.
-///
-/// Shared by both folds so they cannot disagree about what a record
-/// means — which record is a gap, which payload is a trade, and which
-/// of the ones that are not get counted as unparseable rather than as
-/// the venue saying nothing happened.
-fn collect(
-    venue: &dyn Venue,
-    sources: &[Source<'_>],
-    scales: Scales,
-    report: &mut Report,
-    events: &mut Vec<Event>,
-) {
+    let mut events: Vec<Event> = Vec::new();
+    let mut report = Report::default();
+
     for source in sources {
         for record in source.records {
             if record.kind == Kind::Control {
@@ -235,85 +125,95 @@ fn collect(
                         local: record.local_ts,
                         kind: EventKind::Trade(t),
                     }),
-                    // An adapter returns `None` both for a payload it
-                    // cannot read and for one declaring no trade. The
-                    // trade id tells them apart: a venue's placeholder
-                    // record carries one, and a payload this build
-                    // cannot parse at all carries nothing it recognises.
-                    None if !venue.trade_ids(&record.payload).is_empty() => {
-                        report.non_trades += 1;
-                    }
                     None => report.unparseable += 1,
                 },
                 _ => {}
             }
         }
     }
-}
 
-/// Fold one batch into ticks **and** the depth behind them.
-///
-/// [`fold_into`] produces the projection a strategy consumes. This
-/// produces that plus the updates it was projected from, interleaved in
-/// the order the venue produced them, which is what a matcher above L1
-/// needs — the whole reason the tier exists is the book the tick threw
-/// away.
-///
-/// # The order is the point
-///
-/// Each arrival is placed where it happened. An update inside an open
-/// window reaches the book before that window's tick, because the book
-/// moved before the window closed. An update that *closes* a window --
-/// the first event of the next one -- comes after that tick, because it
-/// belongs to the window after the one being summarised.
-///
-/// Both follow from the same rule and the second is the one that is
-/// easy to get backwards: emitting every update before every tick
-/// matches orders against a book from the next window, and a backtest
-/// is better for it in exactly the way that makes it wrong.
-///
-/// The two are the same events read twice — the aggregator rebuilds a
-/// book to find the best bid and ask, and a matcher rebuilds one to find
-/// the queue. That is deliberate duplication rather than shared state:
-/// the tick's quote is a projection anyone can consume, and the
-/// matcher's book belongs to the run being matched.
-pub fn fold_into_observations(
-    venue: &dyn Venue,
-    sources: &[Source<'_>],
-    scales: Scales,
-    agg: &mut Aggregator,
-    report: &mut Report,
-) -> Vec<Observation> {
-    let mut events: Vec<Event> = Vec::new();
-    collect(venue, sources, scales, report, &mut events);
+    // Two streams recorded by two sockets arrive interleaved only by
+    // accident. Ordering by exchange time puts them back into the order
+    // the venue produced them, which is the order the book and the
+    // extremes both assume.
     events.sort_by_key(|e| (e.at, e.local));
 
-    let mut out = Vec::with_capacity(events.len());
-    for event in &events {
-        // Any window this event closed goes first. That window is the
-        // summary of the time *before* this event, and the matcher acts
-        // on it at its close -- so an update arriving after it must not
-        // reach the book beforehand. Emitting the update first was the
-        // first version of this loop, and it means an order matched
-        // against a book from the next window: the direction that
-        // flatters a backtest.
-        let closed = match &event.kind {
-            EventKind::Gap => agg.on_gap(event.at, event.local),
-            EventKind::Depth(update) => agg.on_depth(event.at, event.local, update),
-            EventKind::Trade(t) => agg.on_trade(event.at, event.local, t),
-        };
-        out.extend(closed.into_iter().map(Observation::Tick));
+    let mut ticks = Vec::new();
+    let mut book = Book::new();
+    let mut bootstrapped = false;
+    let mut volume_total: i64 = 0;
+    let mut bid: i64 = 0;
+    let mut ask: i64 = 0;
+    let mut open: Option<Window> = None;
 
-        // Then this event's own depth. An update falling inside the
-        // open window closes nothing, so it still reaches the book
-        // before that window's tick -- which is also correct, and is
-        // the same rule seen from the other side: the book moves when
-        // it moved.
-        if let EventKind::Depth(update) = &event.kind {
-            out.push(Observation::Depth(update.clone()));
+    for event in &events {
+        let start = event.at - event.at.rem_euclid(window_ns);
+        match &mut open {
+            Some(w) if w.start == start => {}
+            Some(w) => {
+                ticks.push(w.close(bid, ask, volume_total));
+                if w.trades == 0 {
+                    report.quiet_windows += 1;
+                }
+                *w = Window::new(start);
+            }
+            None => open = Some(Window::new(start)),
+        }
+        let window = open.as_mut().expect("a window is open");
+        window.last_local = event.local;
+
+        match &event.kind {
+            EventKind::Gap => {
+                // The capture declared that it stopped listening, so the
+                // book cannot span this. Dropping it means the next
+                // windows carry no top of book until a fresh update
+                // rebuilds one, which is the honest answer: a stale best
+                // bid is worse than an absent one, because the engine
+                // treats zero as "unknown" and falls back to trades.
+                book = Book::new();
+                bootstrapped = false;
+                // A dropped book has no quote to report, and reporting
+                // the one from before the gap would be worse than
+                // reporting none.
+                bid = 0;
+                ask = 0;
+            }
+            EventKind::Depth(update) => {
+                if !bootstrapped {
+                    book.install_snapshot(update.first_id.saturating_sub(1), &[], &[]);
+                    bootstrapped = true;
+                }
+                if book.apply(update).is_ok() {
+                    report.depth_applied += 1;
+                } else {
+                    // A break the capture did not declare. Resynchronise
+                    // the way a live consumer would rather than carrying
+                    // a book that is now wrong.
+                    book = Book::new();
+                    book.install_snapshot(update.first_id.saturating_sub(1), &[], &[]);
+                    let _ = book.apply(update);
+                    report.depth_applied += 1;
+                }
+                bid = book.bids().best().map_or(0, |l| l.price);
+                ask = book.asks().best().map_or(0, |l| l.price);
+            }
+            EventKind::Trade(t) => {
+                report.trades += 1;
+                window.observe_trade(t.price);
+                volume_total = volume_total.saturating_add(t.qty);
+            }
         }
     }
-    out
+
+    if let Some(w) = open {
+        ticks.push(w.close(bid, ask, volume_total));
+        if w.trades == 0 {
+            report.quiet_windows += 1;
+        }
+    }
+
+    report.ticks = ticks.len() as u64;
+    Ok((ticks, report))
 }
 
 struct Event {
@@ -328,7 +228,67 @@ enum EventKind {
     Gap,
 }
 
-pub mod batches;
+struct Window {
+    start: i64,
+    last_local: i64,
+    last: i64,
+    high: i64,
+    low: i64,
+    trades: u64,
+}
+
+impl Window {
+    fn new(start: i64) -> Self {
+        Self {
+            start,
+            last_local: start,
+            last: 0,
+            high: 0,
+            low: 0,
+            trades: 0,
+        }
+    }
+
+    /// Fold a trade into this window's extremes.
+    ///
+    /// `low` starts at zero meaning "unset" rather than "zero price", so
+    /// the first trade seeds it instead of losing to it.
+    fn observe_trade(&mut self, price: i64) {
+        self.last = price;
+        if self.trades == 0 {
+            self.high = price;
+            self.low = price;
+        } else {
+            self.high = self.high.max(price);
+            self.low = self.low.min(price);
+        }
+        self.trades += 1;
+    }
+
+    /// Close the window, reading top of book at the moment it ends.
+    ///
+    /// The book is passed in rather than accumulated in the window
+    /// because it is not a property of the window: it is state that
+    /// persists across them. Recording it only when a depth update
+    /// happened to land inside a window reported `bid = ask = 0` for
+    /// every other one, and the engine reads zero as "unknown" and falls
+    /// back to trade prices — so a window with trades and no depth
+    /// update quietly lost the quote it could have had.
+    fn close(&self, bid: i64, ask: i64, volume_total: i64) -> Tick {
+        Tick {
+            stamp: Stamp {
+                exch: Nanos(self.start),
+                local: Nanos(self.last_local),
+            },
+            last: PriceTicks(self.last),
+            high: PriceTicks(self.high),
+            low: PriceTicks(self.low),
+            bid: PriceTicks(bid),
+            ask: PriceTicks(ask),
+            volume: QtyLots(volume_total),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

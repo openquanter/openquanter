@@ -167,8 +167,6 @@ mod tests {
         PositionSnapshot {
             symbol: "BTCUSDT".into(),
             position_side: side.into(),
-            amount_text: String::new(),
-            entry_text: String::new(),
             amount,
             entry_price: 71_444.87,
             unrealized: -2_197.75,

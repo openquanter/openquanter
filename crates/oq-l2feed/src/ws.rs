@@ -71,21 +71,6 @@ impl MessageSource for WsSource {
                         .map_err(io::Error::other)?;
                     continue;
                 }
-                // A read timeout keeps its kind. Wrapping it in
-                // `io::Error::other` erases `WouldBlock`, and a caller
-                // that polls with a short timeout then cannot tell "no
-                // data this instant" from "the connection is gone" — so
-                // it drops a healthy socket and opens another, once per
-                // quiet interval. Measured on a real feed: fourteen
-                // reconnections in two minutes on a contract that was
-                // simply not trading.
-                //
-                // The capture loop is unaffected: it counts any error as
-                // a disconnect without inspecting the kind, which is the
-                // right reading for the long timeout it uses.
-                Err(e) if is_read_timeout(&e) => {
-                    return Err(io::Error::new(io::ErrorKind::WouldBlock, e.to_string()));
-                }
                 Err(e) => return Err(io::Error::other(e)),
             };
             self.silent_rounds = 0;
@@ -300,13 +285,6 @@ fn classify(policy: &AckPolicy, payload: &[u8]) -> Step {
 
 /// Whether a read failed because nothing arrived in time, as opposed to
 /// because the connection broke. Only the first is silence.
-/// Exposed for a test in another file; not part of the public contract.
-#[doc(hidden)]
-#[must_use]
-pub fn is_read_timeout_for_test(e: &tungstenite::Error) -> bool {
-    is_read_timeout(e)
-}
-
 fn is_read_timeout(e: &tungstenite::Error) -> bool {
     matches!(
         e,
