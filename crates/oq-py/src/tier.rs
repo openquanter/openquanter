@@ -102,6 +102,30 @@
 //! after a warm-up pass, two runs each, and a reversed-order repeat that
 //! moves them by 1.3% to 4.5%.
 //!
+//! # Reproducing this
+//!
+//! ```text
+//! python crates/oq-py/bench/cost.py              # the workspace's own market
+//! python crates/oq-py/bench/cost.py ticks.oqtk   # a tick file
+//! ```
+//!
+//! With no argument it runs over the seeded synthetic market, so the
+//! method is reproducible by anyone with a checkout. Given a tick file it
+//! runs over that, which is the only way to get figures describing a real
+//! load — the recorded-tick numbers above came from one.
+//!
+//! The synthetic run does not reproduce those numbers and is not meant
+//! to. On two million synthetic ticks the same split reads 19% / 7% / 74%
+//! against 37% / 6% / 58% on recorded ones, and the batch curve flattens
+//! rather than turning over. What carries across is the shape of the
+//! answer — the strategy's own arithmetic dominates, and batching stops
+//! paying well before the largest batch — which is the part worth relying
+//! on when choosing a batch size.
+//!
+//! What cannot be put in this repository is the other side of the
+//! comparison: the ratio against the predecessor needs the predecessor,
+//! which is closed. The half measured here is the half anyone can check.
+//!
 //! Put beside the accuracy cost on the example crossover, the trade is
 //! legible rather than a matter of taste: a batch of 8 buys 2.8x for
 //! 1.3% of the strategy's edge; a batch of 64 buys 5.8x for 18% of it;
