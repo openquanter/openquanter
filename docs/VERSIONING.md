@@ -78,40 +78,6 @@ a lie. They are separate numbers because they answer separate questions:
 the crate version says what API you are compiling against, and the
 format version says what a file on disk contains.
 
-## Where releases go
-
-| Artifact | Registry | State |
-|---|---|---|
-| `openquanter` (Python) | [PyPI](https://pypi.org/project/openquanter/) | Published, `2.0.0a1` |
-| `oq-*` (Rust) | crates.io | Names reserved, nothing published |
-
-The Python package leads, and the Rust crates trail on purpose. A binding
-has a small, deliberately-chosen surface — the statistics and the strategy
-tier — and its users are people evaluating whether this is worth their time.
-A crate exposes every public type in the workspace, and the workspace's
-types are still moving. Publishing them now would pin people to a version
-about to change under them, and a version yanked from crates.io is still a
-version somebody built against.
-
-**When the crates go up.** Not on a date. The condition is the one this
-section already gives: the workspace's types stop moving. That is what
-2.0 means here — the roadmap puts API stabilisation after M3 and after
-external adoption — so the crates publish when the API they expose is
-one somebody can build against without being moved off it. Until then
-the install path is `git clone`, and
-[Quickstart](QUICKSTART.md#1-build) says so rather than offering a
-`cargo install` that succeeds and delivers an empty crate.
-
-That contradiction existed. This page said *nothing published* while
-the quickstart listed five `cargo install` lines as the first thing to
-do, and a reader following the quickstart got placeholders and no
-error. Two documents, opposite claims about the same fact.
-
-Note that a PyPI version cannot be re-uploaded either. `2.0.0a1` is
-permanent, which is why the metadata that ships with it — the description,
-the README, the classifiers — is checked before the upload rather than
-corrected after.
-
 ## Changing the version
 
 Edit `[workspace.package].version` and the versions in
