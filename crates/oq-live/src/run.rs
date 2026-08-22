@@ -658,77 +658,104 @@ where
     while Instant::now() < deadline && !shutdown_requested() {
         let now = Nanos(now_ns());
 
-        // Market data.
+        // Market data, drained rather than sampled.
+        //
+        // One message per stream per iteration was a rate limit nobody
+        // chose. The depth subscription is `@depth@0ms`, which sends on
+        // every change; the loop took one of them and then waited on the
+        // other stream and the account stream, each with its own read
+        // timeout, so an iteration cost about a second. Measured over
+        // eighty minutes it consumed 1.08 depth messages a second, and
+        // the rest sat in the socket.
+        //
+        // What that buffer does is visible in the journal now that a
+        // tick carries both clocks: the venue's timestamp fell behind
+        // the local one by a median of seventeen seconds and a tail of
+        // a hundred and forty-three, because the events being processed
+        // had arrived that long ago. Then the venue drops a consumer
+        // that will not keep up, the backlog is discarded with the
+        // connection, and the venue axis jumps forward — which is the
+        // hole that three separate readings called a blind window.
+        //
+        // The budget is a fairness bound, not a rate limit: a firehose
+        // on one stream must not starve the account stream, which is
+        // where fills arrive.
         for which in [0_u8, 1] {
-            let stream = if which == 0 {
-                market.depth()
-            } else {
-                market.trade()
-            };
-            match stream.poll() {
-                Ok(Some(bytes)) => {
-                    let at = event_time(&bytes).unwrap_or(now.0);
-                    let closed = if which == 0 {
-                        feed_venue
-                            .parse_depth(&bytes, scales)
-                            .ok()
-                            .and_then(|u| agg.on_depth(at, now.0, &u))
-                    } else {
-                        feed_venue
-                            .parse_trade(&bytes, scales)
-                            .and_then(|t| agg.on_trade(at, now.0, &t))
-                    };
-                    if let Some(tick) = closed {
-                        ticks += 1;
-                        trader.record_tick(&tick);
-                        metrics.ticks += 1;
-                        shadow.on_tick(tick);
-                        for output in books.on_tick(&tick) {
-                            // Under venue matching the kernel does not
-                            // fill, so anything here is the account
-                            // going past its maintenance requirement —
-                            // which is worth a line rather than a
-                            // silence.
-                            println!("books            {output:?}");
-                        }
-                        last_tick = Some(tick);
-                        let ctx = books.context(tick);
-                        for outcome in trader.on_tick(&ctx, now) {
-                            if let Outcome::Sent { local, .. } = &outcome {
-                                // The kernel is told an order exists.
-                                // Without this `Context::working` is zero
-                                // for every live strategy that reads it,
-                                // and the books hold no order for a fill
-                                // to answer.
-                                if let Some((side, qty, offset)) =
-                                    shape_of(trader.submitted(), *local)
-                                {
-                                    books.on_submit(*local, side, qty, offset, now);
-                                    shadow.apply(&oq_core::Event::Submit {
-                                        instrument: None,
-                                        id: *local,
-                                        side,
-                                        price: None,
-                                        qty,
-                                        offset,
-                                        stamp: oq_types::Stamp::new(now.0, now.0),
-                                    });
+            for _ in 0..DRAIN_BUDGET {
+                let stream = if which == 0 {
+                    market.depth()
+                } else {
+                    market.trade()
+                };
+                match stream.poll() {
+                    Ok(Some(bytes)) => {
+                        let at = event_time(&bytes).unwrap_or(now.0);
+                        let closed = if which == 0 {
+                            feed_venue
+                                .parse_depth(&bytes, scales)
+                                .ok()
+                                .and_then(|u| agg.on_depth(at, now.0, &u))
+                        } else {
+                            feed_venue
+                                .parse_trade(&bytes, scales)
+                                .and_then(|t| agg.on_trade(at, now.0, &t))
+                        };
+                        if let Some(tick) = closed {
+                            ticks += 1;
+                            trader.record_tick(&tick);
+                            metrics.ticks += 1;
+                            shadow.on_tick(tick);
+                            for output in books.on_tick(&tick) {
+                                // Under venue matching the kernel does not
+                                // fill, so anything here is the account
+                                // going past its maintenance requirement —
+                                // which is worth a line rather than a
+                                // silence.
+                                println!("books            {output:?}");
+                            }
+                            last_tick = Some(tick);
+                            let ctx = books.context(tick);
+                            for outcome in trader.on_tick(&ctx, now) {
+                                if let Outcome::Sent { local, .. } = &outcome {
+                                    // The kernel is told an order exists.
+                                    // Without this `Context::working` is zero
+                                    // for every live strategy that reads it,
+                                    // and the books hold no order for a fill
+                                    // to answer.
+                                    if let Some((side, qty, offset)) =
+                                        shape_of(trader.submitted(), *local)
+                                    {
+                                        books.on_submit(*local, side, qty, offset, now);
+                                        shadow.apply(&oq_core::Event::Submit {
+                                            instrument: None,
+                                            id: *local,
+                                            side,
+                                            price: None,
+                                            qty,
+                                            offset,
+                                            stamp: oq_types::Stamp::new(now.0, now.0),
+                                        });
+                                    }
                                 }
+                                match &outcome {
+                                    Outcome::Sent { .. } => sent += 1,
+                                    Outcome::Cancelled { .. } => cancelled += 1,
+                                    Outcome::Refused { .. } => refused += 1,
+                                    Outcome::Unresolved { .. } => unresolved += 1,
+                                    Outcome::CancelFailed { .. } => cancel_failed += 1,
+                                    _ => {}
+                                }
+                                report(&outcome);
                             }
-                            match &outcome {
-                                Outcome::Sent { .. } => sent += 1,
-                                Outcome::Cancelled { .. } => cancelled += 1,
-                                Outcome::Refused { .. } => refused += 1,
-                                Outcome::Unresolved { .. } => unresolved += 1,
-                                Outcome::CancelFailed { .. } => cancel_failed += 1,
-                                _ => {}
-                            }
-                            report(&outcome);
                         }
                     }
+                    // Nothing more waiting: on to the other stream.
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("{} stream lost: {e}", stream.name());
+                        break;
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => eprintln!("{} stream lost: {e}", stream.name()),
             }
         }
 
@@ -1267,6 +1294,13 @@ fn report(outcome: &Outcome) {
         Outcome::UnknownOrder(id) => println!("unknown order    {id:?} — not in this run's map"),
     }
 }
+
+/// Messages taken from one market data stream in one pass.
+///
+/// A bound on fairness rather than on throughput: the loop drains until
+/// the stream is empty, and this stops a burst on one stream from
+/// starving the other and the account stream behind it.
+const DRAIN_BUDGET: usize = 256;
 
 /// The smallest quantity whose notional clears the contract's floor.
 ///
