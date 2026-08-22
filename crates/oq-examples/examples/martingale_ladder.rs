@@ -19,12 +19,90 @@
 //! **This is not a strategy to run.** It is here because it is the
 //! clearest demonstration of what the margin overlay is for.
 
-use oq_backtest::{DeviationReport, MarginMode, RunConfig, tail_divergence};
+use oq_backtest::{Context, DeviationReport, Intent, MarginMode, RunConfig, Strategy};
 use oq_examples::{crash_series, money, price};
 use oq_margin::{Contract, TierTable};
-use oq_types::{Cash, InstrumentId, PriceTicks};
+use oq_types::{Cash, Fill, InstrumentId, OrderId, PriceTicks, QtyLots, Side};
 
-use oq_examples::MartingaleLadder;
+/// Buys a first lot, then doubles down every time price falls another
+/// step below the average entry.
+struct MartingaleLadder {
+    /// Fraction below the average entry at which the next rung sits.
+    step: f64,
+    /// Lots for the first rung; each subsequent rung doubles.
+    base_qty: i64,
+    /// Rungs already filled.
+    rungs: u32,
+    /// Cap, because a ladder without one is a countdown rather than a
+    /// strategy. It still is not enough, which is the point.
+    max_rungs: u32,
+    next_id: u64,
+}
+
+impl MartingaleLadder {
+    fn new() -> Self {
+        Self {
+            step: 0.04,
+            base_qty: 4,
+            rungs: 0,
+            max_rungs: 6,
+            next_id: 1,
+        }
+    }
+
+    fn id(&mut self) -> OrderId {
+        let id = OrderId::new(self.next_id);
+        self.next_id += 1;
+        id
+    }
+}
+
+impl Strategy for MartingaleLadder {
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+        if self.rungs == 0 {
+            self.rungs = 1;
+            let id = self.id();
+            out.push(Intent::Market {
+                id,
+                side: Side::Buy,
+                qty: QtyLots(self.base_qty),
+                offset: oq_types::Offset::Open,
+            });
+            return;
+        }
+
+        if self.rungs >= self.max_rungs || ctx.position.0 <= 0 {
+            return;
+        }
+
+        // Next rung: another `step` below the current average entry.
+        #[allow(clippy::cast_possible_truncation)]
+        let trigger = (f64::from(i32::try_from(ctx.entry.0).unwrap_or(i32::MAX))
+            * (1.0 - self.step * f64::from(self.rungs))) as i64;
+
+        if ctx.tick.low.0 <= trigger {
+            let qty = self.base_qty * (1 << self.rungs);
+            self.rungs += 1;
+            let id = self.id();
+            out.push(Intent::Market {
+                id,
+                side: Side::Buy,
+                qty: QtyLots(qty),
+                offset: oq_types::Offset::Open,
+            });
+        }
+    }
+
+    fn on_fill(&mut self, _fill: &Fill, _ctx: &Context, _out: &mut Vec<Intent>) {
+        // Position management would live here. This ladder deliberately
+        // has no exit: the lesson is about what happens when the market
+        // does not come back in time, not about exit design.
+    }
+
+    fn name(&self) -> &str {
+        "martingale-ladder"
+    }
+}
 
 fn main() {
     // Calm, then a 50% fall, then a partial recovery. The recovery is
@@ -37,14 +115,7 @@ fn main() {
         TierTable::example_btcusdt(),
         Cash::from_units(2_000),
     )
-    .with_margin(MarginMode::Enforced)
-    // The tail report needs a return series, and a run only produces one
-    // when it samples equity. Sample every tick: the enforced arm's
-    // series ends when the account does, so how fine a quantile this
-    // data can support is bounded not by the length of the run but by
-    // how long the account survived — a coarser interval here gets the
-    // 1st percentile refused for want of observations.
-    .sampling_equity_every(1);
+    .with_margin(MarginMode::Enforced);
 
     let report = DeviationReport::compare(&config, MartingaleLadder::new, &ticks);
 
@@ -83,50 +154,6 @@ fn main() {
     println!();
 
     println!("{}", report.summary_line());
-
-    // The numbers above are two endpoints. The tail report is the
-    // distribution: where in the return series the two arms actually
-    // part company, and by how much. See docs/MARGIN-FIDELITY.md.
-    match tail_divergence(&report.enforced, &report.ignored, &[0.01, 0.05, 0.10, 0.25]) {
-        Ok(f) => {
-            println!();
-            println!(
-                "tail divergence   paired over {} return samples",
-                f.paired_until
-            );
-            match f.diverged_at {
-                Some(i) => println!(
-                    "                  arms part at sample {i} of {}",
-                    f.paired_until
-                ),
-                None => println!("                  the arms never parted on this data"),
-            }
-            println!();
-            println!("  quantile        enforced      margin-free     overstated by");
-            for p in &f.tail {
-                println!(
-                    "  {:>7.0}%    {:>12.4}%   {:>12.4}%    {:>12.4}%",
-                    p.q * 100.0,
-                    p.enforced * 100.0,
-                    p.ignored * 100.0,
-                    p.overstatement() * 100.0
-                );
-            }
-            if let Some(worst) = f.worst_overstatement() {
-                println!();
-                println!(
-                    "  Worst at the {:.0}th percentile: the margin-free run reports a return\n  \
-                     {:.4} percentage points better than the account could have had.",
-                    worst.q * 100.0,
-                    worst.overstatement() * 100.0
-                );
-            }
-        }
-        // Not a failure of the strategy — a statement that this data
-        // cannot support the statistic, which is worth printing rather
-        // than silently skipping.
-        Err(why) => println!("\ntail divergence   unavailable: {why}"),
-    }
 
     if !report.margin_free_result_is_honest() {
         println!();
