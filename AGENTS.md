@@ -29,17 +29,10 @@ Guidance for AI coding agents (and humans) working in this repository.
 
 ```bash
 cargo build --workspace
-cargo test
+cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
-
-`cargo test` and not `--workspace`: the workspace variant also builds
-`oq-py`, whose tests link against a CPython shared library and fail on
-a machine whose Python does not match. The bindings have their own CI
-job with a pinned interpreter — `cargo clippy -p oq-py` and
-`cargo test -p oq-py` — and running them locally needs that interpreter
-present.
 
 ## Verification anchors
 
@@ -55,22 +48,6 @@ present.
   ones a generator would have found.
 - Golden tests replay sample data and compare full output. Golden baselines
   may only be regenerated with explicit human confirmation in the PR.
-
-## Working on this repository
-
-Branch naming, branch lifetime, squash merges and the review requirement
-are in [CONTRIBUTING.md](CONTRIBUTING.md#branches-and-merging) — the same
-rules apply to agents and to people, and they live in one place so they
-cannot drift apart.
-
-Two that are easy to get wrong from a terminal:
-
-- **Run the full local gate before pushing**, not part of it. `cargo fmt
-  --all -- --check` is the one usually skipped, and generated or
-  script-edited Rust is what trips it. Then confirm the run actually went
-  green (`gh run list --limit 1`) rather than assuming.
-- **Never push straight to `main`.** Open a pull request even when your
-  token could bypass the protection.
 
 ## Boundaries
 

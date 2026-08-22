@@ -51,7 +51,6 @@ pub use snapshot::{Snapshot, SnapshotStore};
 pub use writer::{SyncPolicy, Writer};
 
 use std::io;
-use std::path::PathBuf;
 
 /// Anything that went wrong reading or writing a journal.
 #[derive(Debug)]
@@ -67,18 +66,6 @@ pub enum JournalError {
     SequenceGap {
         expected: u64,
         found: u64,
-    },
-    /// Another writer holds this journal.
-    ///
-    /// Two processes appending to one journal interleave their records,
-    /// and the result is not repairable: the sequence is contiguous, the
-    /// frames decode, and the history describes a session that never
-    /// happened. Refusing to open is the only outcome that leaves a
-    /// usable record.
-    AlreadyOpen {
-        lock: PathBuf,
-        /// Whatever the holder wrote about itself, verbatim.
-        held_by: String,
     },
 }
 
@@ -98,12 +85,6 @@ impl core::fmt::Display for JournalError {
             Self::SequenceGap { expected, found } => {
                 write!(f, "sequence gap: expected {expected}, found {found}")
             }
-            Self::AlreadyOpen { lock, held_by } => write!(
-                f,
-                "journal already open: {} says {held_by}. \
-                 If that process is gone, remove the file.",
-                lock.display()
-            ),
         }
     }
 }
@@ -113,7 +94,7 @@ impl core::error::Error for JournalError {
         match self {
             Self::Io(e) => Some(e),
             Self::Corrupt { cause, .. } => Some(cause),
-            Self::SequenceGap { .. } | Self::AlreadyOpen { .. } => None,
+            Self::SequenceGap { .. } => None,
         }
     }
 }
