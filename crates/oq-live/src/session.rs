@@ -331,6 +331,10 @@ impl<E: Execution> Session<E> {
     pub fn record_tick(&mut self, tick: &oq_engine::Tick) {
         self.write(&Record::Tick {
             at: tick.stamp.exch,
+            // The tick already carries both; only one of them was being
+            // written down, and it was the one that cannot distinguish
+            // a feed that stopped from a venue clock that moved.
+            seen: tick.stamp.local,
             last: tick.last,
             bid: tick.bid,
             ask: tick.ask,

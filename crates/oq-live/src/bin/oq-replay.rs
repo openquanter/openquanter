@@ -56,6 +56,14 @@ fn main() -> ExitCode {
     };
 
     let mut ticks = 0u64;
+    // The two clocks, and the widest they drifted apart.
+    //
+    // A hole in the record is ambiguous with one clock: data that never
+    // arrived and a venue clock that jumped leave the same hole. With
+    // both, the answer is a subtraction — so it is done here rather than
+    // left to whoever next has to guess.
+    let mut skew_min = i64::MAX;
+    let mut skew_max = i64::MIN;
     let mut submitted = 0u64;
     let mut refused = 0u64;
     let mut fills = 0u64;
@@ -73,7 +81,12 @@ fn main() -> ExitCode {
             continue;
         };
         match &record {
-            Record::Tick { .. } => ticks += 1,
+            Record::Tick { at, seen, .. } => {
+                ticks += 1;
+                let skew = at.0 - seen.0;
+                skew_min = skew_min.min(skew);
+                skew_max = skew_max.max(skew);
+            }
             Record::Submitted { client_id, .. } => {
                 submitted += 1;
                 if !order.contains(client_id) {
@@ -95,6 +108,17 @@ fn main() -> ExitCode {
 
     println!();
     println!("ticks            {ticks}");
+    if ticks > 0 {
+        // Positive means the venue's clock ran ahead of this process's.
+        // A wide range means the two axes cannot be used
+        // interchangeably, which is the mistake that reading only one of
+        // them invites.
+        println!(
+            "clock skew       venue minus local: {:.1}s to {:.1}s",
+            skew_min as f64 / 1e9,
+            skew_max as f64 / 1e9
+        );
+    }
     println!("orders sent      {submitted}");
     println!("refused by gate  {refused}");
     println!("fills            {fills}");
@@ -150,13 +174,14 @@ fn render(record: &Record) -> String {
         ),
         Record::Tick {
             at,
+            seen,
             last,
             bid,
             ask,
             volume,
         } => format!(
-            "tick {}  last {} bid {} ask {} vol {}",
-            at.0, last.0, bid.0, ask.0, volume.0
+            "tick {}  seen {} last {} bid {} ask {} vol {}",
+            at.0, seen.0, last.0, bid.0, ask.0, volume.0
         ),
         Record::Submitted {
             at,
@@ -262,12 +287,13 @@ mod readout {
         shows(
             &Record::Tick {
                 at: Nanos(1_111),
+                seen: Nanos(6_666),
                 last: PriceTicks(2_222),
                 bid: PriceTicks(3_333),
                 ask: PriceTicks(4_444),
                 volume: QtyLots(5_555),
             },
-            &["1111", "2222", "3333", "4444", "5555"],
+            &["1111", "6666", "2222", "3333", "4444", "5555"],
         );
     }
 
