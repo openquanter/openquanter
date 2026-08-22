@@ -91,7 +91,18 @@ pub enum Record {
         qty_scale: u8,
     },
     Tick {
+        /// The venue's own time for the event this tick was folded from.
         at: Nanos,
+        /// When this process saw it.
+        ///
+        /// Both, because with one of them a gap in the record is
+        /// ambiguous: data that never arrived and a venue clock that
+        /// jumped leave exactly the same hole. A run was characterised
+        /// three times from `at` alone and characterised wrongly each
+        /// time — the tick counter had risen through every window the
+        /// timestamps said was empty, and nothing in the journal could
+        /// say which of the two axes had moved.
+        seen: Nanos,
         last: PriceTicks,
         bid: PriceTicks,
         ask: PriceTicks,
@@ -199,6 +210,7 @@ impl Record {
             }
             Self::Tick {
                 at,
+                seen,
                 last,
                 bid,
                 ask,
@@ -209,6 +221,10 @@ impl Record {
                 put_i64(&mut out, bid.0);
                 put_i64(&mut out, ask.0);
                 put_i64(&mut out, volume.0);
+                // Appended, so a record written by an older build fails
+                // to decode rather than being read with a field shifted
+                // out from under it.
+                put_i64(&mut out, seen.0);
             }
             Self::Submitted {
                 at,
@@ -307,6 +323,7 @@ impl Record {
                 bid: PriceTicks(take_i64(&mut p)?),
                 ask: PriceTicks(take_i64(&mut p)?),
                 volume: QtyLots(take_i64(&mut p)?),
+                seen: Nanos(take_i64(&mut p)?),
             },
             kind::SUBMITTED => Self::Submitted {
                 at: Nanos(take_i64(&mut p)?),
@@ -427,6 +444,7 @@ mod tests {
         });
         roundtrip(&Record::Tick {
             at: Nanos(1_786_976_849_705_000_000),
+            seen: Nanos(9_876_543),
             last: PriceTicks(300_000),
             bid: PriceTicks(299_990),
             ask: PriceTicks(300_010),
