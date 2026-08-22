@@ -47,6 +47,28 @@
 //! batch=4096  10.70 M ticks/s   7.15x
 //! ```
 //!
+//! That curve is the boundary's, and it does not predict a real one. The
+//! same sweep over 149.5 million recorded trades, with a moving-average
+//! rule that actually computes something and an engine that actually
+//! fills orders, turns over sooner and then goes backwards:
+//!
+//! ```text
+//! batch=1      1.16 M ticks/s   1.00x
+//! batch=64     1.58 M ticks/s   1.36x
+//! batch=512    1.65 M ticks/s   1.41x
+//! batch=4096   1.40 M ticks/s   1.20x   <- slower than 512
+//! ```
+//!
+//! Both are honest and they disagree, which is the point of keeping the
+//! two side by side. Batching removes one cost — the crossing — and a
+//! strategy that does nothing is almost entirely that cost, so removing
+//! it looks like a 7x engine. Once the per-observation work is real, the
+//! crossing is a small share of it and the ceiling arrives early;
+//! past it, larger batches only add the cost of buffering them.
+//!
+//! The practical reading: choose the batch by measuring the strategy that
+//! will run, not by taking 4,096 from the first table.
+//!
 //! Put beside the accuracy cost on the example crossover, the trade is
 //! legible rather than a matter of taste: a batch of 8 buys 2.8x for
 //! 1.3% of the strategy's edge; a batch of 64 buys 5.8x for 18% of it;
