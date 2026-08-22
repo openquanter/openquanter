@@ -608,9 +608,9 @@ does not belong on a shared or bandwidth-constrained link.
 | P2.4 | `oq-data` | Dual-timestamp layer, bitemporal store, strict as-of joins, leakage tests |
 | P2.5 | `oq-features` skeleton | One feature definition, two execution paths, consistency metric emitted |
 | P2.6 | `oq-cli` + `oq-stats` integration | Sweeps emit DSR/PBO by default; strict mode refuses over-threshold results |
-| P2.7 | Adoption readiness | Quickstart, two example strategies, sample dataset with goldens, external cold start ≤ 30 min (G11) |
+| P2.7 | Adoption readiness | Quickstart, two example strategies, sample dataset with goldens. The timed external cold start that used to close this row went with `G11` |
 
-**Gate:** G3, G4, G5, G7, G11 initial; beta release.
+**Gate:** G3, G4, G5, G7; beta release. (`G11` was withdrawn.)
 
 ### Phase 3 — Live trading (M3, trigger-gated)
 
