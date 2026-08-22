@@ -444,9 +444,13 @@ impl PyDriven {
                     .and_then(|()| mirror("short_position", pyctx.short_position))
                     .and_then(|()| mirror("equity", pyctx.equity))
                     .and_then(|()| mirror("last", pyctx.last));
-                let batch = core::mem::take(&mut self.pending);
+                // Drained rather than taken. `mem::take` leaves a Vec
+                // with no capacity behind, so the buffer `new` sized once
+                // is regrown from nothing on every batch after the first
+                // — the `with_capacity` there was doing nothing past the
+                // opening call.
                 mirrored
-                    .and_then(|()| PyList::new(py, batch))
+                    .and_then(|()| PyList::new(py, self.pending.drain(..)))
                     .and_then(|list| obj.call_method1("on_batch", (list,)))
                     .map(pyo3::Bound::unbind)
             }
