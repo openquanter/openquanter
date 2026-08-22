@@ -458,6 +458,8 @@ which venue is being traded.
 | `oq-parity` | Trade-by-trade diff and difference attribution; baselines identified by the (commit, data hash, config hash) triple (D13) | M1 (built first) |
 | `oq-data` | Dual-timestamp Arrow layer, bitemporal reference data, strict as-of joins | M1–M2 |
 | `oq-l2feed` | Capture toolkit: incremental depth, BBO, trades, mark price, liquidations, rule tables | M0 |
+| `oq-book` | Order book rebuilt from incremental depth, shared by capture and matching | M0 / M4 |
+| `oq-ingest` | Captured archives folded into the tick format the engine replays | M0 |
 | `oq-strategy` | Tier A traits, indicator components | M2 |
 | `oq-py` | Tier B: compatibility mode and throughput mode | M2 |
 | `oq-stats` | DSR, PBO/CSCV, trial registry | M0 |
@@ -506,20 +508,27 @@ openquanter/
       src/
         lib.rs
         book.rs         price-time priority order book
-        l0.rs           tick-replay matching; l1.rs, l2.rs follow
-        matching/       submodules appear as the ladder grows
+        l0.rs           tick-replay matching
+        l1.rs, l2.rs    the rest of the ladder, each wrapping the one below
+    oq-book/
+      src/              depth application and the book both halves share
     oq-l2feed/
       src/
         *.rs            framing, sealing, depth parsing, reconstruction
-        bin/            oq-capture, oq-book-check
+        bin/            oq-capture, oq-book-check, oq-merge, oq-resequence
+    oq-ingest/
+      src/
+        agg.rs          windowed aggregation from archive to tick
+        bin/            oq-ingest, oq-tiers
     oq-examples/
       examples/         runnable teaching strategies
       benches/          criterion benchmarks
       tests/golden.rs   pins every number the documentation quotes
     oq-gateway/
       src/
-        contract.rs     the connector contract every venue implements
-        binance/        market_data.rs, orders.rs, user_stream.rs, reconcile.rs
+        exec.rs         the connector contract every venue implements
+        binance.rs, okx.rs   one adapter each
+        conformance.rs  the suite both adapters answer to
     ...
   docs/                 requirements, roadmap, formats, quickstart
   scripts/              repository tooling: DCO check, secret scan,
@@ -720,7 +729,12 @@ welcome as issues.
    question.
 3. **Second and third venue priority.** Driven by user demand; the connector
    contract should be validated by at least two structurally different venues
-   before 2.0.
+   before 2.0. Partly answered since this was written: OKX is the second, on
+   both the capture and the order side, and each side has a conformance suite
+   both adapters pass. It found what a second venue is for — Binance answers a
+   refusal with an HTTP status, OKX answers one inside a 200 — which is the
+   kind of disagreement no amount of design settles. What is still open is the
+   third venue's priority, and OKX's signed half, which needs a live account.
 4. **Queue model selection policy.** How the framework should choose between
    conservative and probabilistic queue models when calibration data is thin —
    currently a manual setting, arguably should be automatic with a warning.
