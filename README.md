@@ -146,8 +146,10 @@ deciding whether to use this now.
 - **Gap attribution** — decompose the live/backtest difference into slippage,
   queue position, funding, latency and fee tier, and report what will not
   decompose as an **unexplained residual**. This is the aim at the top of the
-  page made concrete, and it is the **furthest away** of these pillars: it
-  requires the live process to journal its decisions, which it does not yet.
+  page made concrete. The instrument exists and the live process journals its
+  decisions, so `oq-belief` can reconstruct what it believed and diff that
+  against the venue. What it has not had is a long run to decompose: the
+  pillar is built and unexercised, which is a different thing from unbuilt.
 
 ## Documentation
 
@@ -279,8 +281,28 @@ comparison. `oq-tiers` runs it against a
 captured archive, and `Event::Depth` puts the book in the journal, so an
 L2 run replays into the market it actually matched in.
 
-**Designed but not built:** everything under *AI-native* above. The pillars
-section describes where this is going; this section describes where it is.
+**AI-native, in parts.** The RL environments are built — `oq-env` gives
+`Env` and `VecEnv` with seeds threaded through, an action that is a target
+position rather than an order, and a reproduction test that holds because
+stepping is not concurrent; `cargo run --release -p oq-examples --example
+rl_rollout` steps a batch of eight and asserts the three things a training
+loop depends on — same seed replays, environments stay independent, and a
+larger position changes the result. ONNX and compiled-tree inference is not built
+and waits on a trained model to run; the LLM sandbox is deliberately
+labelled experimental, because published evidence for LLM-driven strategy
+discovery is weak and pretending otherwise would be dishonest.
+
+**Also built since this section was last true:** an account holds several
+instruments on one balance (cross margin) or one balance each
+(`oq_core::Shards`, isolated margin, and the arrangement `FR-CORE-6`
+describes). `cargo run --release -p oq-examples --example isolated_margin`
+runs the same two positions both ways and shows the arrangement deciding
+whether one of them survives. An account can also hold a currency it does
+not settle in, with a total across currencies once rates and the instant
+they were true at are supplied.
+
+The pillars section describes where this is going; this section describes
+where it is.
 
 **On live trading specifically,** because the pieces above make it easy to
 overstate. The whole loop has run against a real venue's testnet. It reads
