@@ -75,7 +75,7 @@ fn main() -> ExitCode {
     };
     println!("venue           {venue_id}");
 
-    let bytes = oq_l2feed::archive::read(&path).expect("read");
+    let bytes = std::fs::read(&path).expect("read");
     let (records, torn) = decode_all(&bytes).expect("decode");
 
     let mut ids: Vec<u64> = records
@@ -107,61 +107,6 @@ fn main() -> ExitCode {
     println!("repeated ids    {dupes}");
     println!("gaps in ids     {}", gaps.len());
     println!("trades missing  {missing}");
-
-    // The order flow, which the same records carry and nothing read
-    // until now. It is here rather than in its own command because the
-    // file is already decoded and the venue already parsed: a second
-    // command would re-read the archive to answer a question this one
-    // has the bytes for.
-    // Any scale parses the side correctly: the aggressor is a flag, not
-    // a number, so a wrong precision would rescale a price this does not
-    // read rather than change which way the trade went.
-    let scales = oq_l2feed::depth::Scales::default();
-    let mut flow: Vec<oq_stats::Aggressor> = Vec::new();
-    let mut stamps: Vec<i64> = Vec::new();
-    for r in records.iter().filter(|r| r.kind == Kind::Payload) {
-        let Some(t) = venue.parse_trade(&r.payload, scales) else {
-            continue;
-        };
-        let side = match t.aggressor {
-            Some(oq_types::Side::Buy) => oq_stats::Aggressor::Buy,
-            Some(oq_types::Side::Sell) => oq_stats::Aggressor::Sell,
-            None => continue,
-        };
-        flow.push(side);
-        stamps.push(r.exch_ts);
-    }
-
-    println!();
-    if flow.len() < total {
-        println!(
-            "with a side    {} of {total} — the rest carry no aggressor",
-            flow.len()
-        );
-    }
-
-    // Raw trades first: this is what a queue faces, one at a time.
-    match oq_stats::OrderFlow::measure(&flow, 20) {
-        Ok(f) => print!("trades — {}", f.render()),
-        Err(e) => println!("trade flow      not measurable: {e}"),
-    }
-
-    // Then collapsed to orders, which is the quantity the literature's
-    // coefficient is over. One order crossing several resting ones
-    // produces several trades on the same side in the same millisecond,
-    // and counting those separately reports one decision as a run.
-    println!();
-    let orders = oq_stats::as_orders(&flow, &stamps);
-    println!(
-        "collapsed      {} trades into {} orders ({:.1} trades each)",
-        flow.len(),
-        orders.len(),
-        flow.len() as f64 / orders.len().max(1) as f64
-    );
-    match oq_stats::OrderFlow::measure(&orders, 20) {
-        Ok(f) => print!("orders — {}", f.render()),
-        Err(e) => println!("order flow      not measurable: {e}"),
-    }
     for (a, b) in gaps.iter().take(10) {
         println!("    gap {a} -> {b}, {} missing", b - a - 1);
     }

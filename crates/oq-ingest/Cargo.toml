@@ -8,26 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oq-backtest.workspace = true
 oq-data.workspace = true
 oq-engine.workspace = true
 oq-l2feed.workspace = true
-oq-margin.workspace = true
 oq-types.workspace = true
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-# For `tests/quiet_windows.rs`, the only test that can show what a
-# malformed tick actually costs. It runs the aggregator's own output
-# through a margin-enforcing backtest — two crates away — because the
-# defect this guards was invisible at every layer in between: the
-# aggregator emitted it without complaint, the engine's accessors
-# returned it without complaint, and the first thing that noticed was
-# the account being closed.
-#
-# A **dev** dependency: nothing that links `oq-ingest` should pull a
-# backtest host in behind it.
-oq-backtest.workspace = true
-oq-margin.workspace = true
