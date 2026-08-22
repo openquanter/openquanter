@@ -18,9 +18,9 @@
 
 set -uo pipefail
 
-BIN="${BIN:-$HOME/oq-capture}"
-ROOT="${ROOT:-$HOME/capture}"
-LOGDIR="${LOGDIR:-$HOME/oq/log/capture}"
+BIN="${BIN:-/home/ubuntu/oq-capture}"
+ROOT="${ROOT:-/home/ubuntu/capture}"
+LOGDIR="${LOGDIR:-/home/ubuntu/oq/log/capture}"
 FLOOR_GB="${FLOOR_GB:-8}"
 # Hourly, not daily: a daily file is only sealed at UTC midnight, so a
 # host that dies at 23:00 loses the day. Hourly bounds that to an hour.
@@ -28,22 +28,8 @@ FLOOR_GB="${FLOOR_GB:-8}"
 # -- a restart that silently picks a different rotation leaves two
 # layouts interleaved in one day.
 ROTATION="${ROTATION:-hourly}"
-# What to keep alive, as `venue:symbol:stream,stream,...` entries.
-#
-# One list rather than a symbol list crossed with a stream list, because
-# venues do not offer the same streams: this one has no bookTicker or
-# forceOrder channel under these names, and generating the cross product
-# would have the watchdog forever restarting streams that cannot exist.
-# The venue a process without an explicit --venue flag is running.
-# Older processes predate the flag; they are still that venue.
-DEFAULT_VENUE="${DEFAULT_VENUE:-binance-perp}"
-
-PLAN="${PLAN:-\
-binance-perp:BTCUSDT:depth,bookTicker,trade,forceOrder,markPrice \
-binance-perp:ETHUSDT:depth,bookTicker,trade,forceOrder,markPrice \
-binance-perp:BNBUSDT:depth,bookTicker,trade,forceOrder,markPrice \
-binance-perp:HYPEUSDT:depth,bookTicker,trade,forceOrder,markPrice \
-okx-swap:BTCUSDT:depth,trade}"
+SYMBOLS="${SYMBOLS:-BTCUSDT ETHUSDT BNBUSDT HYPEUSDT}"
+STREAMS="${STREAMS:-depth bookTicker trade forceOrder markPrice}"
 
 mkdir -p "$LOGDIR"
 [ -x "$BIN" ] || { echo "supervisor: $BIN 不可执行" >&2; exit 2; }
@@ -54,40 +40,24 @@ rot_args=()
 started=0
 alive=0
 
-for entry in $PLAN; do
-  venue=${entry%%:*}
-  rest=${entry#*:}
-  sym=${rest%%:*}
-  streams=$(printf '%s' "${rest#*:}" | tr ',' ' ')
-
-  for st in $streams; do
-    # Match on venue and root as well as symbol and stream. Without the
-    # venue, the same symbol on two venues looks like one process, so
-    # the second is never started; without the root, a second generation
-    # under a different archive root looks like the first is already
-    # running.
-    # Match with and without an explicit --venue, because a process
-    # started before the flag existed does not carry it and is running
-    # the same stream all the same.
-    #
-    # This is not hypothetical. A version of this check that required
-    # --venue did not recognise twenty running captures, declared them
-    # all missing, and started a second copy of each — every five
-    # minutes, from cron, for as long as it took to notice. Two writers
-    # on one file interleave their messages, and the hour they shared
-    # took 41 sequence breaks to repair.
-    if pgrep -f -- "--root $ROOT --venue $venue --symbol $sym --stream $st" >/dev/null 2>&1 \
-       || { [ "$venue" = "$DEFAULT_VENUE" ] \
-            && pgrep -f -- "--root $ROOT --symbol $sym --stream $st" >/dev/null 2>&1; }; then
+for sym in $SYMBOLS; do
+  for st in $STREAMS; do
+    # Match on root as well as symbol and stream. Without the root, a
+    # second generation started under a different archive root during an
+    # overlapping upgrade looks like the first one is already running,
+    # and nothing gets started -- silently turning a zero-gap upgrade
+    # into an ordinary one.
+    if pgrep -f -- "--root $ROOT --symbol $sym --stream $st\$" >/dev/null 2>&1 \
+       || pgrep -f -- "--root $ROOT --symbol $sym --stream $st " >/dev/null 2>&1; then
       alive=$((alive + 1))
       continue
     fi
     setsid nohup nice -n 5 "$BIN" \
-      --root "$ROOT" --venue "$venue" --symbol "$sym" --stream "$st" \
+      --root "$ROOT" --symbol "$sym" --stream "$st" \
       --floor-gb "$FLOOR_GB" "${rot_args[@]}" \
-      >> "$LOGDIR/$venue-$sym-$st.log" 2>&1 < /dev/null &
+      >> "$LOGDIR/$sym-$st.log" 2>&1 < /dev/null &
     started=$((started + 1))
-    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') started $venue $sym $st"
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') started $sym $st"
   done
 done
 
@@ -95,19 +65,10 @@ sleep 2
 # Count only this root's generation. During an overlapping upgrade two
 # generations run at once, and a plain process-name count would report
 # double and never match the expected number.
-# Count by process name and archive root together. `pgrep -f` alone
-# matches anything whose command line contains the root — including this
-# script's own children while they are still being exec'd — which made
-# the count read one high and would have failed the heartbeat's
-# equality check at random.
-running=$(pgrep -x "$(basename "$BIN")" 2>/dev/null | while read -r pid; do
-  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "--root $ROOT " && echo x
-done | wc -l | tr -d ' ')
-running=${running:-0}
+running=$(pgrep -fc -- "--root $ROOT --symbol " 2>/dev/null) || running=0
 expected=0
-for entry in $PLAN; do
-  streams=$(printf '%s' "${entry#*:*:}" | tr ',' ' ')
-  for _st in $streams; do expected=$((expected + 1)); done
+for sym in $SYMBOLS; do
+  for _st in $STREAMS; do expected=$((expected + 1)); done
 done
 echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') alive=$alive started=$started running=$running/$expected"
 

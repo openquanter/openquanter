@@ -109,7 +109,7 @@ fn main() -> ExitCode {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    let bytes = match oq_l2feed::archive::read(&path) {
+    let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("oq-book-check: cannot read {path}: {e}");
@@ -280,7 +280,7 @@ fn symbol_from_path(path: &str) -> Option<String> {
     let depth_idx = parts.iter().rposition(|p| {
         matches!(
             *p,
-            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice" | "fundingRate"
+            "depth" | "bookTicker" | "trade" | "forceOrder" | "markPrice"
         )
     })?;
     parts
