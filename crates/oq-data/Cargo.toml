@@ -10,24 +10,7 @@ repository.workspace = true
 [dependencies]
 oq-engine.workspace = true
 oq-hash.workspace = true
-oq-stats.workspace = true
 oq-types.workspace = true
-
-# Columnar export. Optional, and the whole reason the feature exists: the
-# tree below is ~90 crates, which is more than the rest of the workspace
-# put together. A backtest must never pay for it.
-arrow-array = { version = "59", optional = true }
-arrow-schema = { version = "59", optional = true }
-parquet = { version = "59", optional = true, default-features = false, features = [
-    "arrow",
-    # zstd, not snappy: these files are written once and read many
-    # times, and tick columns are repetitive enough that the ratio is
-    # worth far more than the write time. Note that the parquet crate
-    # *panics* rather than erroring when asked for a codec that was not
-    # compiled in, so this list and the codec chosen in `columnar` have
-    # to be kept in step by hand.
-    "zstd",
-] }
 
 [features]
 # The default build reads the workspace's own tick format and carries no
@@ -35,9 +18,6 @@ parquet = { version = "59", optional = true, default-features = false, features 
 # cheap to audit. Columnar archive support is a separate opt-in because
 # it pulls a large dependency tree that most consumers never need.
 default = []
-# Read and write the tick stream as Parquet, preserving both timestamps.
-# See `columnar` and docs/TICK-FORMAT.md.
-parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 
 [lints]
 workspace = true
