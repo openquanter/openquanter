@@ -71,27 +71,14 @@ HEADER = '''//! Quoting precision per contract, generated from the venue.
 //!
 //! {count} contracts, as of {date}.
 
-/// Price precision, quantity precision, and contract size for an OKX
-/// instrument id, if listed.
-///
-/// The contract size is in units of 1e-8 of the underlying, and it is
-/// the field that keeps a size on this venue comparable with a quantity
-/// on one that quotes the coin: `1_000_000` means one contract is 0.01
-/// of the underlying.
+/// Price and quantity precision for an OKX instrument id, if listed.
 #[must_use]
-pub fn definition(inst_id: &str) -> Option<(u8, u8, i64)> {{
+pub fn precision(inst_id: &str) -> Option<(u8, u8)> {{
     let found = match inst_id {{
 {arms}
         _ => return None,
     }};
     Some(found)
-}}
-
-/// Price and quantity precision alone.
-#[must_use]
-pub fn precision(inst_id: &str) -> Option<(u8, u8)> {{
-    let (p, q, _) = definition(inst_id)?;
-    Some((p, q))
 }}
 
 #[cfg(test)]
@@ -104,15 +91,6 @@ mod tests {{
         // one decimal place and two. Reading these as the venue's raw
         // sizes instead would scale every price by a factor of ten.
         assert_eq!(precision("BTC-USDT-SWAP"), Some((1, 2)));
-    }}
-
-    #[test]
-    fn a_size_here_is_contracts_and_the_table_says_how_big_one_is() {{
-        // 0.01 BTC per contract, in units of 1e-8 of the underlying.
-        // A venue quoting the coin directly would report 100_000_000
-        // for the same instrument, and the factor of a hundred between
-        // them is exactly what this field exists to keep visible.
-        assert_eq!(definition("BTC-USDT-SWAP"), Some((1, 2, 1_000_000)));
     }}
 
     #[test]
@@ -144,16 +122,7 @@ def main() -> int:
         qty = decimals(r.get("lotSz", ""))
         if price is None or qty is None:
             continue
-        # A size on this venue counts contracts. ctVal is how much of
-        # ctValCcy one contract is; ctMult multiplies it. Carried in
-        # units of 1e-8 so it stays an integer.
-        try:
-            size = round(float(r["ctVal"]) * float(r.get("ctMult") or 1) * 1e8)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if size <= 0:
-            continue
-        rows.append((r["instId"], price, qty, size))
+        rows.append((r["instId"], price, qty))
     rows.sort()
 
     # The same floor as the other generator: a short list would replace a
@@ -167,7 +136,7 @@ def main() -> int:
         )
         return 1
 
-    arms = "\n".join(f'        "{i}" => ({p}, {q}, {c}),' for i, p, q, c in rows)
+    arms = "\n".join(f'        "{i}" => ({p}, {q}),' for i, p, q in rows)
     OUT.write_text(
         HEADER.format(count=len(rows), date=datetime.date.today().isoformat(), arms=arms)
     )

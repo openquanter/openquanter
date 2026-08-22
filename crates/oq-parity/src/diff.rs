@@ -46,39 +46,6 @@ pub enum Difference {
 }
 
 impl Difference {
-    /// One line naming what differs, for a report a person reads.
-    ///
-    /// The field-level deltas are included rather than only the values,
-    /// because "6000000 versus 6000050" makes a reader do arithmetic at
-    /// the moment they are trying to decide whether fifty ticks matters.
-    #[must_use]
-    pub fn describe(&self) -> String {
-        match self {
-            Self::Missing { index, fill } => format!(
-                "#{index}: the baseline has a fill the candidate does not \
-                 ({} {:?} {} x{})",
-                fill.symbol, fill.side, fill.price.0, fill.qty.0
-            ),
-            Self::Extra { index, fill } => format!(
-                "#{index}: the candidate has a fill the baseline does not \
-                 ({} {:?} {} x{})",
-                fill.symbol, fill.side, fill.price.0, fill.qty.0
-            ),
-            Self::Mismatch { index, fields, .. } => {
-                let parts: Vec<String> = fields
-                    .iter()
-                    .map(|f| match f.delta {
-                        Some(d) => {
-                            format!("{} {} → {} ({d:+})", f.field, f.baseline, f.candidate)
-                        }
-                        None => format!("{} {} → {}", f.field, f.baseline, f.candidate),
-                    })
-                    .collect();
-                format!("#{index}: {}", parts.join(", "))
-            }
-        }
-    }
-
     /// Position in the stream where the difference occurs.
     #[must_use]
     pub fn index(&self) -> usize {
