@@ -1,6 +1,6 @@
 [package]
 name = "oq-types"
-version.workspace = true
+version = "0.0.1"
 description = "Core domain types for the OpenQuanter trading framework"
 edition.workspace = true
 license.workspace = true

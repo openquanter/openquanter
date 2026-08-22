@@ -1,6 +1,6 @@
 [package]
 name = "oq-engine"
-version.workspace = true
+version = "0.0.1"
 description = "Matching engine for the OpenQuanter trading framework: fidelity tier L0 (tick replay), with the ladder to orderbook simulation above it"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oq-book.workspace = true
-oq-types.workspace = true
+oq-types = { path = "../oq-types", version = "0.0.1" }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-# Generated inputs for the invariants FR-MATCH-7 names. A dev-dependency:
-# nothing that depends on this crate inherits it, so the budget this
-# workspace defends — what a *consumer* pulls in — is unchanged.
-proptest = { version = "1", default-features = false, features = ["std"] }

@@ -76,8 +76,6 @@ pub struct L0Engine {
     book: Book,
     ids: IdAllocator,
     prev_price: Option<PriceTicks>,
-    /// Timestamp of the previous tick, for stamping gap-crossed fills.
-    prev_stamp: Option<oq_types::Stamp>,
     /// Reused across ticks so the hot path does not allocate.
     fills: Vec<L0Fill>,
     /// Scratch for gap-fill candidate selection, likewise reused.
@@ -92,7 +90,6 @@ impl L0Engine {
             book: Book::new(),
             ids: IdAllocator::new(),
             prev_price: None,
-            prev_stamp: None,
             fills: Vec::with_capacity(16),
             candidates: Vec::with_capacity(16),
         }
@@ -162,7 +159,6 @@ impl L0Engine {
         // window's close against this window's extremes, so it must not
         // see this tick's price yet.
         self.prev_price = Some(tick.last);
-        self.prev_stamp = Some(tick.stamp);
         &self.fills
     }
 
@@ -225,20 +221,12 @@ impl L0Engine {
             // level, so that is where the trade happened. Filling at the
             // window's close instead would credit the strategy with a
             // price the market only reached later.
-            // Stamped with the *previous* tick's time, not this one. The
-            // crossing happened somewhere in the interval between the
-            // two observations, and neither endpoint is more true than
-            // the other; the reference this tier reproduces uses the
-            // earlier one, so L0 does too. A fill that appears to
-            // precede the tick which revealed it looks wrong at first
-            // glance and is exactly as defensible as the alternative.
-            let stamp = self.prev_stamp.unwrap_or(tick.stamp);
-            self.execute_at(
+            self.execute(
                 &resting,
                 price,
                 Liquidity::Maker,
                 FillReason::GapCrossed,
-                stamp,
+                tick,
             );
         }
     }
@@ -326,21 +314,6 @@ impl L0Engine {
         reason: FillReason,
         tick: &Tick,
     ) {
-        self.execute_at(resting, price, liquidity, reason, tick.stamp);
-    }
-
-    /// Execute with an explicit timestamp.
-    ///
-    /// Separated because gap-crossed fills carry the previous tick's
-    /// time; see the call site for why.
-    fn execute_at(
-        &mut self,
-        resting: &Resting,
-        price: PriceTicks,
-        liquidity: Liquidity,
-        reason: FillReason,
-        stamp: oq_types::Stamp,
-    ) {
         let qty = resting.order.remaining();
         if qty.0 <= 0 {
             self.book.replace(resting.id(), None);
@@ -358,18 +331,15 @@ impl L0Engine {
         self.book.replace(resting.id(), still_working);
 
         let fill = Fill {
-            stamp,
+            stamp: tick.stamp,
             instrument: self.instrument,
             order: resting.id(),
             trade: self.ids.trade(),
             side: resting.order.side(),
-            // Carried from the order rather than derived here. A ledger
-            // that nets can work it out from the resulting position, and
-            // that is what this used to assume; one that keeps two legs
-            // cannot, because a buy while a short is open is either
-            // closing that short or opening a long and the position
-            // alone does not say which.
-            offset: resting.order.offset(),
+            // L0 does not model position intent; the ledger decides
+            // open vs close from the resulting position, which is the
+            // only place that knows.
+            offset: Offset::Open,
             price,
             qty,
             liquidity,
@@ -389,68 +359,6 @@ impl L0Engine {
     }
 }
 
-/// Build a resting limit order.
-///
-/// Shared by every tier rather than repeated in each, because these
-/// constructions are the one place a tier could silently differ from the
-/// one below it -- a different time-in-force, a different acceptance
-/// state -- and produce fills the frozen anchor never would.
-///
-/// # Panics
-/// If `qty` is not positive. A caller asking for a zero-quantity order
-/// has a bug, and accepting it would put an order on the book that can
-/// never fill and never be reasoned about.
-#[must_use]
-pub fn limit_order(
-    id: OrderId,
-    side: Side,
-    price: PriceTicks,
-    qty: QtyLots,
-    stamp: oq_types::Stamp,
-    offset: Offset,
-) -> Working {
-    Working::Live(
-        oq_types::Order::with_offset(
-            id,
-            side,
-            oq_types::OrderKind::Limit { price },
-            qty,
-            oq_types::TimeInForce::GoodTilCancel,
-            stamp,
-            offset,
-        )
-        .expect("order quantity must be positive")
-        .accept(),
-    )
-}
-
-/// Build a resting market order.
-///
-/// # Panics
-/// As [`limit_order`].
-#[must_use]
-pub fn market_order(
-    id: OrderId,
-    side: Side,
-    qty: QtyLots,
-    stamp: oq_types::Stamp,
-    offset: Offset,
-) -> Working {
-    Working::Live(
-        oq_types::Order::with_offset(
-            id,
-            side,
-            oq_types::OrderKind::Market,
-            qty,
-            oq_types::TimeInForce::GoodTilCancel,
-            stamp,
-            offset,
-        )
-        .expect("order quantity must be positive")
-        .accept(),
-    )
-}
-
 /// Convenience constructors for callers that build orders inline.
 impl L0Engine {
     /// Rest a limit order, returning its id.
@@ -467,23 +375,17 @@ impl L0Engine {
         qty: QtyLots,
         stamp: oq_types::Stamp,
     ) -> OrderId {
-        self.submit_limit_with(id, side, price, qty, stamp, Offset::Open)
-    }
-
-    /// Rest a limit order that states whether it opens or closes.
-    ///
-    /// # Panics
-    /// As [`L0Engine::submit_limit`].
-    pub fn submit_limit_with(
-        &mut self,
-        id: OrderId,
-        side: Side,
-        price: PriceTicks,
-        qty: QtyLots,
-        stamp: oq_types::Stamp,
-        offset: Offset,
-    ) -> OrderId {
-        self.submit(limit_order(id, side, price, qty, stamp, offset));
+        let order = oq_types::Order::new(
+            id,
+            side,
+            oq_types::OrderKind::Limit { price },
+            qty,
+            oq_types::TimeInForce::GoodTilCancel,
+            stamp,
+        )
+        .expect("order quantity must be positive")
+        .accept();
+        self.submit(Working::Live(order));
         id
     }
 
@@ -498,22 +400,17 @@ impl L0Engine {
         qty: QtyLots,
         stamp: oq_types::Stamp,
     ) -> OrderId {
-        self.submit_market_with(id, side, qty, stamp, Offset::Open)
-    }
-
-    /// Rest a market order that states whether it opens or closes.
-    ///
-    /// # Panics
-    /// As [`L0Engine::submit_limit`].
-    pub fn submit_market_with(
-        &mut self,
-        id: OrderId,
-        side: Side,
-        qty: QtyLots,
-        stamp: oq_types::Stamp,
-        offset: Offset,
-    ) -> OrderId {
-        self.submit(market_order(id, side, qty, stamp, offset));
+        let order = oq_types::Order::new(
+            id,
+            side,
+            oq_types::OrderKind::Market,
+            qty,
+            oq_types::TimeInForce::GoodTilCancel,
+            stamp,
+        )
+        .expect("order quantity must be positive")
+        .accept();
+        self.submit(Working::Live(order));
         id
     }
 }
@@ -563,48 +460,6 @@ mod tests {
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].fill.qty, QtyLots(2));
         assert!(e.book().is_empty(), "a filled order leaves the book");
-    }
-
-    #[test]
-    fn a_gap_crossed_fill_carries_the_previous_tick_time() {
-        // The crossing happened between two observations, and the tier
-        // this engine reproduces stamps it with the earlier one. A fill
-        // that appears to precede the tick which revealed it is the
-        // intended behaviour, not an off-by-one.
-        let mut e = engine();
-        e.on_tick(&tick(1_000, 100, 100, 100));
-        e.submit_limit(
-            OrderId::new(1),
-            Side::Buy,
-            PriceTicks(95),
-            QtyLots(1),
-            Stamp::synthetic(1_000),
-        );
-        let fills = e.on_tick(&tick(2_000, 99, 100, 90)).to_vec();
-        assert_eq!(fills.len(), 1);
-        assert_eq!(fills[0].reason, FillReason::GapCrossed);
-        assert_eq!(
-            fills[0].fill.stamp,
-            Stamp::synthetic(1_000),
-            "gap-crossed fills carry the previous tick's stamp"
-        );
-    }
-
-    #[test]
-    fn an_ordinary_crossing_carries_the_current_tick_time() {
-        let mut e = engine();
-        e.on_tick(&tick(1_000, 100, 100, 100));
-        e.submit_limit(
-            OrderId::new(1),
-            Side::Buy,
-            PriceTicks(100),
-            QtyLots(1),
-            Stamp::synthetic(1_000),
-        );
-        let fills = e.on_tick(&tick(2_000, 110, 110, 100)).to_vec();
-        assert_eq!(fills.len(), 1);
-        assert_eq!(fills[0].reason, FillReason::Crossed);
-        assert_eq!(fills[0].fill.stamp, Stamp::synthetic(2_000));
     }
 
     #[test]
