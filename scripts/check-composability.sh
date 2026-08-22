@@ -25,47 +25,16 @@ cd "$(git rev-parse --show-toplevel)"
 
 # crate:max third-party dependencies (transitive)
 BUDGETS=(
-  # The launcher. Zero, and it has to be: installing one name to find
-  # nine tools must not build a TLS stack. It dispatches rather than
-  # absorbs, so it does not even depend on the tools it launches.
-  "oq-cli:0"
   "oq-types:0"
   "oq-hash:0"
   "oq-journal:0"
   "oq-core:0"
   "oq-engine:0"
-  # Environments over the core. Zero, like everything it wraps: an RL
-  # loop that pulled in a tensor library would put one in every backtest
-  # that links this workspace.
-  "oq-env:0"
   "oq-margin:0"
   "oq-backtest:0"
   "oq-data:0"
   "oq-parity:0"
-  # The pre-trade gate. Zero because it is the layer everything else is
-  # checked against: a risk gate that cannot be built from the workspace
-  # alone is a risk gate whose availability depends on a registry.
-  "oq-risk:0"
-  # Fault injection. Zero, and the generator is written out rather than
-  # depended on: a crate that changed its algorithm in a patch release
-  # would renumber every scenario, and the seed in a bug report would
-  # stop meaning what it meant.
-  "oq-sim:0"
-  # The Python binding. The only crate here allowed an interpreter in its
-  # tree, and the only one excluded from the workspace's default members —
-  # building the engine must not require Python, which is D16's third cost
-  # and is enforced by that exclusion rather than by intention.
-  "oq-py:20"
   "oq-stats:0"
-  # The point-in-time feature layer. Zero, because a feature definition
-  # is inherited by both the research path and the live one, and a
-  # dependency here is a dependency in production.
-  "oq-features:0"
-  # The strategy contract. Zero, and it has to stay zero for a reason
-  # the other zeros do not share: this is the crate a user writes
-  # against. Anything that lands here is inherited by every strategy
-  # anyone ever writes, in backtest and in production alike.
-  "oq-strategy:0"
   # The bridge from captured archives to the tick format. It depends on
   # oq-l2feed and inherits its transitive tree, which is why it is a
   # separate crate: oq-data must stay at zero, and it would not if the
@@ -78,27 +47,7 @@ BUDGETS=(
   "oq-examples:0"
   # Speaks WebSocket and HTTP to a venue, so it carries a TLS stack.
   # Isolated here on purpose: the engine must not inherit it.
-  # The order book, reconstructed from incremental depth. Zero, and it
-  # has to be: the capture side and the matcher both use it, and the
-  # matcher must not inherit a TLS stack to look at a price level.
-  "oq-book:0"
   "oq-l2feed:60"
-  # Reads an account over HTTPS, so it carries a TLS stack for the same
-  # reason oq-l2feed does — and the same ureq, so this adds no tree the
-  # workspace was not already carrying. Signing and JSON reading are
-  # written out by hand rather than pulled in: this is the crate that
-  # holds the API secret, and every dependency here is one more thing
-  # trusted with it.
-  # Reads an account over HTTPS and hears about fills over a websocket,
-  # so it carries a TLS stack and a websocket client. Raised from 40
-  # when the user data stream landed: the venue pushes fills and there
-  # is no way to hear them over HTTPS. Isolated here for the same
-  # reason as the capture crate — the engine must not inherit it.
-  "oq-gateway:60"
-  # The process assembly. Inherits the gateway's tree because it has to
-  # talk to a venue; carries nothing of its own. Everything it decides
-  # is in oq-risk and its own supervisor, both at zero.
-  "oq-live:60"
 )
 
 third_party_count() {

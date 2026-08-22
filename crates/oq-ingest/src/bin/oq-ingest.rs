@@ -13,12 +13,12 @@
 //! guessable and getting it wrong does not fail loudly — it silently
 //! rescales every price — so this refuses to run rather than assume.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use oq_ingest::batches::{hours, load_hour};
-use oq_ingest::{Aggregator, Report, Source, fold_into};
+use oq_ingest::{Source, to_ticks};
 use oq_l2feed::depth::Scales;
+use oq_l2feed::frame::decode_all;
 
 const USAGE: &str = "\
 oq-ingest — convert a captured archive into a tick file
@@ -95,73 +95,54 @@ fn main() -> ExitCode {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000);
 
-    // One hour at a time, with the aggregator carried across hours.
-    //
-    // Loading a whole day and sorting it was measured, on the machine
-    // that holds the data, as a process the kernel killed: a day of one
-    // instrument's depth is millions of records, the parsed form is
-    // larger than the bytes, and that host has 1 GiB. The archive is
-    // written one file per hour, so an hour is the batch the data
-    // already offers, and carrying the aggregator is what keeps the
-    // result identical — the book, the cumulative volume and the open
-    // window all span hours.
-    let mut agg = match Aggregator::new(window_ms * 1_000_000) {
-        Ok(a) => a,
+    let mut loaded = Vec::new();
+    for stream in ["depth", "trade"] {
+        let mut bytes = Vec::new();
+        for path in files_for(&archive, stream, &day) {
+            match std::fs::read(&path) {
+                Ok(b) => bytes.extend_from_slice(&b),
+                Err(e) => {
+                    eprintln!("oq-ingest: cannot read {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        if bytes.is_empty() {
+            println!("{stream:<7} no files for {day}");
+            continue;
+        }
+        match decode_all(&bytes) {
+            Ok((records, torn)) => {
+                if torn > 0 {
+                    println!("{stream:<7} {torn} torn bytes at the end, decoding the rest");
+                }
+                println!("{stream:<7} {} records", records.len());
+                loaded.push((stream, records));
+            }
+            Err(e) => {
+                eprintln!("oq-ingest: {stream} is damaged: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if loaded.is_empty() {
+        eprintln!("oq-ingest: nothing to convert under {}", archive.display());
+        return ExitCode::FAILURE;
+    }
+
+    let sources: Vec<Source<'_>> = loaded
+        .iter()
+        .map(|(stream, records)| Source { records, stream })
+        .collect();
+
+    let (ticks, report) = match to_ticks(&sources, scales, window_ms * 1_000_000) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("oq-ingest: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let mut report = Report::default();
-    let mut ticks = Vec::new();
-    let mut batches = 0_u32;
 
-    let hours = hours(&archive, &day);
-    if hours.is_empty() {
-        eprintln!("oq-ingest: nothing to convert under {}", archive.display());
-        return ExitCode::FAILURE;
-    }
-
-    for hour in &hours {
-        let loaded = match load_hour(&archive, &day, hour) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("oq-ingest: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        for batch in &loaded {
-            if batch.torn > 0 {
-                println!(
-                    "{:<7} {hour}: {} torn bytes at the end, decoding the rest",
-                    batch.stream, batch.torn
-                );
-            }
-        }
-        if loaded.is_empty() {
-            continue;
-        }
-        let sources: Vec<Source<'_>> = loaded
-            .iter()
-            .map(|b| Source {
-                records: &b.records,
-                stream: b.stream,
-            })
-            .collect();
-        ticks.extend(fold_into(
-            venue.as_ref(),
-            &sources,
-            scales,
-            &mut agg,
-            &mut report,
-        ));
-        batches += 1;
-        // Freed here, at the end of each hour, which is the whole point.
-        drop(loaded);
-    }
-    ticks.extend(agg.flush());
-    report.absorb(agg.counts(), ticks.len());
-    println!("batches {batches} hour(s) folded one at a time");
     // The instrument id is opaque to the tick format; a stable hash of
     // venue and symbol keeps two different instruments from sharing one,
     // which is the failure that silently mixes two books together.
@@ -183,28 +164,8 @@ fn main() -> ExitCode {
     println!("  from trades   {}", report.trades);
     println!("  from depth    {}", report.depth_applied);
     println!("  quiet windows {}", report.quiet_windows);
-    if report.windows_before_first_trade > 0 {
-        // Separate from the quiet-window count: a quiet window is a
-        // market that did not trade, these are windows the capture
-        // reached before its trade stream had said anything at all.
-        // They are the only ones dropped, so this is the difference
-        // between the windows crossed and the ticks written, and a
-        // reader comparing a re-converted file against an older one
-        // should not have to derive it.
-        println!(
-            "  before 1st trade {} dropped — the trade stream had not spoken yet",
-            report.windows_before_first_trade
-        );
-    }
     println!("gap markers     {}", report.gaps);
     println!("unparseable     {}", report.unparseable);
-    if report.non_trades > 0 {
-        println!(
-            "not a trade     {} — records the venue publishes on the trade stream \
-             that declare no trade",
-            report.non_trades
-        );
-    }
     println!("wrote           {out} ({} bytes)", encoded.len());
 
     if report.ticks == 0 {
@@ -216,6 +177,29 @@ fn main() -> ExitCode {
 
 /// Every capture file for one stream and day, under either rotation.
 ///
+/// Daily rotation writes `<stream>/<day>.oqcap`; hourly writes
+/// `<stream>/<day>/HH.oqcap`. Both are read, so a day that was captured
+/// across a rotation change still converts as one day.
+fn files_for(archive: &Path, stream: &str, day: &str) -> Vec<PathBuf> {
+    let dir = archive.join(stream);
+    let mut out = Vec::new();
+
+    let daily = dir.join(format!("{day}.oqcap"));
+    if daily.is_file() {
+        out.push(daily);
+    }
+    if let Ok(entries) = std::fs::read_dir(dir.join(day)) {
+        let mut hourly: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "oqcap"))
+            .collect();
+        hourly.sort();
+        out.extend(hourly);
+    }
+    out
+}
+
 /// FNV-1a, for a stable instrument id that does not depend on hash seeds.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
