@@ -689,16 +689,30 @@ where
                 };
                 match stream.poll() {
                     Ok(Some(bytes)) => {
-                        let at = event_time(&bytes).unwrap_or(now.0);
+                        // Sampled per message, not per pass.
+                        //
+                        // `now` is taken once at the top of the loop, and
+                        // the loop now drains a burst rather than one
+                        // message — so a batch shared one local stamp
+                        // while the venue's own timestamps advanced
+                        // through it. The record then showed the venue's
+                        // clock running up to seven seconds *ahead* of
+                        // this process, which cannot happen: the venue
+                        // and this host agree to within a second, and
+                        // the whole point of carrying both clocks is to
+                        // tell delivery from timekeeping. A stamp that
+                        // is really the pass's start tells neither.
+                        let seen = now_ns();
+                        let at = event_time(&bytes).unwrap_or(seen);
                         let closed = if which == 0 {
                             feed_venue
                                 .parse_depth(&bytes, scales)
                                 .ok()
-                                .and_then(|u| agg.on_depth(at, now.0, &u))
+                                .and_then(|u| agg.on_depth(at, seen, &u))
                         } else {
                             feed_venue
                                 .parse_trade(&bytes, scales)
-                                .and_then(|t| agg.on_trade(at, now.0, &t))
+                                .and_then(|t| agg.on_trade(at, seen, &t))
                         };
                         if let Some(tick) = closed {
                             ticks += 1;
