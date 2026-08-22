@@ -209,8 +209,25 @@ impl MarketData {
             price: u32::from(instrument.price_scale),
             qty: u32::from(instrument.qty_scale),
         };
+        // The coarser book where the venue publishes one.
+        //
+        // This host folds depth into fixed windows, so resolution finer
+        // than a window is discarded the moment it arrives. Taking it
+        // anyway made this process a slow consumer of its own feed: the
+        // venue sends on every change, one message was taken per loop
+        // pass, and the rest queued until the venue dropped the
+        // connection for not keeping up.
+        //
+        // Falls back to the full-resolution stream on a venue that
+        // publishes no coalesced one, which is the right failure: less
+        // efficient, never wrong.
+        let depth_stream = if venue.streams(symbol).iter().any(|s| s.name == "depth100") {
+            "depth100"
+        } else {
+            "depth"
+        };
         let md = Self {
-            depth: Stream::open(venue.as_ref(), symbol, "depth", read_timeout)?,
+            depth: Stream::open(venue.as_ref(), symbol, depth_stream, read_timeout)?,
             trade: Stream::open(venue.as_ref(), symbol, "trade", read_timeout)?,
             scales,
         };

@@ -76,6 +76,16 @@ impl Venue for BinancePerp {
         let lower = symbol.to_lowercase();
         vec![
             StreamSpec::new("depth", format!("{lower}@depth@0ms")),
+            // The same book, coalesced by the venue every 100ms.
+            //
+            // For capture, `depth` is right: the finest resolution the
+            // venue will give is the point. For a consumer that folds
+            // events into fixed windows anyway, it is a firehose whose
+            // extra resolution is discarded on arrival — and a consumer
+            // that cannot drain it fast enough is dropped by the venue
+            // for being slow, which costs the whole connection rather
+            // than the resolution it never used.
+            StreamSpec::new("depth100", format!("{lower}@depth@100ms")),
             StreamSpec::new("bookTicker", format!("{lower}@bookTicker")),
             StreamSpec::new("trade", format!("{lower}@trade")),
             StreamSpec::new("forceOrder", format!("{lower}@forceOrder")),
@@ -373,5 +383,29 @@ mod tests {
             super::super::by_id("binance-perp").unwrap().id(),
             "binance-perp"
         );
+    }
+}
+
+#[cfg(test)]
+mod cadence {
+    use super::*;
+
+    /// Both books are published: the venue's every change, and its own
+    /// hundred-millisecond coalescing of the same.
+    ///
+    /// Capture wants the first — the finest thing the venue will give is
+    /// the point of capturing. A consumer that folds into windows wants
+    /// the second, and taking the first anyway is what made one such
+    /// consumer a slow reader of its own feed: the events queued, the
+    /// venue dropped it for not keeping up, and the resolution it paid
+    /// the connection for had been discarded on arrival.
+    #[test]
+    fn the_book_is_offered_at_two_cadences() {
+        let v = BinancePerp::new();
+        let s = v.streams("BTCUSDT");
+        let full = s.iter().find(|s| s.name == "depth").expect("depth");
+        let coarse = s.iter().find(|s| s.name == "depth100").expect("depth100");
+        assert_eq!(full.topic, "btcusdt@depth@0ms");
+        assert_eq!(coarse.topic, "btcusdt@depth@100ms");
     }
 }
