@@ -34,17 +34,6 @@ cargo clippy -p oq-core --all-targets -- -D warnings
 - **Liquidation is checked on every tick and after every funding
   settlement.** A position can be ended by financing on a path price
   alone would have survived.
-- **Fees are zero until set, and a rebate stays negative.** `Fees::none()`
-  is the default so that a run with no fee schedule is *obviously* a run
-  with no fee schedule, rather than one quietly using a plausible number
-  nobody chose. `Fees::maker` may be negative — rebates exist, and a fee
-  model that floors at zero cannot represent the strategies that live on
-  them. Never clamp it.
-- **A fee is charged before the position update**, so it is computed
-  against the fill that incurred it rather than the state that follows.
-  `State::fees` accumulates positive (a cost is recorded as a cost) and
-  is tracked separately from the balance it was already deducted from,
-  so a report can attribute what the run paid.
 
 ## Notes
 
