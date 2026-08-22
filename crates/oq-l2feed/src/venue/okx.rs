@@ -33,13 +33,6 @@ pub struct OkxSwap;
 /// this long, it is not coming.
 const ACK_DEADLINE: Duration = Duration::from_secs(20);
 
-/// How often to prove the connection is still there.
-///
-/// The venue closes a connection it has received nothing on for thirty
-/// seconds, with `4004 No data received in 30s`. Twenty leaves room for
-/// one round trip to be slow without spending the margin twice over.
-const KEEPALIVE: Duration = Duration::from_secs(20);
-
 impl Venue for OkxSwap {
     fn id(&self) -> &'static str {
         "okx-swap"
@@ -52,66 +45,31 @@ impl Venue for OkxSwap {
         let inst = instrument_id(symbol);
         vec![
             StreamSpec::new("depth", format!("books:{inst}")),
-            // `trades-all`, not `trades`. The plain channel pushes only
-            // the last fill of a taker order, so a capture from it is
-            // missing trades by design — measured over a minute, 32 ids
-            // spanning 34, against 40 spanning 40 here. The archive's
-            // completeness check follows trade ids and would report the
-            // difference forever as a fault in the capture.
-            StreamSpec::new("trade", format!("trades-all:{inst}")),
-            // The margin engine's inputs. Liquidation is computed
-            // against mark price rather than the last trade, and funding
-            // is a cash flow the backtest has to pay. Binance has no
-            // working stream for either and polls them; here they are
-            // channels, so they are subscribed. Leaving them out would
-            // make an OKX capture and a Binance capture of the same day
-            // not comparable, which is the property the second venue
-            // exists to demonstrate.
-            StreamSpec::new("markPrice", format!("mark-price:{inst}")),
-            StreamSpec::new("fundingRate", format!("funding-rate:{inst}")),
+            StreamSpec::new("trade", format!("trades:{inst}")),
         ]
     }
 
     /// Nothing is polled here. Funding and mark price have working
     /// channels on this venue, unlike the venue whose absence of one
-    /// forced the polling path to exist, so they are subscribed in
-    /// [`Self::streams`] rather than fetched on a timer.
+    /// forced the polling path to exist.
     fn polls(&self, _symbol: &str) -> Vec<PollSpec> {
         Vec::new()
     }
 
     fn transport(&self, spec: &StreamSpec) -> Transport {
         let (channel, inst) = spec.topic.split_once(':').unwrap_or(("books", &spec.topic));
-        // The correlation id is alphanumeric only — a hyphen in it is
-        // rejected with `60033 Parameter id error`, before the venue
-        // ever looks at the channel. `books` and `trades` happen to be
-        // legal ids; `mark-price` and `funding-rate` are not, so a
-        // channel name cannot be reused as one unmodified. The failure
-        // does not name the id, it names a parameter, and the obvious
-        // reading is that the channel is wrong.
-        let id: String = channel
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .collect();
         let subscribe = format!(
-            r#"{{"id":"{id}","op":"subscribe","args":[{{"channel":"{channel}","instId":"{inst}"}}]}}"#
+            r#"{{"id":"{channel}","op":"subscribe","args":[{{"channel":"{channel}","instId":"{inst}"}}]}}"#
         );
         Transport {
-            url: endpoint(channel).to_string(),
+            url: "wss://ws.okx.com:8443/ws/v5/public".to_string(),
             subscribe: vec![subscribe.into_bytes()],
             // An explicit acknowledgement, so a rejected subscription is
-            // an error rather than a silence to be interpreted — which
-            // requires listening for the refusal as well as the
-            // acceptance. Watching only for the acceptance leaves the
-            // refusal to fall through as data and the wait to end at the
-            // deadline, which is the same outcome as a venue that says
-            // nothing at all.
+            // an error rather than a silence to be interpreted.
             ack: AckPolicy::Explicit {
                 marker: br#""event":"subscribe""#.to_vec(),
-                reject_marker: br#""event":"error""#.to_vec(),
                 deadline: ACK_DEADLINE,
             },
-            keepalive: Some(KEEPALIVE),
         }
     }
 
@@ -128,12 +86,6 @@ impl Venue for OkxSwap {
         event_time_ns
     }
 
-    /// A quoted integer after `"tradeId":`, and there may be several in
-    /// one frame — this venue batches trades into a `data` array.
-    fn trade_ids(&self, payload: &[u8]) -> Vec<u64> {
-        super::ids_after(payload, br#""tradeId":"#, true)
-    }
-
     /// Looked up after the symbol is translated, because the table is
     /// keyed by this venue's own instrument ids.
     ///
@@ -141,39 +93,23 @@ impl Venue for OkxSwap {
     /// of decimal places; the conversion happens in the generator, not
     /// here, so this stays a lookup. See [`super::okx_instruments`].
     fn instrument(&self, symbol: &str) -> Option<Instrument> {
-        // A size on this venue is a count of contracts, not an amount of
-        // the underlying: one BTC-USDT-SWAP is 0.01 BTC. Dropping that
-        // and treating a size as coins is a hundredfold error that never
-        // announces itself — the number parses, sums, and is wrong.
-        let (price_scale, qty_scale, contract_size) =
-            super::okx_instruments::definition(&instrument_id(symbol))?;
-        Some(Instrument::sized(price_scale, qty_scale, contract_size))
+        let (price_scale, qty_scale) = super::okx_instruments::precision(&instrument_id(symbol))?;
+        Some(Instrument {
+            price_scale,
+            qty_scale,
+        })
     }
 
     /// Price and size are `"px"` and `"sz"`, nested under `"data"`.
     fn parse_trade(&self, payload: &[u8], scales: Scales) -> Option<Trade> {
         let text = core::str::from_utf8(payload).ok()?;
-        if !text.contains(r#""channel":"trades"#) {
+        if !text.contains(r#""channel":"trades""#) {
             return None;
         }
-        // This venue names the aggressor directly, where the other says
-        // which side was the maker. Same fact, opposite spelling.
-        let aggressor = match quoted(text, r#""side":"#).as_deref() {
-            Some("buy") => Some(oq_types::Side::Buy),
-            Some("sell") => Some(oq_types::Side::Sell),
-            _ => None,
-        };
-        let trade = Trade {
+        Some(Trade {
             price: parse_fixed(&quoted(text, r#""px":"#)?, scales.price).ok()?,
             qty: parse_fixed(&quoted(text, r#""sz":"#)?, scales.qty).ok()?,
-            aggressor,
-        };
-        // The contract every adapter holds to: a message declaring a
-        // zero price or size is not a trade. Whether this venue emits
-        // such a record is not the point -- the rule cannot be one
-        // adapter's, or the pipeline's correctness depends on which
-        // venue it happens to be reading.
-        (trade.price > 0 && trade.qty > 0).then_some(trade)
+        })
     }
 
     /// The book arrives as `"bids"` and `"asks"` inside `"data"`, and
@@ -254,19 +190,6 @@ fn levels(text: &str, key: &str, scales: Scales) -> Result<Vec<Level>, ParseErro
     Ok(out)
 }
 
-/// Which endpoint serves a channel.
-///
-/// Not one endpoint after all. Most public channels live on `/public`,
-/// but the complete trade feed is on `/business` — subscribing to it on
-/// the wrong one is refused with `doesn't exist`, which reads as a
-/// channel that was never there rather than one served elsewhere.
-fn endpoint(channel: &str) -> &'static str {
-    match channel {
-        "trades-all" => "wss://ws.okx.com:8443/ws/v5/business",
-        _ => "wss://ws.okx.com:8443/ws/v5/public",
-    }
-}
-
 /// Map a plain symbol to this venue's instrument id.
 ///
 /// `BTCUSDT` is what every other venue and the archive path call it;
@@ -278,15 +201,7 @@ fn instrument_id(symbol: &str) -> String {
     if upper.contains('-') {
         return upper;
     }
-    // Linear quotes only. `BTCUSD` on this venue is `BTC-USD-SWAP`,
-    // which is the *inverse* contract: margined in the base asset and
-    // sized in USD contracts rather than in coin. Translating it here
-    // would put a different kind of instrument under an archive path
-    // that looks like every other one, and nothing downstream would
-    // notice until the sizes were used. An untranslated symbol is
-    // rejected by the venue with a message naming it; a wrong
-    // translation is accepted and captured.
-    for quote in ["USDT", "USDC"] {
+    for quote in ["USDT", "USDC", "USD"] {
         if let Some(base) = upper.strip_suffix(quote) {
             return format!("{base}-{quote}-SWAP");
         }
@@ -331,7 +246,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::super::binance::BinancePerp::new().event_time_ns(payload),
+            super::super::binance::BinancePerp.event_time_ns(payload),
             None,
             "the other venue's reader must not silently half-work on this shape"
         );
@@ -349,128 +264,11 @@ mod tests {
         assert!(matches!(t.ack, AckPolicy::Explicit { .. }));
     }
 
-    /// The complete trade feed is served from a different endpoint than
-    /// the book. Asking for it on `/public` is refused with `doesn't
-    /// exist`, which reads as a channel that was never there.
-    #[test]
-    fn the_complete_trade_feed_comes_from_the_business_endpoint() {
-        let specs = OkxSwap.streams("BTCUSDT");
-        let trade = specs.iter().find(|s| s.name == "trade").expect("trade");
-        let t = OkxSwap.transport(trade);
-        assert_eq!(t.url, "wss://ws.okx.com:8443/ws/v5/business");
-        let frame = String::from_utf8(t.subscribe[0].clone()).expect("utf8");
-        assert!(
-            frame.contains(r#""channel":"trades-all""#),
-            "the plain trades channel drops fills by design: {frame}"
-        );
-
-        let depth = specs.iter().find(|s| s.name == "depth").expect("depth");
-        assert_eq!(
-            OkxSwap.transport(depth).url,
-            "wss://ws.okx.com:8443/ws/v5/public",
-            "the book stays on the public endpoint"
-        );
-    }
-
-    /// Both trade channels must still be recognised as trades — the
-    /// gate is a prefix, and a gate written for `"trades"` exactly would
-    /// reject every `trades-all` payload as though it were not a trade.
-    #[test]
-    fn a_trades_all_payload_is_still_a_trade() {
-        let scales = Scales { price: 1, qty: 2 };
-        let payload = br#"{"arg":{"channel":"trades-all","instId":"BTC-USDT-SWAP"},"data":[{"tradeId":"1","px":"62981.8","sz":"0.05","side":"buy","ts":"1786881328502"}]}"#;
-        assert!(
-            OkxSwap.parse_trade(payload, scales).is_some(),
-            "trades-all must parse as a trade"
-        );
-        assert_eq!(OkxSwap.trade_ids(payload), vec![1]);
-    }
-
-    /// Several trades in one frame all count. Taking only the first
-    /// would report every other trade in that frame as missing.
-    #[test]
-    fn every_trade_in_a_batched_frame_is_counted() {
-        let payload = br#"{"arg":{"channel":"trades-all"},"data":[{"tradeId":"10","px":"1"},{"tradeId":"11","px":"1"},{"tradeId":"12","px":"1"}]}"#;
-        assert_eq!(OkxSwap.trade_ids(payload), vec![10, 11, 12]);
-    }
-
-    /// The other venue's shape yields nothing here, and this venue's
-    /// yields nothing there. That is the whole reason the reader belongs
-    /// to the venue: neither errors, both quietly find no ids, and no
-    /// ids means no gaps among them.
-    #[test]
-    fn neither_venue_reads_the_other_venue_ids() {
-        let okx = br#"{"data":[{"tradeId":"2836635170"}]}"#;
-        let binance = br#"{"e":"trade","t":12345,"p":"1"}"#;
-        assert_eq!(OkxSwap.trade_ids(okx), vec![2_836_635_170]);
-        assert!(OkxSwap.trade_ids(binance).is_empty());
-        assert_eq!(
-            super::super::binance::BinancePerp::new().trade_ids(binance),
-            vec![12345]
-        );
-        assert!(
-            super::super::binance::BinancePerp::new()
-                .trade_ids(okx)
-                .is_empty(),
-            "a quoted id must not be read as a bare one"
-        );
-    }
-
-    /// The correlation id is alphanumeric only. Reusing a hyphenated
-    /// channel name as one is refused with `60033 Parameter id error`,
-    /// which names a parameter rather than the id and reads as though
-    /// the channel were wrong.
-    #[test]
-    fn a_hyphenated_channel_does_not_become_a_hyphenated_id() {
-        let specs = OkxSwap.streams("BTCUSDT");
-        let mark = specs
-            .iter()
-            .find(|s| s.name == "markPrice")
-            .expect("mark price is captured");
-        let frame = String::from_utf8(OkxSwap.transport(mark).subscribe[0].clone()).expect("utf8");
-        assert!(
-            frame.contains(r#""channel":"mark-price""#),
-            "the channel keeps its hyphen: {frame}"
-        );
-        assert!(
-            frame.contains(r#""id":"markprice""#),
-            "the id must not: {frame}"
-        );
-    }
-
-    /// The margin engine's inputs have to be in the archive, or a day
-    /// captured here and a day captured at the other venue are not the
-    /// same thing. Liquidation is computed against mark price, and
-    /// funding is a cash flow a backtest has to pay.
-    #[test]
-    fn mark_price_and_funding_are_captured_like_the_other_venue_polls_them() {
-        let specs = OkxSwap.streams("BTCUSDT");
-        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"markPrice"), "got {names:?}");
-        assert!(names.contains(&"fundingRate"), "got {names:?}");
-    }
-
     #[test]
     fn symbols_are_translated_to_this_venue_and_left_alone_if_already_translated() {
         assert_eq!(instrument_id("BTCUSDT"), "BTC-USDT-SWAP");
         assert_eq!(instrument_id("ethusdt"), "ETH-USDT-SWAP");
         assert_eq!(instrument_id("BTC-USDT-SWAP"), "BTC-USDT-SWAP");
-    }
-
-    /// `BTC-USD-SWAP` is the inverse contract: margined in the base
-    /// asset and sized in USD contracts. Translating `BTCUSD` into it
-    /// would file a different kind of instrument under a path that looks
-    /// like every other one, and nothing downstream would notice until
-    /// the sizes were used. Left untranslated, the venue refuses it and
-    /// says which symbol it refused.
-    #[test]
-    fn a_usd_suffix_is_not_translated_into_the_inverse_contract() {
-        assert_eq!(instrument_id("BTCUSD"), "BTCUSD");
-        assert_ne!(instrument_id("BTCUSD"), "BTC-USD-SWAP");
-        // The linear quotes still translate, and the longer suffix is
-        // matched first so BTCUSDT does not fall through to USD.
-        assert_eq!(instrument_id("BTCUSDT"), "BTC-USDT-SWAP");
-        assert_eq!(instrument_id("BTCUSDC"), "BTC-USDC-SWAP");
     }
 
     #[test]
@@ -481,11 +279,6 @@ mod tests {
         // convert data they can read perfectly well.
         let i = OkxSwap.instrument("BTCUSDT").expect("listed");
         assert_eq!((i.price_scale, i.qty_scale), (1, 2));
-        // 0.01 BTC per contract. Were this the coin itself the value
-        // would be CONTRACT_SCALE, and every notional computed from a
-        // size here would be a hundred times too large.
-        assert_eq!(i.contract_size, 1_000_000);
-        assert_ne!(i.contract_size, oq_types::CONTRACT_SCALE);
         assert_eq!(OkxSwap.instrument("btcusdt"), OkxSwap.instrument("BTCUSDT"));
     }
 

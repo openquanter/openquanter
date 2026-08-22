@@ -45,22 +45,7 @@ use oq_types::{PriceTicks, QtyLots, Stamp};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Tick {
     pub stamp: Stamp,
-    /// Last traded price, carried forward when this window had no trade
-    /// of its own.
-    ///
-    /// **Never zero in a published tick**, and alone among the prices
-    /// here in that. The others say "zero when unknown"; this one cannot,
-    /// because the kernel assigns `mark = tick.last` without a guard, and
-    /// a mark of zero is not an absent price — it is a position marked at
-    /// nothing. Under a leverage of 1× or more that is a liquidation, and
-    /// below it a minimum-equity figure understated by exactly the
-    /// position's notional, with nothing to say the number is unusable.
-    ///
-    /// So a producer that has no price does not publish. `oq-ingest`
-    /// carries the previous price across quiet windows and emits nothing
-    /// at all before the first trade; anything else building ticks owes
-    /// the same. This was not true until it was measured: a twelve-hour
-    /// live run carried `last = 0` on 56.4% of its ticks.
+    /// Last traded price in the window.
     pub last: PriceTicks,
     /// Highest price reached inside **this** window; zero when unknown.
     ///

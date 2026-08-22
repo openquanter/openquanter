@@ -109,19 +109,6 @@ pub enum AckPolicy {
     Explicit {
         /// Byte sequence that identifies a successful acknowledgement.
         marker: Vec<u8>,
-        /// Byte sequence that identifies a refusal.
-        ///
-        /// A venue that answers explicitly answers both ways, and the
-        /// two answers are worth telling apart: a refused subscription
-        /// will never succeed, while a silent one may just be a quiet
-        /// market. Without this the refusal falls through as data — it
-        /// gets written into the archive as though it were a book
-        /// update — and the wait ends at the deadline reporting that
-        /// the subscription "was accepted but delivered nothing", which
-        /// is the opposite of what happened.
-        ///
-        /// Empty means the venue has no distinct refusal to look for.
-        reject_marker: Vec<u8>,
         /// How long to wait for it.
         deadline: Duration,
     },
@@ -144,23 +131,6 @@ pub struct Transport {
     pub subscribe: Vec<Vec<u8>>,
     /// How the subscription is confirmed.
     pub ack: AckPolicy,
-    /// How long this venue tolerates hearing nothing from us before it
-    /// hangs up, if it hangs up at all.
-    ///
-    /// `None` where the venue drives the keepalive itself: Binance sends
-    /// a ping and a pong answers it, so nothing has to be scheduled.
-    /// OKX is the other kind — it closes a connection with `4004 No data
-    /// received in 30s` — and on a busy channel the market hides that,
-    /// because data arriving *is* the keepalive. It only appears on a
-    /// quiet one: a funding-rate subscription reconnects every thirty
-    /// seconds and lands a gap in the archive each time, which reads as
-    /// a flaky network rather than a missing ping.
-    ///
-    /// A protocol-level ping frame is what gets sent, deliberately.
-    /// OKX also documents a text `ping` that draws a text `pong`, and
-    /// that `pong` would be captured as a record — noise in an archive
-    /// whose whole promise is that it holds what the venue said.
-    pub keepalive: Option<Duration>,
 }
 
 /// The precision a venue quotes an instrument in.
@@ -170,30 +140,12 @@ pub struct Transport {
 /// default of two decimals reported eleven thousand unparseable
 /// messages, for prices like `57.45300` that are perfectly valid at five
 /// — a data-quality alarm raised entirely by a missing definition.
-/// Re-exported rather than defined here.
-///
-/// This crate used to carry its own two-field version, and `oq-margin`
-/// carried the economics under a different name. Two definitions of one
-/// thing meet nowhere and drift everywhere; worse, neither of them said
-/// what a quantity counts, which is the difference between a size on a
-/// venue that quotes contracts and one that quotes the asset.
-pub use oq_types::Instrument;
-
-/// Which deployment of a venue to connect to.
-///
-/// The execution side already had this as a type, for the reason that a
-/// string wrong by one character is production. Market data needed it
-/// for a second reason: a strategy trading on a test deployment has to
-/// see that deployment's prices, and pointing it at production's would
-/// give it a market it cannot trade in — one where its orders never
-/// fill because they were priced against somewhere else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Deployment {
-    /// Real money.
-    #[default]
-    Live,
-    /// The venue's test deployment.
-    Testnet,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Instrument {
+    /// Decimal places in a price.
+    pub price_scale: u8,
+    /// Decimal places in a quantity.
+    pub qty_scale: u8,
 }
 
 /// What the capture path needs from a venue.
@@ -247,37 +199,7 @@ pub trait Venue {
     /// nested under `"data"`. A reader written for either finds nothing
     /// in the other — which is not an error, just an empty result, so
     /// the conversion produces no ticks and says the archive was empty.
-    ///
-    /// # `None` means "no trade here", which is wider than "unreadable"
-    ///
-    /// An adapter must return `None` for a payload that **declares** no
-    /// trade as well as for one it cannot read. Binance publishes
-    /// `"p":"0","q":"0","X":"NA"` records among the real ones; they hold
-    /// trade ids and belong to the id chain, so a completeness check is
-    /// right to count them, and a price of zero is still not a price.
-    ///
-    /// So **the price and quantity of a returned `Trade` are positive**.
-    /// This is the adapter's job rather than its caller's because the
-    /// caller cannot know which of a venue's records mean nothing, and
-    /// every caller would otherwise have to guard separately — the
-    /// backtest conversion, the live loop, and whatever is written next.
-    /// `conformance` holds every adapter to it.
     fn parse_trade(&self, payload: &[u8], scales: crate::depth::Scales) -> Option<Trade>;
-
-    /// Every trade id carried by a payload, in the order they appear.
-    ///
-    /// Completeness is checked by following the ids the venue issued, so
-    /// this is what makes that check possible — and it has to be the
-    /// venue's, because the shapes share nothing: a bare `"t":12345` on
-    /// one, a quoted `"tradeId":"12345"` on the other. A reader written
-    /// for either finds no ids at all in the other, and no ids means no
-    /// gaps among them, which is an empty check wearing the shape of a
-    /// passing one.
-    ///
-    /// A `Vec` rather than an `Option` because a venue may put several
-    /// trades in one frame. Taking only the first would report every
-    /// other trade in that frame as missing.
-    fn trade_ids(&self, payload: &[u8]) -> Vec<u64>;
 
     /// Read an order book update out of a payload.
     ///
@@ -320,18 +242,6 @@ pub struct Trade {
     pub price: i64,
     /// Size in instrument lots.
     pub qty: i64,
-    /// Which side crossed the spread, when the venue says.
-    ///
-    /// The **aggressor**, not the buyer: every trade has both, and the
-    /// one that carries information is the side that chose to trade
-    /// now. It is what order-flow autocorrelation is computed over —
-    /// the sequence persists strongly, because a large order is worked
-    /// in pieces and each piece hits the same side.
-    ///
-    /// `None` when the venue does not say. A venue that publishes it
-    /// and an adapter that drops it are indistinguishable downstream
-    /// otherwise, and the second is a defect while the first is not.
-    pub aggressor: Option<oq_types::Side>,
 }
 
 /// Look up a venue by the identifier used on the command line and in
@@ -341,67 +251,11 @@ pub struct Trade {
 /// touches one file.
 #[must_use]
 pub fn by_id(id: &str) -> Option<Box<dyn Venue>> {
-    by_id_at(id, Deployment::Live)
-}
-
-/// The same registry, for a named deployment.
-///
-/// Returns `None` when the venue is unknown **or** when it has no
-/// implementation for that deployment. Refusing is the point: a venue
-/// that answered with its production endpoint after being asked for a
-/// test one would be the worst possible answer — the caller believes it
-/// is testing, and it is not.
-#[must_use]
-pub fn by_id_at(id: &str, deployment: Deployment) -> Option<Box<dyn Venue>> {
-    match (id, deployment) {
-        ("binance-perp", d) => Some(Box::new(binance::BinancePerp::at(d))),
-        // This venue's simulated trading is not implemented here. It is
-        // reachable, but reaching it takes a header this adapter does
-        // not send, and connecting without it lands on production.
-        ("okx-swap", Deployment::Live) => Some(Box::new(okx::OkxSwap)),
-        ("okx-swap", Deployment::Testnet) => None,
+    match id {
+        "binance-perp" => Some(Box::new(binance::BinancePerp)),
+        "okx-swap" => Some(Box::new(okx::OkxSwap)),
         _ => None,
     }
-}
-
-/// Every integer following `key`, optionally past an opening quote.
-///
-/// Shared because the difference between the venues here is one quote,
-/// and two near-identical scans would be two places for the same bug.
-/// Deliberately a scan rather than a parse: the payload is stored
-/// verbatim regardless, and this value only has to identify a trade.
-pub(crate) fn ids_after(payload: &[u8], key: &[u8], quoted: bool) -> Vec<u64> {
-    let mut out = Vec::new();
-    let mut at = 0usize;
-    while at + key.len() <= payload.len() {
-        let Some(found) = payload[at..]
-            .windows(key.len())
-            .position(|w| w == key)
-            .map(|p| at + p)
-        else {
-            break;
-        };
-        let mut i = found + key.len();
-        if quoted {
-            // A quoted value must actually be quoted. Skipping this
-            // would read the digits of whatever followed instead.
-            if payload.get(i) != Some(&b'"') {
-                at = found + key.len();
-                continue;
-            }
-            i += 1;
-        }
-        let digits: Vec<u8> = payload[i..]
-            .iter()
-            .copied()
-            .take_while(u8::is_ascii_digit)
-            .collect();
-        if let Ok(id) = core::str::from_utf8(&digits).unwrap_or("").parse::<u64>() {
-            out.push(id);
-        }
-        at = found + key.len();
-    }
-    out
 }
 
 /// Every registered venue identifier, for error messages and `--help`.
