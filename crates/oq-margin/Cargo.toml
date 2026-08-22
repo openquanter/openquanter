@@ -1,6 +1,6 @@
 [package]
 name = "oq-margin"
-version.workspace = true
+version = "0.0.1"
 description = "Tiered maintenance margin, liquidation pricing, and funding for the OpenQuanter trading framework"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-oq-types.workspace = true
+oq-types = { path = "../oq-types", version = "0.0.1" }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-# Generated inputs, for the invariants FR-MARGIN-7 names. A
-# dev-dependency: nothing that depends on this crate inherits it, and the
-# budget this workspace defends is what a *consumer* pulls in — the same
-# reasoning that puts `criterion` behind `cargo bench` in oq-examples.
-proptest = { version = "1", default-features = false, features = ["std"] }
