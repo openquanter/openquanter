@@ -101,15 +101,13 @@ fn real_main() -> Result<ExitCode, String> {
         .into_iter()
         .find(|p| p.name == stream_name);
 
-    let (name, transport, url, poll_interval) = match (socket, poll) {
+    let (name, url, poll_interval) = match (socket, poll) {
         (Some(spec), _) => {
-            let transport = venue.transport(&spec);
-            let url = transport.url.clone();
-            (spec.name, Some(transport), url, None)
+            let url = venue.transport(&spec).url;
+            (spec.name, url, None)
         }
         (None, Some(spec)) => (
             spec.name,
-            None,
             spec.url,
             Some(Duration::from_secs(spec.interval_secs)),
         ),
@@ -165,8 +163,7 @@ fn real_main() -> Result<ExitCode, String> {
             // A silent socket must look different from a quiet market,
             // or a half-open connection would be recorded as an
             // uneventful hour.
-            let transport = transport.expect("a socket stream has a transport");
-            let mut connector = WsConnector::new(transport, Duration::from_secs(60));
+            let mut connector = WsConnector::new(&url, Duration::from_secs(60));
             run(&config, &mut connector, &mut writer)
         }
     }
@@ -175,12 +172,6 @@ fn real_main() -> Result<ExitCode, String> {
 
     let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
     eprintln!("stopped: {:?}", stats.stop);
-    if let Some(why) = &stats.last_error {
-        // The venue's own words. A refused subscription and a network
-        // that went away are both `ConnectionLost`, and only this line
-        // says which.
-        eprintln!("  last connection error: {why}");
-    }
     eprintln!(
         "  {} payloads, {:.1} MiB, {} gap(s) totalling {:.1}s over {:.1} min",
         stats.payloads,

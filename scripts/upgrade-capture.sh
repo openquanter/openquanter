@@ -31,10 +31,10 @@
 
 set -uo pipefail
 
-BIN="${BIN:-$HOME/oq-capture}"
+BIN="${BIN:-/home/ubuntu/oq-capture}"
 NEW="${NEW:-}"
-ROOT="${ROOT:-$HOME/capture}"
-SUPERVISOR="${SUPERVISOR:-$HOME/oq/capture-supervisor.sh}"
+ROOT="${ROOT:-/home/ubuntu/capture}"
+SUPERVISOR="${SUPERVISOR:-/home/ubuntu/oq/capture-supervisor.sh}"
 
 while [ $# -gt 0 ]; do
   case "$1" in

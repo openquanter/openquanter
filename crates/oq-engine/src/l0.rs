@@ -389,68 +389,6 @@ impl L0Engine {
     }
 }
 
-/// Build a resting limit order.
-///
-/// Shared by every tier rather than repeated in each, because these
-/// constructions are the one place a tier could silently differ from the
-/// one below it -- a different time-in-force, a different acceptance
-/// state -- and produce fills the frozen anchor never would.
-///
-/// # Panics
-/// If `qty` is not positive. A caller asking for a zero-quantity order
-/// has a bug, and accepting it would put an order on the book that can
-/// never fill and never be reasoned about.
-#[must_use]
-pub fn limit_order(
-    id: OrderId,
-    side: Side,
-    price: PriceTicks,
-    qty: QtyLots,
-    stamp: oq_types::Stamp,
-    offset: Offset,
-) -> Working {
-    Working::Live(
-        oq_types::Order::with_offset(
-            id,
-            side,
-            oq_types::OrderKind::Limit { price },
-            qty,
-            oq_types::TimeInForce::GoodTilCancel,
-            stamp,
-            offset,
-        )
-        .expect("order quantity must be positive")
-        .accept(),
-    )
-}
-
-/// Build a resting market order.
-///
-/// # Panics
-/// As [`limit_order`].
-#[must_use]
-pub fn market_order(
-    id: OrderId,
-    side: Side,
-    qty: QtyLots,
-    stamp: oq_types::Stamp,
-    offset: Offset,
-) -> Working {
-    Working::Live(
-        oq_types::Order::with_offset(
-            id,
-            side,
-            oq_types::OrderKind::Market,
-            qty,
-            oq_types::TimeInForce::GoodTilCancel,
-            stamp,
-            offset,
-        )
-        .expect("order quantity must be positive")
-        .accept(),
-    )
-}
-
 /// Convenience constructors for callers that build orders inline.
 impl L0Engine {
     /// Rest a limit order, returning its id.
@@ -483,7 +421,18 @@ impl L0Engine {
         stamp: oq_types::Stamp,
         offset: Offset,
     ) -> OrderId {
-        self.submit(limit_order(id, side, price, qty, stamp, offset));
+        let order = oq_types::Order::with_offset(
+            id,
+            side,
+            oq_types::OrderKind::Limit { price },
+            qty,
+            oq_types::TimeInForce::GoodTilCancel,
+            stamp,
+            offset,
+        )
+        .expect("order quantity must be positive")
+        .accept();
+        self.submit(Working::Live(order));
         id
     }
 
@@ -513,7 +462,18 @@ impl L0Engine {
         stamp: oq_types::Stamp,
         offset: Offset,
     ) -> OrderId {
-        self.submit(market_order(id, side, qty, stamp, offset));
+        let order = oq_types::Order::with_offset(
+            id,
+            side,
+            oq_types::OrderKind::Market,
+            qty,
+            oq_types::TimeInForce::GoodTilCancel,
+            stamp,
+            offset,
+        )
+        .expect("order quantity must be positive")
+        .accept();
+        self.submit(Working::Live(order));
         id
     }
 }
