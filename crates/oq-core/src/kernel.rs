@@ -21,14 +21,9 @@
 //! does and what a backtest that only checks at settlement misses.
 
 use crate::event::Event;
-use oq_engine::Tick;
-
-use crate::matcher::{DepthOutcome, Matcher};
+use oq_engine::{L0Engine, Tick};
 use oq_margin::{Contract, FundingRate, MarginedPosition, TierTable};
-use oq_types::{
-    Balances, Cash, Currency, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Side,
-    Working,
-};
+use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Side, Working};
 
 /// Something the core produced.
 ///
@@ -59,27 +54,6 @@ pub enum Output {
 }
 
 /// Why a submission was refused.
-/// Who decides which orders trade.
-///
-/// This is the whole of what separates a backtest from a live run, and
-/// naming it is what makes `IMPLEMENTATION` §1's claim — that the two
-/// differ only in the event producer — true rather than aspirational.
-/// The accounting, the margin, the funding and the state are one
-/// implementation; only the source of fills changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Matching {
-    /// The matcher decides, from the price path. A backtest.
-    #[default]
-    Simulated,
-    /// The venue decides, and says so with [`Event::VenueFill`].
-    ///
-    /// The matcher still holds resting orders — so the working set and
-    /// the position are right — but never fills one. A kernel that both
-    /// matched and accepted venue fills would book every trade twice,
-    /// and the second copy would look exactly like the first.
-    Venue,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
     /// Quantity was not positive.
@@ -88,21 +62,6 @@ pub enum RejectReason {
     DuplicateId,
     /// The account has no collateral.
     NoMargin,
-    /// A venue fill arrived at a kernel that is doing its own matching.
-    ///
-    /// Refused rather than applied: a simulated run produces its own
-    /// fills, so one from outside is a second matcher and taking it
-    /// would double the position silently — in the one mode where
-    /// nobody is watching for that.
-    NotVenueMatched,
-    /// An observation that could not be matched to a holding.
-    ///
-    /// Either it names an instrument this account does not hold, or it
-    /// names none while the account holds more than one. The second is
-    /// the interesting case: an unnamed tick was unambiguous for as
-    /// long as there was one holding, and stops being so without any
-    /// record changing.
-    UnroutableObservation,
 }
 
 /// What the venue charges per fill.
@@ -151,121 +110,40 @@ impl Fees {
 /// Account and market state for one instrument.
 #[derive(Debug)]
 pub struct State {
-    /// The one instrument this account trades.
-    ///
-    /// Singular, and named rather than inlined, because the two halves
-    /// answer different questions: an account has one balance however
-    /// many instruments it trades, and each instrument has its own
-    /// position, matcher and margin table. Splitting them is what
-    /// FR-CORE-6 needs before a shard can be one instrument's kernel —
-    /// today it separates the two ideas without yet allowing more than
-    /// one of the second.
-    holdings: Vec<Holding>,
-    /// How opposing exposure is accounted for.
-    ///
-    /// An account-level choice: it decides what a fill *means*, and the
-    /// venue applies it to the account rather than per instrument.
-    pub mode: PositionMode,
-    /// What the account holds, by currency.
-    ///
-    /// Private, because every read has to say which currency it means
-    /// and `balance()` is the one that answers "the one this account
-    /// prices itself in". A `pub` field would let a caller add to a
-    /// currency the margin model does not know it holds.
-    balances: Balances,
-    /// The currency margin, equity and liquidation are computed in.
-    ///
-    /// A holding settling in something else can be *held* — see
-    /// [`Balances`] — and cannot yet be counted toward equity, because
-    /// that needs a rate and an instant it was true at. Until then this
-    /// is the currency the account is solvent or not in.
-    pub settlement: Currency,
-    pub realized: Cash,
-    pub funding: Cash,
-    /// Trading fees charged so far, positive.
-    pub fees: Cash,
-    pub fee_schedule: Fees,
-    pub now: Nanos,
-    pub enforce_liquidation: bool,
-    pub matching: Matching,
-}
-
-impl Holding {
-    /// Maintenance margin this position requires at its current mark.
-    ///
-    /// Summed across both legs rather than netted: a hedged account
-    /// posts margin for each, which is the whole reason the mode
-    /// changes what a strategy can survive.
-    #[must_use]
-    pub fn maintenance(&self) -> Cash {
-        self.maintenance_at(self.mark)
-    }
-
-    /// The same at a price this holding is not marked at.
-    #[must_use]
-    pub fn maintenance_at(&self, mark: PriceTicks) -> Cash {
-        let long = if self.qty.is_zero() {
-            Cash::ZERO
-        } else {
-            self.table.maintenance(self.contract, mark, self.qty)
-        };
-        let short = if self.short_qty.is_zero() {
-            Cash::ZERO
-        } else {
-            self.table.maintenance(self.contract, mark, self.short_qty)
-        };
-        long.add(short)
-    }
-
-    /// Unrealized profit on both legs at the current mark.
-    #[must_use]
-    pub fn unrealized(&self) -> Cash {
-        let long = if self.qty.is_zero() {
-            Cash::ZERO
-        } else {
-            self.contract.unrealized(self.entry, self.mark, self.qty)
-        };
-        let short = if self.short_qty.is_zero() {
-            Cash::ZERO
-        } else {
-            self.contract
-                .unrealized(self.short_entry, self.mark, self.short_qty)
-        };
-        long.add(short)
-    }
-}
-
-/// One instrument's position, and everything that prices it.
-///
-/// A holding is what a shard would own. Nothing here is shared with
-/// another instrument: the matcher fills this instrument's orders, the
-/// margin table brackets this instrument's notional, and the mark is
-/// this instrument's last price. The account those figures roll up into
-/// is [`State`], and it is deliberately not reachable from here —
-/// that direction is what FR-CORE-6 forbids across shards.
-#[derive(Debug)]
-pub struct Holding {
-    /// Which instrument this is. Held here rather than only inside the
-    /// matcher because a list of holdings is searched by it, and a
-    /// search that has to reach through a matcher to find its key would
-    /// couple the account's shape to the tier a run happens to use.
-    pub instrument: InstrumentId,
-    pub engine: Matcher,
+    pub engine: L0Engine,
     pub contract: Contract,
     pub table: TierTable,
     /// Signed position; zero when flat.
-    ///
-    /// Under [`PositionMode::OneWay`] this is the whole position. Under
-    /// [`PositionMode::Hedge`] it is the long leg, and never negative.
     pub qty: QtyLots,
-    /// Average entry price, or zero when flat.
+    /// Average entry price of the open position.
     pub entry: PriceTicks,
-    /// The short leg under hedge accounting; zero under one-way netting.
-    pub short_qty: QtyLots,
-    /// Average entry of the short leg.
-    pub short_entry: PriceTicks,
-    /// The last price this instrument traded at.
+    /// Free collateral plus position margin.
+    pub balance: Cash,
+    /// Realized profit and loss, cumulative.
+    pub realized: Cash,
+    /// Funding paid (negative) or received (positive), cumulative.
+    pub funding: Cash,
+    /// Trading fees charged, cumulative and positive.
+    ///
+    /// Tracked separately from realized profit because a strategy whose
+    /// gross edge is real and whose net result is negative is a
+    /// different problem from one with no edge, and a single number
+    /// cannot tell them apart.
+    pub fees: Cash,
+    /// What the venue charges.
+    pub fee_schedule: Fees,
+    /// The last time the core was told about.
+    pub now: Nanos,
+    /// The most recent traded price.
     pub mark: PriceTicks,
+    /// Whether the venue is allowed to close the account.
+    ///
+    /// Enabled in anything describing a real account. Disabling it
+    /// models an account with unlimited collateral — which no venue
+    /// offers, and which is what a backtest without a margin model
+    /// silently assumes. It exists so that assumption can be run as the
+    /// control arm of an experiment rather than left implicit.
+    pub enforce_liquidation: bool,
 }
 
 impl State {
@@ -277,27 +155,19 @@ impl State {
         starting_balance: Cash,
     ) -> Self {
         Self {
-            holdings: vec![Holding {
-                engine: Matcher::l0(instrument),
-                contract,
-                table,
-                qty: QtyLots::ZERO,
-                entry: PriceTicks::ZERO,
-                short_qty: QtyLots::ZERO,
-                short_entry: PriceTicks::ZERO,
-                mark: PriceTicks::ZERO,
-                instrument,
-            }],
-            mode: PositionMode::OneWay,
-            balances: Balances::of(Currency::usdt(), starting_balance),
-            settlement: Currency::usdt(),
+            engine: L0Engine::new(instrument),
+            contract,
+            table,
+            qty: QtyLots::ZERO,
+            entry: PriceTicks::ZERO,
+            balance: starting_balance,
             realized: Cash::ZERO,
             funding: Cash::ZERO,
             now: Nanos::ZERO,
+            mark: PriceTicks::ZERO,
             fees: Cash::ZERO,
             fee_schedule: Fees::none(),
             enforce_liquidation: true,
-            matching: Matching::Simulated,
         }
     }
 
@@ -328,295 +198,23 @@ impl State {
     /// The position as the margin model sees it.
     #[must_use]
     pub fn position(&self) -> MarginedPosition {
-        MarginedPosition::new(
-            self.holding().contract,
-            self.holding().entry,
-            self.holding().qty,
-            self.balance(),
-        )
-    }
-
-    /// Account for opposing exposure as two legs rather than one net.
-    #[must_use]
-    pub fn with_mode(mut self, mode: PositionMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// The only holding, for the single-instrument path.
-    ///
-    /// Most of this kernel was written when an account had exactly one,
-    /// and most of it still means that. This is the accessor those call
-    /// sites use; a caller that means a particular instrument asks for
-    /// it by name with [`State::holding_of`].
-    ///
-    /// # Panics
-    /// If the account holds none. `State::new` creates one, so this is
-    /// unreachable through the public API.
-    #[must_use]
-    pub fn holding(&self) -> &Holding {
-        &self.holdings[0]
-    }
-
-    /// The only holding, mutably.
-    ///
-    /// # Panics
-    /// As [`State::holding`].
-    pub fn holding_mut(&mut self) -> &mut Holding {
-        &mut self.holdings[0]
-    }
-
-    /// Where an instrument's holding sits, for an operation that has to
-    /// reach the same one repeatedly.
-    ///
-    /// An index rather than a reference, because the operations that
-    /// need it also touch the account — a borrow of one holding would
-    /// stop the balance being credited in the same function.
-    #[must_use]
-    pub fn holding_index(&self, instrument: InstrumentId) -> Option<usize> {
-        self.holdings
-            .iter()
-            .position(|h| h.instrument == instrument)
-    }
-
-    /// The holding at an index, read-only.
-    ///
-    /// # Panics
-    /// As [`State::at`].
-    #[must_use]
-    pub fn holdings_at(&self, index: usize) -> &Holding {
-        &self.holdings[index]
-    }
-
-    /// The holding at an index from [`State::holding_index`].
-    ///
-    /// # Panics
-    /// If the index is out of range. Callers get one from
-    /// `holding_index` and holdings are never removed, so this is
-    /// unreachable through the public API.
-    #[must_use]
-    pub fn at(&mut self, index: usize) -> &mut Holding {
-        &mut self.holdings[index]
-    }
-
-    /// The holding for one instrument, if the account has one.
-    #[must_use]
-    pub fn holding_of(&self, instrument: InstrumentId) -> Option<&Holding> {
-        self.holdings.iter().find(|h| h.instrument == instrument)
-    }
-
-    /// The holding for one instrument, mutably.
-    pub fn holding_of_mut(&mut self, instrument: InstrumentId) -> Option<&mut Holding> {
-        self.holdings
-            .iter_mut()
-            .find(|h| h.instrument == instrument)
-    }
-
-    /// Every holding, in the order they were opened.
-    pub fn holdings(&self) -> impl Iterator<Item = &Holding> + '_ {
-        self.holdings.iter()
-    }
-
-    /// Take on another instrument, sharing this account's balance.
-    ///
-    /// The point of separating the two: margin and equity are the
-    /// account's, computed across every holding, while the matcher, the
-    /// position and the margin table are each instrument's own. An
-    /// instrument already held is returned unchanged rather than
-    /// duplicated — two holdings of one instrument would each report a
-    /// position and neither would be the account's.
-    pub fn open_holding(
-        &mut self,
-        instrument: InstrumentId,
-        contract: Contract,
-        table: TierTable,
-    ) -> &mut Holding {
-        if let Some(i) = self
-            .holdings
-            .iter()
-            .position(|h| h.instrument == instrument)
-        {
-            return &mut self.holdings[i];
-        }
-        self.holdings.push(Holding {
-            instrument,
-            engine: Matcher::l0(instrument),
-            contract,
-            table,
-            qty: QtyLots::ZERO,
-            entry: PriceTicks::ZERO,
-            short_qty: QtyLots::ZERO,
-            short_entry: PriceTicks::ZERO,
-            mark: PriceTicks::ZERO,
-        });
-        self.holdings.last_mut().expect("just pushed")
-    }
-
-    /// What the account holds in the currency it prices itself in.
-    ///
-    /// The number every margin and liquidation decision is made
-    /// against. A balance in another currency is held and not counted,
-    /// which [`State::balances`] reports and this deliberately does not
-    /// — a total across currencies needs a rate, and one computed from
-    /// a stale rate is wrong while looking like a number.
-    #[must_use]
-    pub fn balance(&self) -> Cash {
-        self.balances.get(self.settlement)
-    }
-
-    /// Everything the account holds, by currency.
-    #[must_use]
-    pub const fn balances(&self) -> &Balances {
-        &self.balances
-    }
-
-    /// Move the settlement balance by `amount`, signed.
-    ///
-    /// One entry point for both directions, because a fee that credited
-    /// and a profit that debited would each read as ordinary arithmetic
-    /// at the call site.
-    pub fn credit(&mut self, amount: Cash) {
-        self.balances.add(self.settlement, amount);
-    }
-
-    /// Equity totalled across every currency the account holds.
-    ///
-    /// [`State::equity`] answers in the settlement currency and counts
-    /// only what is held in it, which is the number margin and
-    /// liquidation are decided by — those happen in one currency
-    /// because a venue settles in one. This is the other question: what
-    /// is the account worth, given rates and the instant they were true
-    /// at.
-    ///
-    /// `None` when a held currency has no rate. Not a partial total: a
-    /// sum missing one of its parts is a smaller number that looks
-    /// complete, and an account reported as holding less than it does
-    /// is the direction that liquidates somebody.
-    ///
-    /// Unrealized profit is added in the settlement currency, because
-    /// that is where a position's mark-to-market lands.
-    #[must_use]
-    pub fn equity_across(&self, into: Currency, rates: &oq_types::Rates) -> Option<Cash> {
-        let held = self.balances.total_in(into, rates)?;
-        let unrealized = rates.convert(self.unrealized(), self.settlement, into)?;
-        Some(held.add(unrealized))
-    }
-
-    /// Which held currencies have no rate into `into`.
-    #[must_use]
-    pub fn unpriced(&self, into: Currency, rates: &oq_types::Rates) -> Vec<Currency> {
-        self.balances.unconvertible(into, rates)
-    }
-
-    /// Credit a currency this account does not price itself in.
-    ///
-    /// Held, reported, and **not** counted toward equity. This is the
-    /// half of multi-currency support that does not need a rate: an
-    /// account can receive a payout in something it does not settle in,
-    /// and pretending otherwise loses the payout.
-    pub fn credit_in(&mut self, currency: Currency, amount: Cash) {
-        self.balances.add(currency, amount);
-    }
-
-    /// Match with a different fidelity tier.
-    ///
-    /// The default is L0, the frozen anchor. A tier given nothing the
-    /// one below it lacked answers identically -- so this changes
-    /// results only when it is also handed the data the tier exists to
-    /// read, which is the property that makes the choice safe to expose.
-    ///
-    /// # Panics
-    /// If the matcher is for a different instrument than this state.
-    /// Two instruments sharing one account is a position attributed to
-    /// the wrong book, and it would show up as a margin figure nobody
-    /// can trace.
-    #[must_use]
-    pub fn matching_with(mut self, matcher: Matcher) -> Self {
-        assert_eq!(
-            matcher.instrument(),
-            self.holding().engine.instrument(),
-            "matcher is for a different instrument than the state it is going into"
-        );
-        self.holding_mut().engine = matcher;
-        self
-    }
-
-    /// The short leg as a margined position. Flat under one-way netting.
-    #[must_use]
-    pub fn short_position(&self) -> MarginedPosition {
-        MarginedPosition::new(
-            self.holding().contract,
-            self.holding().short_entry,
-            self.holding().short_qty,
-            self.balance(),
-        )
+        MarginedPosition::new(self.contract, self.entry, self.qty, self.balance)
     }
 
     /// Account equity at the current mark.
-    ///
-    /// Both legs count. Under hedge accounting an account can hold a
-    /// profitable long and a losing short at once, and equity is what
-    /// remains after both — which is also what the venue liquidates
-    /// against.
     #[must_use]
     pub fn equity(&self) -> Cash {
-        self.balance().add(self.unrealized())
+        self.position().equity(self.mark)
     }
 
-    /// Unrealized profit across every holding, both legs of each.
-    ///
-    /// Summed, because it is one account: a loss on one instrument is
-    /// paid for by a gain on another, and reporting the holding that
-    /// happens to be first would price the account at one of its
-    /// positions.
+    /// Unrealized profit at the current mark.
     #[must_use]
     pub fn unrealized(&self) -> Cash {
-        self.holdings
-            .iter()
-            .map(Holding::unrealized)
-            .fold(Cash::ZERO, Cash::add)
-    }
-
-    /// Maintenance margin the venue requires, across both legs.
-    ///
-    /// Summed rather than netted: a hedged account posts margin for each
-    /// leg, which is the whole reason the mode changes what a strategy
-    /// can survive.
-    /// Across every holding, each at its own mark.
-    ///
-    /// One mark for the whole account was possible when there was one
-    /// instrument; with several, each is marked at the last price *it*
-    /// traded at, and a single price applied to all of them would price
-    /// one instrument's position in another's ticks.
-    ///
-    /// A holding that has never been marked requires nothing, because
-    /// there is no price to require it at. That is reachable only
-    /// before the first observation — a position is opened by a fill,
-    /// and in a simulated run a fill comes from a tick that also sets
-    /// the mark. Under [`Matching::Venue`] a fill can arrive first, and
-    /// the account is unmargined until the next tick.
-    #[must_use]
-    pub fn maintenance(&self) -> Cash {
-        self.holdings
-            .iter()
-            .map(Holding::maintenance)
-            .fold(Cash::ZERO, Cash::add)
-    }
-
-    /// What one holding would require if it were marked at `mark`.
-    ///
-    /// For asking "what happens at this price" — a liquidation estimate
-    /// — rather than what is required now.
-    #[must_use]
-    pub fn maintenance_at(&self, instrument: InstrumentId, mark: PriceTicks) -> Cash {
-        self.holding_of(instrument)
-            .map_or(Cash::ZERO, |h| h.maintenance_at(mark))
-    }
-
-    /// Whether the account is flat on both legs.
-    #[must_use]
-    pub fn is_flat(&self) -> bool {
-        self.holding().qty.is_zero() && self.holding().short_qty.is_zero()
+        if self.qty.is_zero() {
+            Cash::ZERO
+        } else {
+            self.contract.unrealized(self.entry, self.mark, self.qty)
+        }
     }
 
     /// Apply a fill to the position, realizing profit on the part that
@@ -628,188 +226,51 @@ impl State {
     /// position's entry price is the fill price rather than a blend of
     /// the two sides.
     fn apply_fill(&mut self, fill: &Fill) {
-        // The fill names its instrument, so the position it moves
-        // is that instrument's rather than whichever holding is
-        // first. Before this every fill landed on the first one,
-        // and two instruments netted against each other in a
-        // single position.
-        let h = self
-            .holding_index(fill.instrument)
-            .expect("a fill for an instrument this account does not hold");
-        if matches!(self.mode, PositionMode::Hedge) {
-            self.apply_fill_hedged(fill);
-            return;
-        }
         let signed = fill.position_delta();
-        let old = self.holdings[h].qty;
+        let old = self.qty;
         let new = old.add(signed);
 
         let reduces = old.0 != 0 && (old.0 > 0) != (signed.0 > 0);
         if reduces {
             let closed = signed.0.abs().min(old.0.abs());
             let closed_signed = QtyLots(closed * if old.0 > 0 { 1 } else { -1 });
-            let pnl = self.holding().contract.unrealized(
-                self.holdings[h].entry,
-                fill.price,
-                closed_signed,
-            );
+            let pnl = self
+                .contract
+                .unrealized(self.entry, fill.price, closed_signed);
             self.realized = self.realized.add(pnl);
-            self.credit(pnl);
+            self.balance = self.balance.add(pnl);
         }
 
         if new.0 == 0 {
-            self.at(h).entry = PriceTicks::ZERO;
+            self.entry = PriceTicks::ZERO;
         } else if old.0 == 0 || (old.0 > 0) == (new.0 > 0) && !reduces {
             // Opening or adding: the entry price is the size-weighted
             // average, which is what the venue reports and what every
             // margin calculation is written against.
-            let old_notional = self.holdings[h].entry.0 as i128 * old.0.abs() as i128;
+            let old_notional = self.entry.0 as i128 * old.0.abs() as i128;
             let add_notional = fill.price.0 as i128 * signed.0.abs() as i128;
             let total = old.0.abs() as i128 + signed.0.abs() as i128;
             if total > 0 {
-                self.at(h).entry = PriceTicks(((old_notional + add_notional) / total) as i64);
+                self.entry = PriceTicks(((old_notional + add_notional) / total) as i64);
             }
         } else if (old.0 > 0) != (new.0 > 0) {
             // Crossed through flat: the remainder is a new position at
             // the fill price, not a blend with the side just closed.
-            self.at(h).entry = fill.price;
+            self.entry = fill.price;
         }
-        self.at(h).qty = new;
-    }
-
-    /// Apply a fill to whichever leg it names.
-    ///
-    /// The leg follows from side and offset together, the same pairing
-    /// the venue uses: a buy that opens grows the long, a sell that
-    /// closes shrinks it, a sell that opens grows the short, a buy that
-    /// closes shrinks it. Neither field alone is enough — a buy while a
-    /// short is open is ambiguous without the offset, which is why the
-    /// order carries it.
-    ///
-    /// A leg is never crossed through flat here. Closing more than the
-    /// leg holds realizes what it holds and stops, rather than opening
-    /// the opposite side by accident: under hedge accounting the other
-    /// side is a separate position with its own entry, and rolling into
-    /// it would invent one.
-    fn apply_fill_hedged(&mut self, fill: &Fill) {
-        // The fill names its instrument, so the position it moves
-        // is that instrument's rather than whichever holding is
-        // first. Before this every fill landed on the first one,
-        // and two instruments netted against each other in a
-        // single position.
-        let h = self
-            .holding_index(fill.instrument)
-            .expect("a fill for an instrument this account does not hold");
-        let qty = fill.qty;
-        let opens = matches!(fill.offset, oq_types::Offset::Open);
-        let long_leg = match (fill.side, opens) {
-            (oq_types::Side::Buy, true) | (oq_types::Side::Sell, false) => true,
-            (oq_types::Side::Sell, true) | (oq_types::Side::Buy, false) => false,
-        };
-
-        if opens {
-            if long_leg {
-                let (q, e) = Self::blend(
-                    self.holdings[h].qty,
-                    self.holdings[h].entry,
-                    qty,
-                    fill.price,
-                    1,
-                );
-                self.at(h).qty = q;
-                self.at(h).entry = e;
-            } else {
-                let (q, e) = Self::blend(
-                    self.holdings[h].short_qty,
-                    self.holdings[h].short_entry,
-                    qty,
-                    fill.price,
-                    -1,
-                );
-                self.at(h).short_qty = q;
-                self.at(h).short_entry = e;
-            }
-            return;
-        }
-
-        let (held, entry) = if long_leg {
-            (self.holdings[h].qty, self.holdings[h].entry)
-        } else {
-            (self.holdings[h].short_qty, self.holdings[h].short_entry)
-        };
-        if held.0 == 0 {
-            return;
-        }
-        let closing = qty.0.min(held.0.abs());
-        let signed_closed = QtyLots(closing * if held.0 > 0 { 1 } else { -1 });
-        let pnl = self
-            .holding()
-            .contract
-            .unrealized(entry, fill.price, signed_closed);
-        self.realized = self.realized.add(pnl);
-        self.credit(pnl);
-
-        let left = QtyLots(held.0 - signed_closed.0);
-        if long_leg {
-            self.at(h).qty = left;
-            if left.0 == 0 {
-                self.at(h).entry = PriceTicks::ZERO;
-            }
-        } else {
-            self.at(h).short_qty = left;
-            if left.0 == 0 {
-                self.at(h).short_entry = PriceTicks::ZERO;
-            }
-        }
-    }
-
-    /// Size-weighted average of an existing leg and an addition.
-    fn blend(
-        held: QtyLots,
-        entry: PriceTicks,
-        add: QtyLots,
-        price: PriceTicks,
-        sign: i64,
-    ) -> (QtyLots, PriceTicks) {
-        let held_abs = held.0.abs();
-        let total = held_abs + add.0;
-        if total == 0 {
-            return (QtyLots::ZERO, PriceTicks::ZERO);
-        }
-        let notional =
-            i128::from(entry.0) * i128::from(held_abs) + i128::from(price.0) * i128::from(add.0);
-        (
-            QtyLots(sign * total),
-            PriceTicks((notional / i128::from(total)) as i64),
-        )
+        self.qty = new;
     }
 
     /// Close the position at `price` because the venue liquidated it.
     fn liquidate(&mut self, price: PriceTicks) -> Output {
-        // Both legs close. A venue liquidating a hedged account does not
-        // leave one side running, and reporting only the long would
-        // understate what the account lost.
-        let pnl = self
-            .holding()
-            .contract
-            .unrealized(self.holding().entry, price, self.holding().qty)
-            .add(self.holding().contract.unrealized(
-                self.holding().short_entry,
-                price,
-                self.holding().short_qty,
-            ));
+        let qty = self.qty;
+        let pnl = self.contract.unrealized(self.entry, price, qty);
         self.realized = self.realized.add(pnl);
-        self.credit(pnl);
-        let equity = self.balance();
-        // Reported as the net exposure that was closed out, which is the
-        // number a reader compares against the position they thought
-        // they had.
-        let qty = QtyLots(self.holding().qty.0 + self.holding().short_qty.0);
-        self.holding_mut().qty = QtyLots::ZERO;
-        self.holding_mut().entry = PriceTicks::ZERO;
-        self.holding_mut().short_qty = QtyLots::ZERO;
-        self.holding_mut().short_entry = PriceTicks::ZERO;
-        self.holding_mut().engine.cancel_all();
+        self.balance = self.balance.add(pnl);
+        let equity = self.balance;
+        self.qty = QtyLots::ZERO;
+        self.entry = PriceTicks::ZERO;
+        self.engine.cancel_all();
         Output::Liquidated {
             at: self.now,
             price,
@@ -848,47 +309,13 @@ impl Kernel {
     /// overwrites.
     pub fn apply(&mut self, event: &Event) -> &[Output] {
         self.outputs.clear();
-
-        // Taken before the match, which is over a copy: a depth update
-        // carries a list of levels and is the one input that is not one.
-        if let Event::Depth(update) = event {
-            // Whether the tier read it is not an output. A run at a
-            // lower tier being handed depth is a fact about the run's
-            // configuration, and the host counts it -- the kernel's job
-            // here is to hand it over.
-            // Depth carries no instrument of its own yet, so it reaches
-            // the only holding — and an account with several gets
-            // nothing, which is visible as an unread update rather than
-            // depth silently applied to the wrong book.
-            if self.state.holdings().count() == 1 {
-                let _ = self.state.at(0).engine.on_depth(update);
-            }
-            return &self.outputs;
-        }
-
         match *event {
-            Event::Tick { instrument, tick } => {
-                // An observation has to reach the holding it is of. A
-                // kernel with one holding accepts an unnamed tick,
-                // because that is what a single-instrument journal
-                // means; one with several refuses it, since marking a
-                // position at another instrument's price is a wrong
-                // number rather than a missing one.
-                match self.route(instrument) {
-                    Some(h) => self.on_tick(h, &tick),
-                    None => self.outputs.push(Output::Rejected {
-                        id: OrderId::new(0),
-                        reason: RejectReason::UnroutableObservation,
-                    }),
-                }
-            }
+            Event::Tick(tick) => self.on_tick(&tick),
             Event::Submit {
-                instrument,
                 id,
                 side,
                 price,
                 qty,
-                offset,
                 stamp,
             } => {
                 if qty.0 <= 0 {
@@ -901,59 +328,36 @@ impl Kernel {
                         id,
                         reason: RejectReason::DuplicateId,
                     });
-                } else if self.route(instrument).is_none() {
-                    // Bound below once the checks pass; here it is only
-                    // the refusal.
-                    // An order for an instrument this account does not
-                    // hold, or none named while it holds several. Same
-                    // rule as an observation: placing it on whichever
-                    // holding is nearest is not a near miss.
-                    self.outputs.push(Output::Rejected {
-                        id,
-                        reason: RejectReason::UnroutableObservation,
-                    });
-                } else if self.state.balance().0 <= 0 {
+                } else if self.state.balance.0 <= 0 {
                     // A liquidated account does not get to keep trading.
                     self.outputs.push(Output::Rejected {
                         id,
                         reason: RejectReason::NoMargin,
                     });
                 } else {
-                    // Built here rather than by the matcher, so every
-                    // tier receives the same order: a construction that
-                    // lived in three places is where a time-in-force
-                    // drifts and a tier produces fills the frozen
-                    // anchor never would.
-                    let order = match price {
-                        Some(p) => oq_engine::limit_order(id, side, p, qty, stamp, offset),
-                        None => oq_engine::market_order(id, side, qty, stamp, offset),
-                    };
-                    // To the holding the order named, not the first one.
-                    // Every order landing on holding zero is what made a
-                    // two-instrument account net its positions together.
-                    let h = self.route(instrument).expect("checked above");
-                    self.state.at(h).engine.submit(order, stamp.local);
+                    match price {
+                        Some(p) => {
+                            self.state.engine.submit_limit(id, side, p, qty, stamp);
+                        }
+                        None => {
+                            self.state.engine.submit_market(id, side, qty, stamp);
+                        }
+                    }
                     self.working.push(id);
                 }
             }
             Event::Cancel { id, .. } => {
-                // An order id is unique across the account, so the
-                // holding that took it is the one that answers. Asking
-                // each in turn is how the id names its own holding
-                // without the caller having to.
-                let cancelled =
-                    (0..self.state.holdings().count()).any(|h| self.state.at(h).engine.cancel(id));
-                if cancelled {
+                if self.state.engine.cancel(id) {
                     self.working.retain(|w| *w != id);
                     self.outputs.push(Output::Cancelled(id));
                 }
             }
             Event::Funding { at, rate, mark } => {
                 self.state.now = at;
-                if !self.state.holding().qty.is_zero() {
+                if !self.state.qty.is_zero() {
                     let settlement = FundingRate::new(at, rate, mark)
-                        .settle(self.state.holding().contract, self.state.holding().qty);
-                    self.state.credit(settlement.amount);
+                        .settle(self.state.contract, self.state.qty);
+                    self.state.balance = self.state.balance.add(settlement.amount);
                     self.state.funding = self.state.funding.add(settlement.amount);
                     self.outputs.push(Output::Funded {
                         amount: settlement.amount,
@@ -968,92 +372,21 @@ impl Kernel {
             Event::Time(at) => self.state.now = at,
             Event::MarginDeposit { amount, at } => {
                 self.state.now = at;
-                self.state.credit(Cash(amount));
+                self.state.balance = self.state.balance.add(Cash(amount));
             }
-            Event::VenueFill(fill) => self.on_venue_fill(&fill),
-            Event::Depth(_) => unreachable!("handled before the match"),
         }
         &self.outputs
     }
 
-    /// Book a fill the venue decided.
-    ///
-    /// The accounting is the matcher's, to the letter — the same fee
-    /// charge, the same position update, the same `Output::Filled`. That
-    /// is the point: a live run and a backtest keep their books with one
-    /// implementation, and only the source of fills differs.
-    ///
-    /// Two things happen here that the matched path does not need.
-    ///
-    /// The order is withdrawn from the matching engine. Under
-    /// [`Matching::Venue`] the matcher never fills, so this is not about
-    /// double-filling now — it is about replay. A journal carrying both
-    /// a `Submit` and the venue's fill, replayed by a build whose mode
-    /// was not set, would rest the order and match it too, and the
-    /// second copy would be indistinguishable from the first.
-    ///
-    /// And a fill under [`Matching::Simulated`] is refused rather than
-    /// applied. A simulated run produces its own fills; one arriving
-    /// from outside is a second matcher, and taking it would silently
-    /// double a position in the one mode where nobody is looking for
-    /// that.
-    fn on_venue_fill(&mut self, fill: &Fill) {
-        if self.state.matching != Matching::Venue {
-            self.outputs.push(Output::Rejected {
-                id: fill.order,
-                reason: RejectReason::NotVenueMatched,
-            });
-            return;
-        }
-        self.state.now = fill.stamp.exch;
-        // Withdrawn before the books move, so a panic between the two
-        // cannot leave an order that has already paid.
-        // The order lives in the holding its fill names.
-        if let Some(h) = self.state.holding_index(fill.instrument) {
-            self.state.at(h).engine.cancel(fill.order);
-        }
-        self.working.retain(|w| *w != fill.order);
-
-        // The fill's own instrument decides the contract, since a fee
-        // is a share of a notional and the multiplier is per contract.
-        let contract = self
-            .state
-            .holding_of(fill.instrument)
-            .map_or(self.state.holding().contract, |h| h.contract);
-        let fee = self.state.fee_schedule.charge(contract, fill);
-        self.state.fees = self.state.fees.add(fee);
-        self.state.credit(fee.neg());
-        self.state.apply_fill(fill);
-        self.outputs.push(Output::Filled(*fill));
-        // The venue's fill can be what makes the account liquidatable,
-        // and waiting for the next tick to notice would report the
-        // liquidation at the wrong price.
-        self.check_liquidation(fill.price);
-    }
-
-    /// Advance one holding to an observation.
-    ///
-    /// `h` is the holding the observation was routed to. Every
-    /// price here is that instrument's, and applying it to a
-    /// different one marks a position at another market's price.
-    fn on_tick(&mut self, h: usize, tick: &Tick) {
+    fn on_tick(&mut self, tick: &Tick) {
         self.state.now = tick.stamp.exch;
-        self.state.at(h).mark = tick.last;
-        if self.state.matching == Matching::Venue {
-            // The venue is matching. The mark, the clock, the funding
-            // and the liquidation check all still follow the price —
-            // only the decision about which orders trade belongs
-            // elsewhere.
-            self.check_liquidation(tick.last);
-            return;
-        }
+        self.state.mark = tick.last;
 
         // Copy out before touching state: the engine's buffer is
         // reused, and applying a fill mutates the state the next fill
         // is computed against.
         let fills: Vec<Fill> = self
             .state
-            .at(h)
             .engine
             .on_tick(tick)
             .iter()
@@ -1064,12 +397,9 @@ impl Kernel {
             // Charged before the position update so the fee is computed
             // against the fill that incurred it, not against whatever
             // the position became afterwards.
-            let fee = self
-                .state
-                .fee_schedule
-                .charge(self.state.holdings_at(h).contract, fill);
+            let fee = self.state.fee_schedule.charge(self.state.contract, fill);
             self.state.fees = self.state.fees.add(fee);
-            self.state.credit(fee.neg());
+            self.state.balance = self.state.balance.sub(fee);
             self.state.apply_fill(fill);
             self.working.retain(|w| *w != fill.order);
             self.outputs.push(Output::Filled(*fill));
@@ -1085,38 +415,14 @@ impl Kernel {
     /// there, and a model that only checks periodically reports
     /// survival through moves that ended the account.
     fn check_liquidation(&mut self, mark: PriceTicks) {
-        if !self.state.enforce_liquidation || self.state.is_flat() {
+        if !self.state.enforce_liquidation || self.state.qty.is_zero() {
             return;
         }
-        let liquidatable = if matches!(self.state.mode, PositionMode::Hedge) {
-            // Equity against the sum of both legs' requirements. Netting
-            // them would let a hedged account carry exposure the venue
-            // charges twice for and this would not notice — which is the
-            // failure this mode exists to stop reporting as survival.
-            self.state.equity() < self.state.maintenance()
-        } else {
-            self.state
-                .position()
-                .is_liquidatable(&self.state.holding().table, mark)
-        };
-        if liquidatable {
+        let position = self.state.position();
+        if position.is_liquidatable(&self.state.table, mark) {
             let out = self.state.liquidate(mark);
             self.working.clear();
             self.outputs.push(out);
-        }
-    }
-
-    /// Which holding an observation is for, if the account has one.
-    ///
-    /// `None` names the only holding, and is an error when there is
-    /// more than one.
-    fn route(&self, instrument: Option<InstrumentId>) -> Option<usize> {
-        match instrument {
-            Some(id) => self.state.holding_index(id),
-            // An unnamed event names the only holding, and nothing once
-            // there are two: guessing marks one instrument's position at
-            // another's price.
-            None => (self.state.holdings().count() == 1).then_some(0),
         }
     }
 
@@ -1126,73 +432,13 @@ impl Kernel {
         &self.working
     }
 
-    /// Hand the matcher a depth update.
-    ///
-    /// [`DepthOutcome::NotRead`] means the tier does not read depth —
-    /// not that the update was bad. A caller feeding an archive to an
-    /// L0 or L1 run is matching as that tier while holding the data for
-    /// a higher one, and saying so is what stops the run from looking
-    /// like an L2 that happened to agree with L1.
-    ///
-    /// # It is an event, so it is in the journal
-    ///
-    /// [`Event::Depth`] carries one, which is what makes an L2 run
-    /// replayable: its orders and the book they queued in are recorded
-    /// together, and a replay reproduces the fills rather than the
-    /// requests. This was the one place replay was not faithful.
-    ///
-    /// It costs journal size, and a lot of it — a captured hour of one
-    /// instrument is over a hundred thousand updates. A run that does
-    /// not read depth should not be given any, and the count of ignored
-    /// updates is there to make that visible rather than expensive and
-    /// silent.
-    pub fn apply_depth(&mut self, update: &oq_engine::DepthUpdate) -> DepthOutcome {
-        self.state.holding_mut().engine.on_depth(update)
-    }
-
-    /// The same update as an event, for a host that journals what it
-    /// applies.
-    ///
-    /// [`Kernel::apply_depth`] answers what the matcher did with it and
-    /// records nothing; this records it and answers nothing. A host that
-    /// wants both applies the event and asks the matcher separately --
-    /// the alternative is an `apply` that returns something only one
-    /// kind of event has, which every other call site would have to
-    /// ignore.
-    #[must_use]
-    pub fn depth_event(update: &oq_engine::DepthUpdate) -> Event {
-        Event::Depth(Box::new(update.clone()))
-    }
-
-    /// Seed the venue book from a snapshot. Returns whether the tier
-    /// keeps one.
-    ///
-    /// Not an event either, for the same reason as `apply_depth`.
-    pub fn install_snapshot(
-        &mut self,
-        update_id: u64,
-        bids: &[oq_engine::Level],
-        asks: &[oq_engine::Level],
-    ) -> bool {
-        self.state
-            .at(0)
-            .engine
-            .install_snapshot(update_id, bids, asks)
-    }
-
     /// Rest an order directly, bypassing the event path.
     ///
     /// For tests and for adapters that have already validated the
     /// order; the event path is what a journal replays.
-    ///
-    /// The order's own stamp is when it was sent, which is what the
-    /// upper tiers measure entry latency from. Taking the kernel's
-    /// clock instead would date every order to whenever this happened
-    /// to be called.
     pub fn submit_raw(&mut self, order: Working) {
         self.working.push(order.id());
-        let sent = order.placed().local;
-        self.state.holding_mut().engine.submit(order, sent);
+        self.state.engine.submit(order);
     }
 
     /// Everything a replay must reproduce.
@@ -1205,7 +451,6 @@ impl Kernel {
             summary: self.summary(),
             book: self
                 .state
-                .holding()
                 .engine
                 .book()
                 .iter()
@@ -1213,7 +458,7 @@ impl Kernel {
                 .collect(),
             working: self.working.clone(),
             enforce_liquidation: self.state.enforce_liquidation,
-            id_watermark: self.state.holding().engine.id_watermark(),
+            id_watermark: self.state.engine.id_watermark(),
         }
     }
 
@@ -1221,36 +466,17 @@ impl Kernel {
     #[must_use]
     pub fn summary(&self) -> Summary {
         Summary {
-            qty: self.state.holding().qty,
-            entry: self.state.holding().entry,
-            short_qty: self.state.holding().short_qty,
-            short_entry: self.state.holding().short_entry,
-            balance: self.state.balance(),
+            qty: self.state.qty,
+            entry: self.state.entry,
+            balance: self.state.balance,
             realized: self.state.realized,
             funding: self.state.funding,
             fees: self.state.fees,
             equity: self.state.equity(),
-            mark: self.state.holding().mark,
+            mark: self.state.mark,
             now: self.state.now,
         }
     }
-}
-
-/// How the venue accounts for opposing exposure.
-///
-/// Not a preference: it is a property of the account at the venue, and
-/// it changes what a given sequence of fills means. The same buys and
-/// sells net to one position under [`PositionMode::OneWay`] and stand as
-/// two under [`PositionMode::Hedge`], holding margin for each and
-/// realizing profit against different entries. A backtest that models
-/// the wrong one reports a margin requirement the account never had.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PositionMode {
-    /// Opposing fills offset; one signed position.
-    #[default]
-    OneWay,
-    /// Long and short stand separately, as Binance calls hedge mode.
-    Hedge,
 }
 
 /// Everything about a kernel that a replay must reproduce.
@@ -1278,9 +504,6 @@ pub struct Fingerprint {
 pub struct Summary {
     pub qty: QtyLots,
     pub entry: PriceTicks,
-    /// The short leg under hedge accounting; zero otherwise.
-    pub short_qty: QtyLots,
-    pub short_entry: PriceTicks,
     pub balance: Cash,
     pub realized: Cash,
     pub funding: Cash,
@@ -1323,21 +546,16 @@ mod tests {
     }
 
     fn tick(n: i64, last: i64) -> Event {
-        Event::Tick {
-            instrument: None,
-            tick: Tick::trades_only(Stamp::synthetic(n), last, last, last),
-        }
+        Event::Tick(Tick::trades_only(Stamp::synthetic(n), last, last, last))
     }
 
     fn buy(id: u64, price: i64, qty: i64, n: i64) -> Event {
         Event::Submit {
-            instrument: None,
             id: OrderId::new(id),
             side: Side::Buy,
             price: Some(PriceTicks(price)),
             qty: QtyLots(qty),
             stamp: Stamp::synthetic(n),
-            offset: oq_types::Offset::Open,
         }
     }
 
@@ -1435,13 +653,11 @@ mod tests {
         k.apply(&tick(2, 1_000_000));
         // Sell back higher.
         k.apply(&Event::Submit {
-            instrument: None,
             id: OrderId::new(2),
             side: Side::Sell,
             price: Some(PriceTicks(1_010_000)),
             qty: QtyLots(10),
             stamp: Stamp::synthetic(2),
-            offset: oq_types::Offset::Open,
         });
         k.apply(&tick(3, 1_020_000));
         let s = k.summary();
@@ -1582,13 +798,11 @@ mod tests {
 
         // Sell 30: closes 10 long, opens 20 short.
         k.apply(&Event::Submit {
-            instrument: None,
             id: OrderId::new(2),
             side: Side::Sell,
             price: Some(PriceTicks(1_010_000)),
             qty: QtyLots(30),
             stamp: Stamp::synthetic(2),
-            offset: oq_types::Offset::Open,
         });
         k.apply(&tick(3, 1_020_000));
         let s = k.summary();
@@ -1597,470 +811,6 @@ mod tests {
         assert!(
             s.entry.0 >= 1_010_000,
             "the new short's entry is the fill price, not a blend"
-        );
-    }
-}
-
-#[cfg(test)]
-mod hedge_tests {
-    use super::*;
-    use oq_types::{Liquidity, Offset, Side, TradeId};
-
-    fn fill(side: Side, offset: Offset, price: i64, qty: i64) -> Fill {
-        Fill {
-            stamp: oq_types::Stamp::synthetic(0),
-            instrument: InstrumentId::new(1),
-            order: OrderId::new(1),
-            trade: TradeId::new(1),
-            side,
-            offset,
-            price: PriceTicks(price),
-            qty: QtyLots(qty),
-            liquidity: Liquidity::Maker,
-        }
-    }
-
-    fn state() -> State {
-        State::new(
-            InstrumentId::new(1),
-            Contract::new(1_000),
-            TierTable::example_btcusdt(),
-            Cash::from_units(20_000),
-        )
-        .with_mode(PositionMode::Hedge)
-    }
-
-    /// The point of the mode: opposing fills do not cancel out.
-    #[test]
-    fn a_long_and_a_short_stand_side_by_side() {
-        let mut s = state();
-        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
-        s.apply_fill(&fill(Side::Sell, Offset::Open, 6_100_000, 4));
-
-        assert_eq!(
-            s.holding().qty,
-            QtyLots(10),
-            "the long is untouched by the short"
-        );
-        assert_eq!(s.holding().entry, PriceTicks(6_000_000));
-        assert_eq!(s.holding().short_qty, QtyLots(-4));
-        assert_eq!(s.holding().short_entry, PriceTicks(6_100_000));
-        assert_eq!(
-            s.realized,
-            Cash::ZERO,
-            "opening a short against a long realizes nothing"
-        );
-    }
-
-    /// Under netting the same fills leave one position and no short leg,
-    /// which is the difference the mode makes.
-    #[test]
-    fn netting_gives_a_different_position_from_the_same_fills() {
-        let mut hedged = state();
-        let mut netted = State::new(
-            InstrumentId::new(1),
-            Contract::new(1_000),
-            TierTable::example_btcusdt(),
-            Cash::from_units(20_000),
-        );
-        for f in [
-            fill(Side::Buy, Offset::Open, 6_000_000, 10),
-            fill(Side::Sell, Offset::Open, 6_100_000, 4),
-        ] {
-            hedged.apply_fill(&f);
-            netted.apply_fill(&f);
-        }
-        assert_eq!(netted.holding().qty, QtyLots(6), "netting offsets");
-        assert_eq!(netted.holding().short_qty, QtyLots(0));
-        assert_eq!(hedged.holding().qty, QtyLots(10));
-        assert_eq!(hedged.holding().short_qty, QtyLots(-4));
-    }
-
-    #[test]
-    fn closing_a_leg_realizes_against_that_legs_entry() {
-        let mut s = state();
-        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
-        s.apply_fill(&fill(Side::Sell, Offset::Open, 6_100_000, 10));
-        // Close the short 100_000 ticks lower: a gain on the short leg,
-        // computed against 6_100_000 and not against the long's entry.
-        s.apply_fill(&fill(Side::Buy, Offset::Close, 6_000_000, 10));
-
-        assert_eq!(s.holding().short_qty, QtyLots(0));
-        assert_eq!(s.holding().qty, QtyLots(10), "the long is still open");
-        let expected = Contract::new(1_000).unrealized(
-            PriceTicks(6_100_000),
-            PriceTicks(6_000_000),
-            QtyLots(-10),
-        );
-        assert_eq!(s.realized, expected);
-    }
-
-    /// Closing more than a leg holds must not roll into the other side:
-    /// that side is a separate position with its own entry, and opening
-    /// it here would invent one.
-    #[test]
-    fn an_oversized_close_stops_at_flat() {
-        let mut s = state();
-        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 5));
-        s.apply_fill(&fill(Side::Sell, Offset::Close, 6_050_000, 12));
-        assert_eq!(s.holding().qty, QtyLots(0));
-        assert_eq!(s.holding().short_qty, QtyLots(0), "no short was invented");
-        assert_eq!(s.holding().entry, PriceTicks::ZERO);
-    }
-
-    /// Margin is held for both legs, so a hedged account requires more
-    /// than the net exposure suggests. This is the reason the mode
-    /// matters to a tail report.
-    #[test]
-    fn maintenance_covers_both_legs_rather_than_the_net() {
-        let mut hedged = state();
-        hedged.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
-        hedged.apply_fill(&fill(Side::Sell, Offset::Open, 6_000_000, 10));
-        // Marked explicitly: margin is computed at the holding's mark,
-        // which a tick sets. A state built by applying fills alone has
-        // never seen one.
-        hedged.holding_mut().mark = PriceTicks(6_000_000);
-
-        assert_eq!(
-            hedged.holding().qty.0 + hedged.holding().short_qty.0,
-            0,
-            "net exposure is zero, which is exactly the trap"
-        );
-        assert!(
-            hedged.maintenance() > Cash::ZERO,
-            "a flat net still posts margin on both legs"
-        );
-    }
-
-    #[test]
-    fn equity_counts_both_legs() {
-        let mut s = state();
-        s.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
-        s.apply_fill(&fill(Side::Sell, Offset::Open, 6_000_000, 10));
-        s.holding_mut().mark = PriceTicks(6_100_000);
-        // Both entered at the same price, so the long's gain and the
-        // short's loss are the same size and cancel.
-        assert_eq!(s.unrealized(), Cash::ZERO);
-        assert_eq!(s.equity(), s.balance());
-
-        // Entered on opposite sides of the mark they do not cancel —
-        // they add, which is the case a netted view cannot express.
-        let mut both_winning = state();
-        both_winning.apply_fill(&fill(Side::Buy, Offset::Open, 6_000_000, 10));
-        both_winning.apply_fill(&fill(Side::Sell, Offset::Open, 6_200_000, 10));
-        both_winning.holding_mut().mark = PriceTicks(6_100_000);
-        assert!(
-            both_winning.unrealized() > Cash::ZERO,
-            "a long bought below the mark and a short sold above it are both ahead"
-        );
-    }
-
-    /// **What `Cash` alone could not express.**
-    ///
-    /// An account receives a payout in something it does not settle in.
-    /// Before this, the amount had to be added to the one balance there
-    /// was — silently converting at a rate of 1 — or dropped. Now it is
-    /// held, reported, and kept out of equity, because counting it needs
-    /// a rate and an instant it was true at.
-    #[test]
-    fn a_currency_the_account_does_not_settle_in_is_held_and_not_counted() {
-        let mut s = state();
-        let opening = s.balance();
-        let btc = oq_types::Currency::new("BTC").expect("valid");
-
-        let before = s.equity();
-        s.credit_in(btc, Cash::from_units(7));
-
-        assert_eq!(s.balances().get(btc), Cash::from_units(7), "it is held");
-        assert_eq!(
-            s.equity(),
-            before,
-            "and not counted: totalling it needs a rate this account has not been given"
-        );
-        assert_eq!(s.balance(), opening, "the settlement balance is untouched");
-        assert_eq!(
-            s.balances().len(),
-            2,
-            "the account has touched two currencies"
-        );
-    }
-
-    // ---- Several instruments, one account ----
-
-    /// **What separating the account from the instrument is for.**
-    ///
-    /// Two instruments, one balance. Margin is required across both and
-    /// equity counts both, which is the account-level view a venue
-    /// takes — and the thing a per-instrument `State` could not express
-    /// at all, because there was one balance per instrument and no way
-    /// to say they were the same money.
-    #[test]
-    fn two_instruments_share_one_account() {
-        let mut s = state();
-        let second = InstrumentId::new(2);
-        s.open_holding(second, Contract::new(1_000), TierTable::example_btcusdt());
-        assert_eq!(s.holdings().count(), 2);
-
-        // A position in each, both long, both in profit.
-        s.holding_mut().qty = QtyLots(10);
-        s.holding_mut().entry = PriceTicks(6_000_000);
-        s.holding_mut().mark = PriceTicks(6_100_000);
-
-        let h = s.holding_of_mut(second).expect("opened above");
-        h.qty = QtyLots(4);
-        h.entry = PriceTicks(3_000_000);
-        h.mark = PriceTicks(3_050_000);
-
-        // Unrealized is the sum, not the first one found.
-        let first_only = Contract::new(1_000).unrealized(
-            PriceTicks(6_000_000),
-            PriceTicks(6_100_000),
-            QtyLots(10),
-        );
-        assert!(
-            s.unrealized() > first_only,
-            "both positions count: {:?} should exceed {first_only:?}",
-            s.unrealized()
-        );
-
-        // And so is the margin required to hold them.
-        let both = s.maintenance();
-        assert!(both > Cash::ZERO);
-        let mut one = state();
-        one.holding_mut().qty = QtyLots(10);
-        one.holding_mut().entry = PriceTicks(6_000_000);
-        one.holding_mut().mark = PriceTicks(6_100_000);
-        assert!(
-            both > one.maintenance(),
-            "holding a second instrument requires more margin, not the same"
-        );
-    }
-
-    /// **Each instrument's order reaches its own matcher.**
-    ///
-    /// Routing an event was only half of it: an order that was routed
-    /// and then handed to `holding_mut()` lands on the first holding
-    /// whatever it named, and two instruments net into one position
-    /// while every count and check still looks right.
-    #[test]
-    fn an_order_fills_on_the_instrument_it_named() {
-        let mut s = State::new(
-            InstrumentId::new(1),
-            Contract::new(1_000),
-            TierTable::example_btcusdt(),
-            Cash::from_units(20_000),
-        );
-        let second = InstrumentId::new(2);
-        s.open_holding(second, Contract::new(1_000), TierTable::example_btcusdt());
-        let first = s.holding().instrument;
-        let mut k = Kernel::new(s);
-
-        let tick = |id: InstrumentId, at: i64| Event::Tick {
-            instrument: Some(id),
-            tick: oq_engine::Tick::trades_only(oq_types::Stamp::synthetic(at), 6_000_000, 0, 0),
-        };
-        let order = |id: InstrumentId, oid: u64, at: i64, side: Side| Event::Submit {
-            instrument: Some(id),
-            id: OrderId::new(oid),
-            side,
-            price: None,
-            qty: QtyLots(3),
-            offset: Offset::Open,
-            stamp: oq_types::Stamp::synthetic(at),
-        };
-
-        for id in [first, second] {
-            k.apply(&tick(id, 1_000));
-        }
-        k.apply(&order(first, 1, 1_000, Side::Buy));
-        k.apply(&order(second, 2, 1_000, Side::Sell));
-        for id in [first, second] {
-            k.apply(&tick(id, 2_000));
-        }
-
-        assert_eq!(
-            k.state().holding_of(first).expect("held").qty,
-            QtyLots(3),
-            "the buy landed on the instrument it named"
-        );
-        assert_eq!(
-            k.state().holding_of(second).expect("held").qty,
-            QtyLots(-3),
-            "and so did the sell, rather than netting against the buy"
-        );
-    }
-
-    /// An unnamed observation stops being unambiguous the moment the
-    /// account holds two instruments.
-    ///
-    /// Nothing about the record changes — it was true when it was
-    /// written and is not any more. Guessing would mark one
-    /// instrument's position at another's price, which is a wrong
-    /// number rather than a missing one, so it is refused.
-    #[test]
-    fn an_unnamed_tick_is_refused_once_a_second_instrument_is_held() {
-        let mut s = state();
-        let mut k = Kernel::new(s);
-        let unnamed = Event::Tick {
-            instrument: None,
-            tick: oq_engine::Tick::trades_only(oq_types::Stamp::synthetic(1_000), 6_000_000, 0, 0),
-        };
-
-        // One holding: unambiguous, and accepted.
-        assert!(
-            !k.apply(&unnamed)
-                .iter()
-                .any(|o| matches!(o, Output::Rejected { .. })),
-            "with one holding there is nothing to disambiguate"
-        );
-
-        // Two: refused.
-        s = state();
-        s.open_holding(
-            InstrumentId::new(2),
-            Contract::new(1_000),
-            TierTable::example_btcusdt(),
-        );
-        let mut k = Kernel::new(s);
-        assert!(
-            k.apply(&unnamed).iter().any(|o| matches!(
-                o,
-                Output::Rejected {
-                    reason: RejectReason::UnroutableObservation,
-                    ..
-                }
-            )),
-            "with two, an unnamed tick names neither"
-        );
-    }
-
-    /// A named observation reaches its holding, and an instrument the
-    /// account does not hold is refused rather than approximated.
-    #[test]
-    fn a_named_tick_routes_and_an_unheld_one_is_refused() {
-        let mut s = state();
-        let second = InstrumentId::new(2);
-        s.open_holding(second, Contract::new(1_000), TierTable::example_btcusdt());
-        let mut k = Kernel::new(s);
-
-        let named = |id: InstrumentId| Event::Tick {
-            instrument: Some(id),
-            tick: oq_engine::Tick::trades_only(oq_types::Stamp::synthetic(1_000), 6_000_000, 0, 0),
-        };
-
-        assert!(
-            !k.apply(&named(second))
-                .iter()
-                .any(|o| matches!(o, Output::Rejected { .. })),
-            "an instrument the account holds is routable"
-        );
-        assert!(
-            k.apply(&named(InstrumentId::new(99)))
-                .iter()
-                .any(|o| matches!(o, Output::Rejected { .. })),
-            "one it does not hold is not"
-        );
-    }
-
-    /// Opening an instrument twice returns the holding that exists.
-    ///
-    /// Two holdings of one instrument would each report a position and
-    /// neither would be the account's, which is a wrong number rather
-    /// than a duplicate row.
-    #[test]
-    fn an_instrument_is_opened_once() {
-        let mut s = state();
-        let id = InstrumentId::new(7);
-        s.open_holding(id, Contract::new(1_000), TierTable::example_btcusdt())
-            .qty = QtyLots(3);
-        s.open_holding(id, Contract::new(1_000), TierTable::example_btcusdt());
-
-        assert_eq!(s.holdings().count(), 2, "the original plus this one");
-        assert_eq!(
-            s.holding_of(id).expect("held").qty,
-            QtyLots(3),
-            "and the position was not reset"
-        );
-    }
-
-    /// An instrument the account does not hold is absent, not empty.
-    #[test]
-    fn an_instrument_never_opened_has_no_holding() {
-        let s = state();
-        assert!(s.holding_of(InstrumentId::new(99)).is_none());
-    }
-
-    /// **The other half of multi-currency: a total, once rates exist.**
-    ///
-    /// Holding several currencies was the half that needs no rate.
-    /// Totalling them is the half that does, and it now has one — with
-    /// the instant it was true at, because a rate is the one input here
-    /// that expires.
-    #[test]
-    fn an_account_totals_across_currencies_when_rates_are_given() {
-        let mut s = state();
-        let opening = s.balance();
-        let btc = oq_types::Currency::new("BTC").expect("valid");
-        let usdt = oq_types::Currency::usdt();
-        s.credit_in(btc, Cash::from_units(2));
-
-        let mut rates = oq_types::Rates::at(1_786_000_000_000_000_000);
-        assert!(
-            s.equity_across(usdt, &rates).is_none(),
-            "no rate for BTC, so no total"
-        );
-        assert_eq!(s.unpriced(usdt, &rates), vec![btc]);
-
-        rates.quote(btc, usdt, 60_000 * oq_types::RATE_SCALE);
-        let total = s.equity_across(usdt, &rates).expect("now priced");
-        assert_eq!(
-            total,
-            opening.add(Cash::from_units(120_000)).add(s.unrealized()),
-            "the settlement balance plus the converted one"
-        );
-        assert!(s.unpriced(usdt, &rates).is_empty());
-    }
-
-    /// A total is still not what margin is decided by.
-    ///
-    /// A venue settles in one currency and liquidates against what is
-    /// held in it. An account rich in something it cannot post is still
-    /// insolvent, and `equity` — the number margin uses — says so.
-    #[test]
-    fn a_cross_currency_total_does_not_move_the_margin_number() {
-        let mut s = state();
-        let before = s.equity();
-        let btc = oq_types::Currency::new("BTC").expect("valid");
-        s.credit_in(btc, Cash::from_units(1_000));
-
-        let mut rates = oq_types::Rates::at(0);
-        rates.quote(
-            btc,
-            oq_types::Currency::usdt(),
-            60_000 * oq_types::RATE_SCALE,
-        );
-
-        assert_eq!(s.equity(), before, "margin still sees the settlement leg");
-        assert!(
-            s.equity_across(oq_types::Currency::usdt(), &rates)
-                .expect("priced")
-                > before,
-            "while the account is worth more than it can post"
-        );
-    }
-
-    /// The settlement currency is the one the account is solvent in.    /// The settlement currency is the one the account is solvent in.
-    #[test]
-    fn margin_is_decided_in_the_settlement_currency() {
-        let mut s = state();
-        let opening = s.balance();
-        let eur = oq_types::Currency::new("EUR").expect("valid");
-        s.credit_in(eur, Cash::from_units(1_000_000));
-
-        assert_eq!(
-            s.balance(),
-            opening,
-            "a million euros does not make a USDT account solvent"
         );
     }
 }

@@ -99,15 +99,15 @@ impl Strategy for MaCross {
         self.long = want_long;
         let id = OrderId::new(self.next_id);
         self.next_id += 1;
-        out.push(ctx.market(
+        out.push(Intent::Market {
             id,
-            if want_long { Side::Buy } else { Side::Sell },
-            QtyLots(if ctx.position.0 == 0 {
+            side: if want_long { Side::Buy } else { Side::Sell },
+            qty: QtyLots(if ctx.position.0 == 0 {
                 5
             } else {
                 ctx.position.0.abs()
             }),
-        ));
+        });
     }
 
     fn name(&self) -> &str {
@@ -122,15 +122,13 @@ struct Passive {
 }
 
 impl Strategy for Passive {
-    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+    fn on_tick(&mut self, _ctx: &Context, out: &mut Vec<Intent>) {
         if !self.opened {
             self.opened = true;
             out.push(Intent::Market {
-                instrument: ctx.instrument,
                 id: OrderId::new(1),
                 side: Side::Buy,
                 qty: QtyLots(1),
-                offset: oq_types::Offset::Open,
             });
         }
     }

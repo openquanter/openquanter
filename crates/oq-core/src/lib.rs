@@ -36,13 +36,10 @@
 
 pub mod event;
 pub mod kernel;
-pub mod matcher;
 pub mod sequencer;
-pub mod shard;
 pub mod sink;
 
 pub use event::{Event, kind};
-pub use kernel::{Fees, Fingerprint, Kernel, Output, PositionMode, RejectReason, State, Summary};
+pub use kernel::{Fees, Fingerprint, Kernel, Output, RejectReason, State, Summary};
 pub use sequencer::{ReplayResult, Sequencer, replay, replay_tolerating_unknown};
-pub use shard::Shards;
 pub use sink::{EventSink, MemorySink, file_sink};
