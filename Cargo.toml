@@ -94,3 +94,18 @@ unsafe_code = "warn"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Debug info is what makes target/ enormous, and almost none of it is ours.
+# Measured 2026-08-26: `cargo clean` removed 414,252 files / 17.7 GiB from a
+# workspace of 45 members over 192 locked crates, with no [profile] set at all —
+# so every dependency was carrying full DWARF, undeduplicated and unstripped.
+#
+# debug = 1 keeps line tables (backtraces still name file:line) and drops the
+# type/variable detail a debugger would want. Stepping into a dependency is rare
+# enough that paying for it on all 192 of them is the wrong trade, so those get
+# none; our own crates keep line tables.
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
