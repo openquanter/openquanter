@@ -43,6 +43,11 @@ pub struct RunConfig {
     /// Printed in the banner. The run does not otherwise use it.
     pub strategy_name: String,
     pub deployment: Deployment,
+    /// How long to trade for, in minutes.
+    ///
+    /// **Zero means no deadline**: the run then ends only when a signal
+    /// arrives, which is what a process under a supervisor wants. A
+    /// negative value is refused rather than interpreted.
     pub minutes: i64,
     /// Minutes of history to warm the strategy with before it trades.
     ///
@@ -117,7 +122,84 @@ fn program() -> String {
         .unwrap_or_else(|| "oq-live".to_string())
 }
 
-/// Run one strategy against one venue until the clock or a signal ends it.
+/// When this run ends, or `None` for one that ends only when it is told
+/// to.
+///
+/// Pure and separate so the arithmetic can be tested without a venue.
+///
+/// **Zero is the absence of a deadline, not one in the past.** It had no
+/// other meaning worth keeping: it named an instant already gone, so the
+/// loop exited before its first iteration and the run traded nothing.
+/// The loop has always carried the other half of this condition — it
+/// stops on a signal — and what was missing was a way to ask for that
+/// half alone. Without one, a process meant to run until it is stopped
+/// has to name a deadline far enough away to be irrelevant, which is a
+/// number chosen to be wrong later rather than now.
+///
+/// A negative count is refused rather than interpreted. It used to
+/// become five minutes, which is neither what was typed nor anything a
+/// caller could have meant, and a process about to send orders is the
+/// wrong place to resolve a typo quietly.
+///
+/// A count past what the clock can name is refused for the same reason.
+/// The expression this replaces multiplied and added without checking,
+/// so such a value ended the process with a panic during startup instead
+/// of a message.
+fn deadline_from(minutes: i64, now: Instant) -> Result<Option<Instant>, String> {
+    match minutes {
+        0 => Ok(None),
+        m if m < 0 => Err(format!(
+            "--minutes {m} is negative; a length of time cannot be one, and 0 \
+             is how a run says it should end only on a signal"
+        )),
+        m => u64::try_from(m)
+            .ok()
+            .and_then(|minutes| minutes.checked_mul(60))
+            .and_then(|secs| now.checked_add(Duration::from_secs(secs)))
+            .map(Some)
+            .ok_or_else(|| format!("--minutes {m} is further ahead than this clock can name")),
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::deadline_from;
+    use std::time::{Duration, Instant};
+
+    /// The case this function exists for. A supervised run has no
+    /// useful deadline to name, and every number it could name is one
+    /// it will eventually reach for no reason.
+    #[test]
+    fn zero_is_no_deadline_rather_than_one_already_past() {
+        assert_eq!(deadline_from(0, Instant::now()), Ok(None));
+    }
+
+    #[test]
+    fn a_count_of_minutes_lands_that_many_minutes_ahead() {
+        let now = Instant::now();
+        assert_eq!(
+            deadline_from(90, now),
+            Ok(Some(now + Duration::from_secs(90 * 60)))
+        );
+    }
+
+    /// Refused, and specifically not turned into five minutes: a run
+    /// that cannot be honoured as asked is worth a message rather than
+    /// a substitute nobody chose.
+    #[test]
+    fn a_negative_count_is_refused() {
+        assert!(deadline_from(-1, Instant::now()).is_err());
+    }
+
+    /// This is the input that used to panic during startup.
+    #[test]
+    fn a_count_past_the_clock_is_refused_and_does_not_panic() {
+        assert!(deadline_from(i64::MAX, Instant::now()).is_err());
+    }
+}
+
+/// Run one strategy against one venue until a deadline or a signal
+/// ends it.
 ///
 /// The strategy is built by a closure rather than passed in, because the
 /// instrument is discovered here — precision and grid come from the
@@ -633,8 +715,18 @@ where
     // looks plausible and is somebody else's.
     let started_ms = now_ns() / 1_000_000;
     install_signal_handlers();
-    let deadline = Instant::now() + Duration::from_secs(60 * u64::try_from(minutes).unwrap_or(5));
-    println!("running          until {minutes} minutes elapse or a signal arrives");
+    let deadline = match deadline_from(minutes, Instant::now()) {
+        Ok(deadline) => deadline,
+        Err(why) => {
+            eprintln!("running          REFUSED: {why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if deadline.is_some() {
+        println!("running          until {minutes} minutes elapse or a signal arrives");
+    } else {
+        println!("running          until a signal arrives");
+    }
     println!();
 
     let mut ticks = 0_u64;
@@ -655,7 +747,7 @@ where
     // is managing has been unmanaged for however long that took.
     let mut last_tick: Option<oq_engine::Tick> = None;
 
-    while Instant::now() < deadline && !shutdown_requested() {
+    while deadline.is_none_or(|d| Instant::now() < d) && !shutdown_requested() {
         let now = Nanos(now_ns());
 
         // Market data, drained rather than sampled.
