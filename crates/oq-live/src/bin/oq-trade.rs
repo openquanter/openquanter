@@ -56,7 +56,8 @@ OPTIONS:
     --symbol <SYMBOL>      Contract [default: BTCUSDT]
     --strategy <NAME>      observe | probe [default: observe]
     --window-ms <MS>       Tick width [default: 1000]
-    --minutes <N>          Stop after this long [default: 5]
+    --minutes <N>          Stop after this long; 0 runs until a signal
+                           arrives [default: 5]
     --warm-minutes <N>     Replay this much history first [default: 0]
     --max-qty <LOTS>       Largest single order [default: 1]
                            One lot is below the minimum notional on most
