@@ -253,11 +253,24 @@ impl Books {
         }
     }
 
-    /// Net position, long minus short.
+    /// Net position, the two legs summed.
+    ///
+    /// Summed and not subtracted, because the short leg is already
+    /// signed: `Context::short_position` documents that summing the two
+    /// gives the net, and the hedge-mode test pins the short at
+    /// `QtyLots(-20)` for twenty lots sold. Subtracting it added the
+    /// short to the long — 160 long against 40 short reported 200, a
+    /// net of two hundred lots on an account holding a hundred and
+    /// twenty.
+    ///
+    /// It survived because both callers were absent: this was reached
+    /// only from [`Books::reconcile`], which nothing called, and the
+    /// fuzz tests that do call it run a netting account, where the short
+    /// leg is always zero and the two spellings agree.
     #[must_use]
     pub fn net_position(&self) -> QtyLots {
         let s = self.kernel.summary();
-        QtyLots(s.qty.0 - s.short_qty.0)
+        QtyLots(s.qty.0 + s.short_qty.0)
     }
 
     /// The two legs this process believes it holds, long then short,
