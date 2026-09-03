@@ -23,13 +23,46 @@
 //! distinguished from continuity unless someone says so.
 
 use core::time::Duration;
+use std::time::Instant;
 
 use crate::binance::{VenueError, parse_user_event};
 use crate::exec::{UserEvent, UserStream};
 
+/// How often this venue speaks on a stream with nothing to report.
+///
+/// Binance pings a user data stream every three minutes whether or not
+/// the account moves. That ping is the only thing that distinguishes a
+/// quiet account from a dead link, and every threshold below is a
+/// multiple of it rather than a round number that felt safe.
+pub const VENUE_PING_PERIOD: Duration = Duration::from_secs(3 * 60);
+
+/// Silence beyond which a user stream is presumed dead.
+///
+/// Three ping periods, so one lost ping and its retransmission are
+/// survivable and only a link that has actually stopped is condemned.
+///
+/// Deliberately not the thirty seconds market data uses: depth and
+/// trades arrive several times a second, while an account can honestly
+/// have nothing to say for hours. Different silences, different windows.
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
+
 /// A connected user data stream.
 pub struct UserStreamReader {
     socket: tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    /// When the venue last said anything at all, a ping included.
+    last_message: Instant,
+    /// Silence beyond which the connection is presumed dead.
+    stale_after: Duration,
+}
+
+/// How long a stream has been silent, when that is long enough to
+/// condemn it. `None` while it is still within its window.
+///
+/// Pulled out of [`UserStreamReader::next`] so the judgement is
+/// testable: `next` needs a socket, and a test cannot half-open one.
+fn silence_verdict(last_message: Instant, stale_after: Duration) -> Option<Duration> {
+    let silent = last_message.elapsed();
+    (silent > stale_after).then_some(silent)
 }
 
 /// What came out of the socket.
@@ -66,20 +99,36 @@ impl UserStreamReader {
     /// Connect.
     ///
     /// `read_timeout` bounds how long [`UserStreamReader::next`] blocks
-    /// before reporting [`StreamOutcome::Idle`]. It is not a liveness
-    /// check: this venue sends nothing at all on a quiet account, so a
-    /// timeout here means nothing happened, not that anything is wrong.
+    /// before reporting [`StreamOutcome::Idle`]. It is not on its own a
+    /// liveness check — one timed-out read means nothing happened — but
+    /// [`DEFAULT_STALE_AFTER`] of them in a row is, and `next` says so.
     ///
     /// # Errors
     /// Anything the handshake reports.
     pub fn connect(stream: &UserStream, read_timeout: Duration) -> Result<Self, VenueError> {
         let (socket, _response) =
             tungstenite::connect(stream.url()).map_err(|e| VenueError::Transport(e.to_string()))?;
-        let mut reader = Self { socket };
+        let mut reader = Self {
+            socket,
+            // A fresh connection has not been silent. Without this it
+            // would inherit the epoch and be condemned on its first read.
+            last_message: Instant::now(),
+            stale_after: DEFAULT_STALE_AFTER,
+        };
         reader
             .set_read_timeout(read_timeout)
             .map_err(|e| VenueError::Transport(e.to_string()))?;
         Ok(reader)
+    }
+
+    /// How long this stream may say nothing before it is presumed dead.
+    ///
+    /// The same shape market data's `Stream::stale_after` has, because
+    /// it is the same decision about a different socket.
+    #[must_use]
+    pub fn stale_after(mut self, after: Duration) -> Self {
+        self.stale_after = after;
+        self
     }
 
     fn set_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
@@ -97,21 +146,61 @@ impl UserStreamReader {
     /// Never blocks longer than the read timeout given at connect.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> StreamOutcome {
+        // An open socket is not a delivering socket.
+        //
+        // A half-open connection answers every read with a timeout and
+        // answers it forever, so [`StreamOutcome::Idle`] on its own
+        // cannot tell a quiet account from a dead link. Measured, on
+        // this venue: a stream stopped delivering and the process went
+        // on reporting `Idle` for thirty-three hours, during which the
+        // account filled two orders and the books learned of neither.
+        // The socket stayed ESTABLISHED throughout and nothing was ever
+        // written to it, because nothing here had a reason to.
+        //
+        // `oq-live`'s market data path learned this and grew a staleness
+        // check; this module was left with a comment saying the caller
+        // would do it, and the caller did not.
+        if let Some(silent) = silence_verdict(self.last_message, self.stale_after) {
+            // Restarted here, so a caller that reconnects into another
+            // dead socket gets its next verdict a full window later
+            // rather than on the very next read.
+            self.last_message = Instant::now();
+            return StreamOutcome::Disconnected(format!(
+                "silent for {}s; presumed dead",
+                silent.as_secs()
+            ));
+        }
         match self.socket.read() {
-            Ok(tungstenite::Message::Text(text)) => match parse_user_event(&text) {
-                Some(event) => StreamOutcome::Event(event),
-                None => StreamOutcome::Ignored,
-            },
+            Ok(tungstenite::Message::Text(text)) => {
+                self.last_message = Instant::now();
+                match parse_user_event(&text) {
+                    Some(event) => StreamOutcome::Event(event),
+                    None => StreamOutcome::Ignored,
+                }
+            }
             // The library answers pings itself; a pong arriving here is
             // an answer to one this side sent, and carries no account
             // information.
+            //
+            // No account information, but proof of life: on a quiet
+            // account this venue's three-minute ping is the only thing
+            // that arrives, which makes it the whole basis of the check
+            // above. Counting it as silence would condemn every healthy
+            // stream that simply had nothing to report.
             Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_)) => {
+                self.last_message = Instant::now();
                 StreamOutcome::Ignored
             }
             Ok(tungstenite::Message::Close(frame)) => StreamOutcome::Disconnected(
                 frame.map_or_else(|| "closed by venue".to_string(), |f| f.reason.to_string()),
             ),
-            Ok(_) => StreamOutcome::Ignored,
+            Ok(_) => {
+                self.last_message = Instant::now();
+                StreamOutcome::Ignored
+            }
+            // The one outcome that does not refresh the clock. Every
+            // other arm above had something arrive; this arm is the
+            // absence the window is measuring.
             Err(tungstenite::Error::Io(e))
                 if matches!(
                     e.kind(),
@@ -171,6 +260,42 @@ mod tests {
         assert_ne!(
             StreamOutcome::Disconnected("closed by venue".into()),
             StreamOutcome::Idle
+        );
+    }
+
+    #[test]
+    fn silence_past_the_window_is_death_and_silence_within_it_is_not() {
+        // `Instant` has no epoch to build from, so this walks backwards
+        // from now. On a machine whose monotonic clock has not run that
+        // long there is nowhere to walk back to, and the judgement is
+        // unreachable rather than wrong.
+        let Some(long_ago) =
+            Instant::now().checked_sub(DEFAULT_STALE_AFTER + Duration::from_secs(60))
+        else {
+            return;
+        };
+        assert!(
+            silence_verdict(long_ago, DEFAULT_STALE_AFTER).is_some(),
+            "a stream past its whole window is the failure this exists for"
+        );
+
+        let Some(recent) = Instant::now().checked_sub(VENUE_PING_PERIOD) else {
+            return;
+        };
+        assert!(
+            silence_verdict(recent, DEFAULT_STALE_AFTER).is_none(),
+            "one ping period of quiet is an ordinary account, not a dead link"
+        );
+    }
+
+    #[test]
+    fn the_window_outlasts_a_lost_ping() {
+        // A window shorter than two ping periods would condemn a healthy
+        // stream the first time one ping went missing — a reconnection
+        // storm on a working link, which is worse than no check at all.
+        assert!(
+            DEFAULT_STALE_AFTER >= VENUE_PING_PERIOD * 3,
+            "the staleness window must outlast more than one lost ping"
         );
     }
 }

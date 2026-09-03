@@ -69,6 +69,11 @@ pub struct Supervisor {
     unresolved: u32,
     /// How many may accumulate before the process stops.
     unresolved_limit: u32,
+    /// Consecutive attempts to read the venue's own view that failed.
+    unreadable: u32,
+    /// How many may fail in a row before the link is treated as the
+    /// cause and replaced.
+    unreadable_limit: u32,
 }
 
 impl Supervisor {
@@ -81,6 +86,12 @@ impl Supervisor {
             last_check: None,
             unresolved: 0,
             unresolved_limit: 3,
+            unreadable: 0,
+            // Five checks at the default minute apart. Long enough that
+            // a bad minute on the link is not a reconnection, short
+            // enough that blindness is measured in minutes rather than
+            // in the hours it took to notice the last one.
+            unreadable_limit: 5,
         }
     }
 
@@ -116,6 +127,44 @@ impl Supervisor {
     /// The stream went away.
     pub fn on_disconnect(&mut self) -> Vec<Action> {
         vec![Action::Reconnect, Action::Reconcile]
+    }
+
+    /// The venue's own view could not be read at all.
+    ///
+    /// Neither agreement nor disagreement: **nothing was compared**. The
+    /// distinction is the whole point, because the zombie check below is
+    /// the only thing that can see a stream which has quietly stopped
+    /// delivering, and a check that could not run is not a check that
+    /// passed. `oq-recon` states the same rule for its own exit codes —
+    /// 3 is not 0 — and this is that rule inside the loop.
+    ///
+    /// One failure is a lost packet. Enough in a row and the process has
+    /// been blind for as long as they took, so the link itself is
+    /// treated as the suspect and replaced.
+    pub fn on_read_failed(&mut self) -> Vec<Action> {
+        self.unreadable = self.unreadable.saturating_add(1);
+        if self.unreadable >= self.unreadable_limit {
+            self.unreadable = 0;
+            // Reconnect before reconciling, and for once not because the
+            // stream is known bad: the commonest reason the account
+            // cannot be read is the same link trouble that strands the
+            // stream, and a reader that came back is worth more than one
+            // more read that will not.
+            vec![Action::Reconnect, Action::Reconcile]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The venue's view was read, whatever it then turned out to say.
+    pub fn on_read_succeeded(&mut self) {
+        self.unreadable = 0;
+    }
+
+    /// How many consecutive reads of the account have failed.
+    #[must_use]
+    pub const fn unreadable(&self) -> u32 {
+        self.unreadable
     }
 
     /// The result of comparing the two views of the account.
@@ -297,5 +346,35 @@ mod tests {
         s.on_resolved();
         assert_eq!(s.unresolved(), 0);
         assert_eq!(s.on_unresolved(), vec![Action::Reconcile]);
+    }
+
+    #[test]
+    fn reads_that_keep_failing_replace_the_link_rather_than_passing() {
+        // Not checking is not the same as passing. Four failures are a
+        // bad few minutes on the link; the fifth means this process has
+        // had no second opinion for five whole checks, which is the
+        // state the zombie check exists to prevent.
+        let mut s = Supervisor::new(Timings::default());
+        for i in 1..5 {
+            assert!(s.on_read_failed().is_empty(), "failure {i} is not evidence");
+        }
+        assert_eq!(
+            s.on_read_failed(),
+            vec![Action::Reconnect, Action::Reconcile],
+            "the fifth consecutive unreadable account replaces the link"
+        );
+    }
+
+    #[test]
+    fn a_read_that_succeeds_clears_the_failures() {
+        // The count is of *consecutive* failures. A run that lost one
+        // read an hour for a day has a working link and must not be
+        // reconnected for it.
+        let mut s = Supervisor::new(Timings::default());
+        s.on_read_failed();
+        s.on_read_failed();
+        s.on_read_succeeded();
+        assert_eq!(s.unreadable(), 0);
+        assert!(s.on_read_failed().is_empty());
     }
 }
