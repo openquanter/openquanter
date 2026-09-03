@@ -1484,10 +1484,7 @@ fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) {
 /// it still holds it — a second conversion here is a second place for a
 /// scale to be wrong, and the two would disagree only under the very
 /// conditions the comparison exists to detect.
-fn venue_net_lots(
-    positions: &[oq_gateway::PositionSnapshot],
-    instrument: &Instrument,
-) -> QtyLots {
+fn venue_net_lots(positions: &[oq_gateway::PositionSnapshot], instrument: &Instrument) -> QtyLots {
     QtyLots(
         adopted_lots(positions, instrument)
             .into_iter()
