@@ -640,7 +640,7 @@ where
             return ExitCode::FAILURE;
         }
     };
-    let mut reader = match UserStreamReader::connect(&stream, Duration::from_millis(200)) {
+    let mut reader = match UserStreamReader::connect(&stream, USER_STREAM_READ_TIMEOUT) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("user stream      FAILED to connect: {e}");
@@ -1000,9 +1000,6 @@ where
             StreamOutcome::Disconnected(why) => {
                 metrics.disconnects += 1;
                 eprintln!("user stream      lost: {why}");
-                for action in supervisor.on_disconnect() {
-                    act(&action, &mut trader, &symbol);
-                }
                 // Reconnect here, where the reader is. `act` cannot: it
                 // is handed a trader and a symbol, and a stream is
                 // neither — so `Action::Reconnect` reached it and did
@@ -1015,21 +1012,15 @@ where
                 // a run went three hours reporting the loss thousands of
                 // times while receiving no account events. It held a
                 // position and could not have learned that it closed.
-                match trader.venue().open_user_stream() {
-                    Ok(fresh) => {
-                        match UserStreamReader::connect(&fresh, Duration::from_millis(200)) {
-                            Ok(r) => {
-                                reader = r;
-                                // Said out loud. A log that reports every
-                                // loss and no recovery leaves a reader
-                                // unable to tell whether it is still down,
-                                // which is the question they opened it for.
-                                println!("user stream      reconnected");
-                            }
-                            Err(e) => eprintln!("user stream      reconnect FAILED: {e}"),
-                        }
-                    }
-                    Err(e) => eprintln!("user stream      reopen FAILED: {e}"),
+                //
+                // `settle` now carries out the reconnection, which also
+                // restores the order the supervisor's own module docs
+                // insist on: it returns `Reconnect` *followed by*
+                // `Reconcile`, and reconciling first — as this arm did
+                // while the reconnection sat below the loop — asks the
+                // venue to repair books over a link already known dead.
+                for action in supervisor.on_disconnect() {
+                    settle(&action, &mut trader, &mut reader, &symbol);
                 }
             }
             StreamOutcome::Idle | StreamOutcome::Ignored => {}
@@ -1037,7 +1028,64 @@ where
 
         // Upkeep that time makes due, whether or not anything arrived.
         for action in supervisor.due(now) {
-            act(&action, &mut trader, &symbol);
+            match action {
+                // Handled here rather than in `act`, for exactly the
+                // reason `Action::Reconnect` had to come back here: the
+                // books, the supervisor and the reader are none of them
+                // a trader or a symbol. Left in `act`, this fetched the
+                // venue's own positions, wrote them into the session's
+                // book — an object the strategy never reads — and threw
+                // away the comparison. `Supervisor::on_positions` and
+                // `Books::reconcile` were both written for this moment
+                // and both went uncalled, so the zombie check ran every
+                // minute for eight days and could not have failed.
+                //
+                // What that cost: a user stream stopped delivering and
+                // this loop held the evidence sixteen hundred times over
+                // thirty-three hours without once looking at it.
+                Action::CheckPositions | Action::Reconcile => {
+                    match trader.venue().positions(&symbol) {
+                        Ok(venue) => {
+                            supervisor.on_read_succeeded();
+                            // Reported, never quietly corrected: books
+                            // that adopted the venue's number here would
+                            // destroy the evidence of how they came to
+                            // differ, which is the only thing that could
+                            // explain it afterwards.
+                            if let Some(m) = books
+                                .reconcile(venue_net_lots(&venue, &instrument), Nanos(now_ns()))
+                            {
+                                metrics.reconciliation_mismatches += 1;
+                                eprintln!(
+                                    "reconcile        MISMATCH ours {} theirs {}, drift {}",
+                                    m.ours.0,
+                                    m.theirs.0,
+                                    m.drift().0
+                                );
+                            }
+                            // The comparison the zombie check exists for.
+                            let streamed = streamed_legs(&books, &symbol, &instrument);
+                            for verdict in supervisor.on_positions(&streamed, &venue) {
+                                settle(&verdict, &mut trader, &mut reader, &symbol);
+                            }
+                        }
+                        Err(e) => {
+                            // Not checking is not the same as passing —
+                            // the rule `oq-recon` states for its own exit
+                            // codes, applied where the check actually
+                            // runs. Counted as well as printed, because a
+                            // line on stderr is not a number anyone can
+                            // alert on.
+                            metrics.incomplete_reads += 1;
+                            eprintln!("reconcile        FAILED: {e}");
+                            for verdict in supervisor.on_read_failed() {
+                                settle(&verdict, &mut trader, &mut reader, &symbol);
+                            }
+                        }
+                    }
+                }
+                other => act(&other, &mut trader, &symbol),
+            }
         }
 
         if last_tick_report.elapsed() >= Duration::from_secs(30) {
@@ -1066,8 +1114,21 @@ where
             } else {
                 String::new()
             };
+            // Both zero on a healthy run, and both invisible on the run
+            // that needed them. These are the two ways this process can
+            // be wrong about what it holds — it disagreed with the
+            // venue, or it could not ask — and until now neither had a
+            // number an operator could read without opening the journal.
+            let doubt = if metrics.reconciliation_mismatches > 0 || metrics.incomplete_reads > 0 {
+                format!(
+                    ", {} mismatch, {} unread",
+                    metrics.reconciliation_mismatches, metrics.incomplete_reads
+                )
+            } else {
+                String::new()
+            };
             println!(
-                "heartbeat        {ticks} ticks, {} resting{pending}{waiting}",
+                "heartbeat        {ticks} ticks, {} resting{pending}{doubt}{waiting}",
                 trader.working()
             );
             // Why the tick count is what it is.
@@ -1372,6 +1433,101 @@ fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
     }
 }
 
+/// Carry out a verdict that may need the reader itself.
+///
+/// The other half of [`act`], made once instead of open-coded at each
+/// place a stream can be condemned. There are three of those now — a
+/// failed read, a comparison against the venue, and an account that
+/// cannot be read at all — and the first was the only one that ever had
+/// the reconnection beside it.
+fn settle<S: Strategy>(
+    action: &Action,
+    trader: &mut Trader<S, Box<dyn Account>>,
+    reader: &mut UserStreamReader,
+    symbol: &str,
+) {
+    match action {
+        Action::Reconnect => reopen_user_stream(trader.venue().as_ref(), reader),
+        other => act(other, trader, symbol),
+    }
+}
+
+/// Open a fresh account stream in place of one that is gone.
+///
+/// A failure leaves the old reader in place deliberately. It is already
+/// condemned and will condemn itself again on its next read, which is a
+/// retry every read timeout rather than a process that gave up on the
+/// one attempt it happened to make during an outage.
+fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) {
+    match venue.open_user_stream() {
+        Ok(fresh) => match UserStreamReader::connect(&fresh, USER_STREAM_READ_TIMEOUT) {
+            Ok(r) => {
+                // Carries the staleness window `connect` gives every
+                // reader, so a stream replaced because it went silent
+                // cannot come back without the check that caught it.
+                *reader = r;
+                // Said out loud. A log that reports every loss and no
+                // recovery leaves a reader unable to tell whether it is
+                // still down, which is the question they opened it for.
+                println!("user stream      reconnected");
+            }
+            Err(e) => eprintln!("user stream      reconnect FAILED: {e}"),
+        },
+        Err(e) => eprintln!("user stream      reopen FAILED: {e}"),
+    }
+}
+
+/// The venue's legs reduced to one signed net, in this instrument's lots.
+///
+/// Through [`adopted_lots`], so the arithmetic that decides what this
+/// process holds at startup is the same arithmetic that decides whether
+/// it still holds it — a second conversion here is a second place for a
+/// scale to be wrong, and the two would disagree only under the very
+/// conditions the comparison exists to detect.
+fn venue_net_lots(positions: &[oq_gateway::PositionSnapshot], instrument: &Instrument) -> QtyLots {
+    QtyLots(
+        adopted_lots(positions, instrument)
+            .into_iter()
+            .map(|(side, lots, _)| lots.0 * side.sign())
+            .sum(),
+    )
+}
+
+/// What this process believes it holds, in the shape the venue reports.
+///
+/// Built so both views can go through one comparison. Legs rather than a
+/// net, because a hedged account's two legs are largest at the moment
+/// they cancel, and a net cannot tell that from flat.
+///
+/// The fields the comparison does not read are left empty rather than
+/// invented: a snapshot carrying a made-up entry price would be
+/// indistinguishable from one the venue actually sent.
+#[allow(clippy::cast_precision_loss)]
+fn streamed_legs(
+    books: &crate::books::Books,
+    symbol: &str,
+    instrument: &Instrument,
+) -> Vec<oq_gateway::PositionSnapshot> {
+    let (long, short) = books.legs();
+    let scale = 10_f64.powi(i32::from(instrument.qty_scale));
+    [("LONG", long.0), ("SHORT", -short.0)]
+        .into_iter()
+        .filter(|(_, signed)| *signed != 0)
+        .map(|(side, signed)| oq_gateway::PositionSnapshot {
+            symbol: symbol.to_string(),
+            position_side: side.to_string(),
+            amount_text: String::new(),
+            entry_text: String::new(),
+            // Signed the venue's way: it reports a short leg as a
+            // negative amount, and the comparison matches legs by name
+            // and then subtracts the numbers.
+            amount: signed as f64 / scale,
+            entry_price: 0.0,
+            unrealized: 0.0,
+        })
+        .collect()
+}
+
 fn report(outcome: &Outcome) {
     match outcome {
         Outcome::Sent { local, client_id } => println!("sent             {local:?} as {client_id}"),
@@ -1407,6 +1563,16 @@ fn report(outcome: &Outcome) {
 /// the stream is empty, and this stops a burst on one stream from
 /// starving the other and the account stream behind it.
 const DRAIN_BUDGET: usize = 256;
+
+/// How long a read of the account stream may block before the loop goes
+/// on to its other work.
+///
+/// Short because the loop has market data to drain and a key to renew;
+/// a thread parked on a quiet account is a thread doing neither. Named
+/// rather than repeated, because the first connection and every
+/// reconnection have to agree about it — a reader replaced with a
+/// blockier one would stall the same loop this bounds.
+const USER_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// The smallest quantity whose notional clears the contract's floor.
 ///
