@@ -260,6 +260,20 @@ impl Books {
         QtyLots(s.qty.0 - s.short_qty.0)
     }
 
+    /// The two legs this process believes it holds, long then short,
+    /// both as magnitudes.
+    ///
+    /// Separate from [`Books::net_position`] because a hedged account's
+    /// legs net to zero at the very moment they are both largest, and a
+    /// comparison that sees only the net cannot tell that from flat. The
+    /// venue reports legs; so must this, or the two views are compared
+    /// after one of them has thrown away what the check is looking for.
+    #[must_use]
+    pub fn legs(&self) -> (QtyLots, QtyLots) {
+        let s = self.kernel.summary();
+        (s.qty, s.short_qty)
+    }
+
     /// Realized P&L net of fees and funding, as the venue's fills made
     /// it.
     ///
