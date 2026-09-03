@@ -56,6 +56,41 @@ fn a_hedged_accounts_two_legs_do_not_cancel() {
     );
 }
 
+/// The net of a hedged account is its two legs summed, not subtracted.
+///
+/// These are the numbers off a live testnet account the first time
+/// anything compared the two views: 160 lots long, 40 short, and the
+/// venue's own net of 120. Subtracting a leg that is already signed
+/// reported 200 — a drift of eighty on an account nothing was wrong
+/// with, which then condemned a healthy stream every third check.
+///
+/// It hid because both callers were missing. `Books::reconcile` had no
+/// call sites at all, and the fuzz tests that reach `net_position` run
+/// a netting account, where the short leg is zero and subtracting it is
+/// the same as adding it.
+#[test]
+fn a_hedged_accounts_net_is_its_two_legs_summed() {
+    let mut b = books(PositionMode::Hedge);
+    b.adopt(Side::Buy, QtyLots(160), PriceTicks(7_774_340), Nanos(1));
+    b.adopt(Side::Sell, QtyLots(40), PriceTicks(7_745_390), Nanos(2));
+
+    assert_eq!(
+        b.net_position(),
+        QtyLots(120),
+        "160 long against 40 short is 120, not 200"
+    );
+    assert_eq!(
+        b.legs(),
+        (QtyLots(160), QtyLots(-40)),
+        "the short leg is signed, which is what makes summing correct"
+    );
+    assert_eq!(
+        b.reconcile(QtyLots(120), Nanos(3)),
+        None,
+        "and so it agrees with the venue that says the same thing"
+    );
+}
+
 /// And a netting account's do, which is what the mode is for.
 #[test]
 fn a_netting_accounts_two_legs_cancel() {

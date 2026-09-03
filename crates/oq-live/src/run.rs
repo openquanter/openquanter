@@ -1510,7 +1510,13 @@ fn streamed_legs(
 ) -> Vec<oq_gateway::PositionSnapshot> {
     let (long, short) = books.legs();
     let scale = 10_f64.powi(i32::from(instrument.qty_scale));
-    [("LONG", long.0), ("SHORT", -short.0)]
+    // Both legs are already signed the venue's way — the short leg is
+    // negative in the books exactly as it is negative in the venue's
+    // `positionAmt`, which is what `Context::short_position` means by
+    // summing them to get the net. Negating it here would have compared
+    // a short of forty against a short of minus forty and called a
+    // healthy stream a zombie every third check.
+    [("LONG", long.0), ("SHORT", short.0)]
         .into_iter()
         .filter(|(_, signed)| *signed != 0)
         .map(|(side, signed)| oq_gateway::PositionSnapshot {
@@ -1518,9 +1524,6 @@ fn streamed_legs(
             position_side: side.to_string(),
             amount_text: String::new(),
             entry_text: String::new(),
-            // Signed the venue's way: it reports a short leg as a
-            // negative amount, and the comparison matches legs by name
-            // and then subtracts the numbers.
             amount: signed as f64 / scale,
             entry_price: 0.0,
             unrealized: 0.0,
