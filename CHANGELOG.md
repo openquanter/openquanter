@@ -276,6 +276,14 @@ number the documentation quotes is gross of costs.
 - `oq-capture` — live client for Binance perpetual streams, capturing the
   streams the venue actually serves (some accept a subscription and then
   send nothing; see [Capture Format](docs/CAPTURE-FORMAT.md)).
+- Capture fixes found by verifying a live archive against its manifests:
+  a stream whose silence is ordinary now carries its own keepalive
+  instead of being reconnected every read timeout; a gap marker reports
+  the outage it measured rather than how long the connection had been
+  up; a polled payload's own timestamp is read as its event time; and a
+  manifest reports `null`, not the epoch, where a file carries no such
+  timestamp. The last is a **manifest schema change** — readers that
+  parsed these four fields as numbers must accept `null`.
 - `oq-book-check` — replays an archive back into an order book and reports
   whether it reconstructs. Bytes on disk prove the messages arrived; only
   a reconstruction proves they can be used. This is archive verification,
