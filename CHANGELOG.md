@@ -276,6 +276,12 @@ number the documentation quotes is gross of costs.
 - `oq-capture` — live client for Binance perpetual streams, capturing the
   streams the venue actually serves (some accept a subscription and then
   send nothing; see [Capture Format](docs/CAPTURE-FORMAT.md)).
+- A keepalive tick hands control back to the capture loop instead of
+  waiting inside the source. A source now says whether its silence is a
+  disconnect; a connection with an answered keepalive says no. Waiting
+  inside the read kept the connection alive and the loop asleep, so a
+  quiet stream could not see its own shutdown flag — measured as three
+  minutes of ignoring SIGTERM on a live capture host.
 - A control record is flushed when it is written. The capture loop
   flushes when a message arrives, so on a stream that received none the
   session marker sat in the buffer indefinitely and the file on disk

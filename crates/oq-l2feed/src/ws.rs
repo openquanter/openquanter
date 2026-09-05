@@ -49,6 +49,12 @@ pub struct WsSource {
 const SILENT_ROUNDS_ALLOWED: u32 = 3;
 
 impl MessageSource for WsSource {
+    /// A connection with a keepalive proves itself alive on every tick,
+    /// so its silence says nothing about whether it is still there.
+    fn silence_is_a_disconnect(&self) -> bool {
+        self.keepalive.is_none()
+    }
+
     fn next_message(&mut self) -> io::Result<Vec<u8>> {
         if let Some(buffered) = self.pending.pop_front() {
             return Ok(buffered);
@@ -63,13 +69,26 @@ impl MessageSource for WsSource {
                             "no data and no answer to a keepalive; treating the connection as dead",
                         ));
                     }
-                    // Silence on a quiet channel is ordinary. Say so, and
-                    // keep waiting: the alternative is a reconnect every
-                    // keepalive period and a gap in the archive each time.
+                    // Silence on a quiet channel is ordinary: ping, then
+                    // hand the round back to the caller rather than
+                    // waiting again here. Staying inside this loop kept
+                    // the connection alive and the caller asleep -- a
+                    // capture process that could not see its own
+                    // shutdown flag, measured in production as three
+                    // minutes of ignoring SIGTERM.
+                    //
+                    // `WouldBlock` and not an error kind of its own: the
+                    // callers that poll already read it as "no data this
+                    // instant", and the capture loop asks
+                    // `silence_is_a_disconnect` before deciding what to
+                    // do about it.
                     self.socket
                         .send(Message::Ping(Vec::new().into()))
                         .map_err(io::Error::other)?;
-                    continue;
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "keepalive sent, no data yet",
+                    ));
                 }
                 // A read timeout keeps its kind. Wrapping it in
                 // `io::Error::other` erases `WouldBlock`, and a caller
