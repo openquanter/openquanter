@@ -254,8 +254,26 @@ pub trait MessageSource {
     /// # Errors
     ///
     /// Any transport failure. The loop treats every error as a
-    /// disconnect: it records a gap and reconnects.
+    /// disconnect -- it records a gap and reconnects -- except a
+    /// `WouldBlock` from a source that says its silence is not a
+    /// disconnect. See [`MessageSource::silence_is_a_disconnect`].
     fn next_message(&mut self) -> io::Result<Vec<u8>>;
+
+    /// Whether a timeout on this source means the connection is gone.
+    ///
+    /// True by default, and true is right wherever nothing else proves
+    /// the socket: a stream that should be busy and says nothing for a
+    /// minute is a dead subscription, and reconnecting is the only way
+    /// to find out.
+    ///
+    /// A source that proves liveness some other way -- a keepalive the
+    /// venue answers -- says false, and the loop then waits instead of
+    /// reconnecting. Without this the capture loop cannot tell "quiet"
+    /// from "gone", and a stream whose silence is ordinary is torn down
+    /// every timeout for as long as it stays quiet.
+    fn silence_is_a_disconnect(&self) -> bool {
+        true
+    }
 }
 
 /// Something that can open a [`MessageSource`].
@@ -399,6 +417,24 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                             stats.stop = StopReason::DiskFloor;
                             break 'outer;
                         }
+                    }
+                }
+                // A keepalive tick: the socket answered, there is just
+                // nothing to say. Returning here rather than waiting
+                // inside the source is what lets this loop run at all
+                // on a quiet stream -- it is where shutdown is noticed,
+                // the duration limit is honoured, and the buffer is
+                // flushed. A source that stays inside its own read
+                // ignores SIGTERM for as long as the silence lasts,
+                // which is what a liquidation feed did in production:
+                // three minutes after the signal, still running.
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        && !source.silence_is_a_disconnect() =>
+                {
+                    if last_flush.elapsed() >= config.flush_interval {
+                        writer.flush()?;
+                        last_flush = Instant::now();
                     }
                 }
                 Err(_) => {
@@ -659,6 +695,84 @@ mod tests {
             "the marker must describe where the silence began"
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A source that never has anything to say, parameterised by what
+    /// it claims that silence means.
+    struct Quiet {
+        fatal: bool,
+    }
+
+    impl MessageSource for Quiet {
+        fn next_message(&mut self) -> io::Result<Vec<u8>> {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "nothing yet"))
+        }
+
+        fn silence_is_a_disconnect(&self) -> bool {
+            self.fatal
+        }
+    }
+
+    struct CountingConnector {
+        connects: u32,
+        fatal: bool,
+    }
+
+    impl Connector for CountingConnector {
+        type Source = Quiet;
+
+        fn connect(&mut self) -> io::Result<Self::Source> {
+            self.connects += 1;
+            Ok(Quiet { fatal: self.fatal })
+        }
+    }
+
+    fn run_quiet(name: &str, fatal: bool) -> (SessionStats, u32) {
+        let (root, stream, mut writer) = setup(name);
+        let mut connector = CountingConnector { connects: 0, fatal };
+        let mut config =
+            SessionConfig::new(&root, stream, Software::new("test", "commit"), "unused");
+        config.reconnect_wait = Duration::from_millis(1);
+        config.disk_floor_bytes = 0;
+        config.duration = Some(Duration::from_millis(150));
+
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
+        writer.seal().expect("seal");
+        std::fs::remove_dir_all(root).ok();
+        (stats, connector.connects)
+    }
+
+    #[test]
+    fn a_keepalive_tick_is_not_a_disconnect() {
+        // The source proves it is alive on every tick, so silence is
+        // ordinary and the connection is kept. What matters as much as
+        // the absent gap is that control comes back here at all: this
+        // loop is where shutdown is noticed and the duration limit is
+        // honoured. A source that waited inside its own read ignored
+        // SIGTERM for as long as the stream stayed quiet -- measured in
+        // production at three minutes and still running.
+        let (stats, connects) = run_quiet("quiet-alive", false);
+        assert_eq!(stats.gaps, 0, "a tick is not an outage");
+        assert_eq!(connects, 1, "the connection was kept, not rebuilt");
+        assert_eq!(
+            stats.stop,
+            StopReason::DurationElapsed,
+            "the loop kept running"
+        );
+    }
+
+    #[test]
+    fn silence_without_a_keepalive_is_still_a_disconnect() {
+        // The other half of the same rule: where nothing proves the
+        // socket, a stream that should be busy and says nothing is a
+        // dead subscription, and only a reconnect finds out.
+        let (stats, connects) = run_quiet("quiet-dead", true);
+        assert!(
+            stats.gaps >= 1,
+            "silence with nothing to prove the socket is an outage"
+        );
+        assert!(connects > 1, "it reconnected, got {connects}");
     }
 
     #[test]
