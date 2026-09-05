@@ -222,6 +222,7 @@ impl CaptureWriter {
         if let Some(open) = self.open.as_mut() {
             open.builder.observe_gap(outage_ns);
         }
+        self.flush()?;
         Ok(sealed)
     }
 
@@ -243,10 +244,20 @@ impl CaptureWriter {
         if let Some(open) = self.open.as_mut() {
             open.builder.observe_clock_offset(offset_ns);
         }
+        self.flush()?;
         Ok(sealed)
     }
 
     /// Record the start of a capture session.
+    ///
+    /// Flushed on the way out, as every control record is. They are
+    /// rare enough that the write costs nothing, and the alternative
+    /// was measured in production: the capture loop flushes when a
+    /// message arrives, so on a stream that receives nothing the
+    /// session marker sat in a one-megabyte buffer indefinitely. The
+    /// file on disk then said the stream had not started, which is
+    /// exactly what an operator checking on a silent stream must not be
+    /// told -- and a crash would have lost the only record that it had.
     ///
     /// # Errors
     ///
@@ -280,6 +291,7 @@ impl CaptureWriter {
                 sealed = Some(s);
             }
         }
+        self.flush()?;
         Ok(sealed)
     }
 
@@ -443,6 +455,34 @@ mod tests {
         )
         .expect("open");
         (w, root)
+    }
+
+    #[test]
+    fn a_session_marker_reaches_disk_without_waiting_for_data() {
+        // Measured in production: the capture loop flushes when a
+        // message arrives, so a stream that received none left its
+        // session marker in the buffer for as long as the silence
+        // lasted. An operator checking whether a quiet stream had
+        // restarted read a file that did not mention it.
+        let (mut w, root) = writer("silent-session");
+        let base = 20_000 * DAY_NS;
+        w.append_session_start(base + 1).expect("session start");
+
+        let path = StreamId::new("venue", "SYM", "depth")
+            .file_for(&root, Window::from_nanos(base + 1, Rotation::Daily));
+        let bytes = fs::read(&path).expect("the file exists before any payload arrives");
+        let (records, remainder) = decode_all(&bytes).expect("decode");
+        assert_eq!(remainder, 0);
+        assert_eq!(records.len(), 1, "the marker is on disk, not in the buffer");
+        assert_eq!(records[0].kind, crate::frame::Kind::Control);
+
+        // And a gap declared while nothing else is being written is
+        // visible for the same reason.
+        w.append_gap(base + 2, "connection lost", None, 1_000)
+            .expect("gap");
+        let (records, _) = decode_all(&fs::read(&path).expect("read")).expect("decode");
+        assert_eq!(records.len(), 2);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

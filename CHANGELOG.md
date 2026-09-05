@@ -276,6 +276,10 @@ number the documentation quotes is gross of costs.
 - `oq-capture` — live client for Binance perpetual streams, capturing the
   streams the venue actually serves (some accept a subscription and then
   send nothing; see [Capture Format](docs/CAPTURE-FORMAT.md)).
+- A control record is flushed when it is written. The capture loop
+  flushes when a message arrives, so on a stream that received none the
+  session marker sat in the buffer indefinitely and the file on disk
+  said the stream had never started.
 - Capture fixes found by verifying a live archive against its manifests:
   a stream whose silence is ordinary now carries its own keepalive
   instead of being reconnected every read timeout; a gap marker reports
