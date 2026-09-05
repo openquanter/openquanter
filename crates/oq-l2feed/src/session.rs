@@ -310,6 +310,14 @@ pub fn run_with_clock<C: Connector, K: Clock>(
     let mut consecutive_failures = 0u32;
     let mut since_disk_check = 0u64;
     let mut last_flush = Instant::now();
+    // When the connection was lost, and the clock reading at that
+    // moment. An outage's length is only known once it ends, so the
+    // marker is written when listening resumes -- carrying the
+    // timestamp of the moment it stopped, because that is where in the
+    // stream the silence began. Nothing is written in between, so the
+    // marker still lands exactly where it did when it was written
+    // immediately.
+    let mut lost_at: Option<(i64, Instant)> = None;
 
     writer.append_session_start(clock.now_ns())?;
 
@@ -325,7 +333,6 @@ pub fn run_with_clock<C: Connector, K: Clock>(
             break;
         }
 
-        let disconnected_at = Instant::now();
         let mut source = match connector.connect() {
             Ok(source) => {
                 consecutive_failures = 0;
@@ -342,6 +349,10 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                 continue;
             }
         };
+
+        if let Some((at_ns, since)) = lost_at.take() {
+            declare_gap(writer, &mut stats, at_ns, since.elapsed())?;
+        }
 
         loop {
             if let Some(limit) = config.duration
@@ -391,15 +402,7 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                     }
                 }
                 Err(_) => {
-                    let outage = disconnected_at.elapsed();
-                    stats.gaps += 1;
-                    stats.outage += outage;
-                    writer.append_gap(
-                        clock.now_ns(),
-                        "connection lost",
-                        None,
-                        i64::try_from(outage.as_nanos()).unwrap_or(i64::MAX),
-                    )?;
+                    lost_at = Some((clock.now_ns(), Instant::now()));
                     std::thread::sleep(config.reconnect_wait);
                     break;
                 }
@@ -407,9 +410,38 @@ pub fn run_with_clock<C: Connector, K: Clock>(
         }
     }
 
+    // An outage that never ended still has to be declared: capture
+    // stopping is where it stops, and a reader that finds no marker
+    // reads the silence as a market with nothing to say.
+    if let Some((at_ns, since)) = lost_at.take() {
+        declare_gap(writer, &mut stats, at_ns, since.elapsed())?;
+    }
+
     writer.flush()?;
     stats.elapsed = started.elapsed();
     Ok(stats)
+}
+
+/// Write a gap marker for a finished outage and account for it.
+///
+/// `at_ns` is when the connection was lost -- the point in the stream
+/// the marker describes -- and `outage` is how long the silence lasted,
+/// which is knowable only now that it is over.
+fn declare_gap(
+    writer: &mut CaptureWriter,
+    stats: &mut SessionStats,
+    at_ns: i64,
+    outage: Duration,
+) -> io::Result<()> {
+    stats.gaps += 1;
+    stats.outage += outage;
+    writer.append_gap(
+        at_ns,
+        "connection lost",
+        None,
+        i64::try_from(outage.as_nanos()).unwrap_or(i64::MAX),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -441,17 +473,22 @@ mod tests {
     const FIXTURE_NS: i64 = 1_786_780_800_000_000_000;
 
     /// A source that yields a scripted set of messages, then fails.
+    ///
+    /// `stall` is how long the connection stays up saying nothing before
+    /// it fails, which is what separates "how long we were connected"
+    /// from "how long we were disconnected".
     struct Scripted {
         messages: Vec<Vec<u8>>,
         index: usize,
+        stall: Duration,
     }
 
     impl MessageSource for Scripted {
         fn next_message(&mut self) -> io::Result<Vec<u8>> {
-            let message = self
-                .messages
-                .get(self.index)
-                .ok_or_else(|| io::Error::other("connection closed"))?;
+            let Some(message) = self.messages.get(self.index) else {
+                std::thread::sleep(self.stall);
+                return Err(io::Error::other("connection closed"));
+            };
             self.index += 1;
             Ok(message.clone())
         }
@@ -461,6 +498,7 @@ mod tests {
     struct ScriptedConnector {
         connections: Vec<Vec<Vec<u8>>>,
         attempt: usize,
+        stall: Duration,
     }
 
     impl Connector for ScriptedConnector {
@@ -473,7 +511,11 @@ mod tests {
                 .ok_or_else(|| io::Error::other("no more connections"))?
                 .clone();
             self.attempt += 1;
-            Ok(Scripted { messages, index: 0 })
+            Ok(Scripted {
+                messages,
+                index: 0,
+                stall: self.stall,
+            })
         }
     }
 
@@ -499,6 +541,7 @@ mod tests {
                 vec![depth(1_786_780_800_200, 3)],
             ],
             attempt: 0,
+            stall: Duration::ZERO,
         };
         let mut config = SessionConfig::new(
             &root,
@@ -539,6 +582,86 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_reports_the_outage_not_the_time_the_connection_was_up() {
+        // The bug this pins: the disconnect timer was started before
+        // `connect()` and never reset, so a gap on a connection that had
+        // been up for a fortnight reported a fortnight of outage. The
+        // manifests said so -- `gap_ns_total` of 1.2e15 ns inside a
+        // one-hour file -- and any latency work reading that field was
+        // reading connection uptime.
+        let (root, stream, mut writer) = setup("outage");
+        let mut connector = ScriptedConnector {
+            connections: vec![
+                vec![depth(1_786_780_800_000, 1)],
+                vec![depth(1_786_780_800_200, 2)],
+            ],
+            attempt: 0,
+            // Up and quiet for this long before failing. The outage that
+            // follows is only `reconnect_wait`.
+            stall: Duration::from_millis(120),
+        };
+        let mut config = SessionConfig::new(
+            &root,
+            stream.clone(),
+            Software::new("test", "commit"),
+            "unused",
+        );
+        config.max_consecutive_failures = 1;
+        config.reconnect_wait = Duration::from_millis(1);
+        config.disk_floor_bytes = 0;
+
+        let clock = FixedClock::at(FIXTURE_NS);
+        let stats = run_with_clock(&config, &mut connector, &mut writer, &clock).expect("run");
+        writer.seal().expect("seal");
+
+        assert_eq!(stats.gaps, 2, "both outages are declared");
+        assert!(
+            stats.outage < Duration::from_millis(60),
+            "outage {:?} looks like the connection's uptime, not the silence",
+            stats.outage
+        );
+
+        let bytes = std::fs::read(stream.file_for(
+            &root,
+            crate::day::Window::from_nanos(1_786_780_800_000_000_000, crate::day::Rotation::Daily),
+        ))
+        .expect("read");
+        let (records, _) = decode_all(&bytes).expect("decode");
+        let gaps: Vec<&crate::frame::Record> = records
+            .iter()
+            .filter(|r| crate::manifest::is_gap(r))
+            .collect();
+        assert_eq!(gaps.len(), 2);
+        for gap in &gaps {
+            let text = core::str::from_utf8(&gap.payload).expect("utf8");
+            let outage_ns: i64 = text
+                .split("\"outage_ns\":")
+                .nth(1)
+                .and_then(|rest| rest.trim_end_matches('}').trim().parse().ok())
+                .expect("outage_ns");
+            assert!(
+                outage_ns < 60_000_000,
+                "marker claims {outage_ns} ns of outage after a 1 ms wait"
+            );
+        }
+
+        // The first marker sits at the moment listening stopped, before
+        // the record that arrived once it resumed.
+        let first_gap_at = gaps[0].local_ts;
+        let resumed_at = records
+            .iter()
+            .filter(|r| r.kind == crate::frame::Kind::Payload)
+            .nth(1)
+            .expect("a payload after the reconnect")
+            .local_ts;
+        assert!(
+            first_gap_at < resumed_at,
+            "the marker must describe where the silence began"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn stops_at_the_disk_floor_instead_of_filling_the_host() {
         let (root, _stream, mut writer) = setup("floor");
         let mut connector = ScriptedConnector {
@@ -548,6 +671,7 @@ mod tests {
                     .collect(),
             ],
             attempt: 0,
+            stall: Duration::ZERO,
         };
         let mut config = SessionConfig::new(
             &root,
@@ -684,6 +808,7 @@ mod tests {
         let mut connector = ScriptedConnector {
             connections: vec![vec![br#"{"result":null,"id":1}"#.to_vec()]],
             attempt: 0,
+            stall: Duration::ZERO,
         };
         let mut config = SessionConfig::new(
             &root,
