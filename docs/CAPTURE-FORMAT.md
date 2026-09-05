@@ -94,7 +94,7 @@ interleaved in the stream so their position in time is unambiguous.
 |---|---|---|
 | `session_start` | Capture starts or resumes | Capture software version and commit, venue, symbol, stream, subscription parameters |
 | `clock_offset` | At session start and hourly | Estimated offset and dispersion against the time source. Latency modeling built on an unverified local clock is built on sand, so the estimate is archived with the data rather than assumed |
-| `gap` | Connection lost | Reason, last sequence number seen, wall-clock duration of the outage |
+| `gap` | Connection lost | Reason, last sequence number seen, wall-clock duration of the outage. Written once the connection is restored, because only then is the duration known, and stamped with the moment the silence began, because that is the point in the stream it describes. Nothing is written in between, so it lands exactly where an immediate write would have put it |
 | `snapshot` | After any reconnect | The REST order book snapshot that re-establishes state, with the sequence number it corresponds to |
 | `session_end` | Clean shutdown | Record and byte counts for the session |
 
@@ -168,6 +168,12 @@ When rotation occurs, the completed day is sealed:
   "sha256_raw": "0000000000000000000000000000000000000000000000000000000000000000"
 }
 ```
+
+The four timestamp fields are `null` where the file holds no record
+carrying that clock — payloads with no exchange time, or an hour that
+held only control records. Zero said that badly: it is a real instant,
+so a catalogue built from these manifests dated such a file to 1970
+instead of skipping it.
 
 Both hashes are recorded: the compressed one verifies the transfer, the
 raw one identifies the *content* independently of how it was compressed.
@@ -274,7 +280,7 @@ capture, and a stopped capture is a permanent hole.
 
 ## 10. Venue behaviour worth knowing
 
-Three findings from the first live capture. They are recorded here
+Four findings from live capture. They are recorded here
 because each one is invisible until data is already being collected, and
 each one produces an archive that looks healthy while being wrong.
 
@@ -295,6 +301,33 @@ expected quiet period is a fault, and the capture process should be able
 to say so. Where a stream has no working form, poll the REST endpoint
 that carries the same data and record the polls through the same path —
 a failed poll is a disconnect, and belongs in the archive as a gap.
+
+### A stream allowed to be silent needs a way to prove it is alive
+
+The capture loop bounds how long it waits for a message, because a
+half-open socket is indistinguishable from a quiet market. That bound is
+also the problem: a stream that is *supposed* to idle — liquidations —
+hits it every quiet minute, and the loop tears the connection down and
+rebuilds it. Measured on this venue: 22,931 gap markers and not one
+liquidation across 21 days on BTCUSDT, one reconnect every 65 seconds
+for four contracts.
+
+The venue's own pings do not save it. They arrive every few minutes,
+far too rarely to keep a one-minute read alive.
+
+**Consequence for capture:** a stream whose silence is ordinary must
+carry its own keepalive, so the socket is proven alive without a
+reconnect, and a dead one is still declared after a few unanswered
+pings. The venue is the right place to say which streams those are — it
+is the same knowledge that decides whether first data may be treated as
+an acknowledgement.
+
+Worth separating from the above: even with the connection held open,
+this venue delivered nothing on the per-symbol liquidation stream or on
+the all-market fan-out — 700 seconds of listening, zero messages, while
+raw trades on the same host arrived at 30 a second. A stream that is
+silent because the venue does not serve it cannot be fixed by holding
+the connection; it has to be sourced elsewhere.
 
 ### The publish cadence can be fixed, so volume scales with message size
 

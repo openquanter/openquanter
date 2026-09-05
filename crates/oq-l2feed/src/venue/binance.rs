@@ -56,6 +56,15 @@ impl BinancePerp {
 /// discovered days later in the archive.
 const ACK_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How often to prove a silent connection is still alive.
+///
+/// Only used on streams whose silence is ordinary. One minute is the
+/// same order as the capture loop's read timeout, so a ping goes out
+/// roughly whenever that timeout would otherwise have declared the
+/// connection dead, and an unanswered one still ends the connection
+/// within a few minutes.
+const KEEPALIVE: Duration = Duration::from_secs(60);
+
 impl Venue for BinancePerp {
     fn id(&self) -> &'static str {
         "binance-perp"
@@ -125,12 +134,27 @@ impl Venue for BinancePerp {
             },
             _ => AckPolicy::None,
         };
+        // A stream that is allowed to be silent needs a way to prove the
+        // socket is still there, because the capture loop's read timeout
+        // cannot tell a quiet contract from a dead connection and treats
+        // both as a disconnect. Without this, a liquidation feed
+        // reconnects every read timeout for as long as it stays quiet:
+        // measured on this venue, 22,931 markers and not one liquidation
+        // in 21 days on BTCUSDT. The venue's own pings arrive every few
+        // minutes, far too rarely to keep a one-minute read alive.
+        //
+        // The busy streams keep `None`: data arriving is their
+        // keepalive, and a minute of nothing there really is a dead
+        // subscription.
+        let keepalive = match &ack {
+            AckPolicy::None => Some(KEEPALIVE),
+            _ => None,
+        };
         Transport {
             url: format!("{}/ws/{}", self.stream_host(), spec.topic),
             subscribe: Vec::new(),
             ack,
-            // This venue pings us, and answering in place is enough.
-            keepalive: None,
+            keepalive,
         }
     }
 
@@ -245,7 +269,13 @@ fn string_field(payload: &[u8], key: &[u8]) -> Option<String> {
 }
 
 fn event_time_ns(payload: &[u8]) -> Option<i64> {
-    find_int_field(payload, b"\"E\":")?.checked_mul(1_000_000)
+    // `E` on the streams, `time` on the REST payloads this venue is
+    // polled for: `premiumIndex` carries no `E`, so a poll archived
+    // without this reads back as a file with no exchange time at all --
+    // which is what every markPrice manifest said before it was added.
+    find_int_field(payload, b"\"E\":")
+        .or_else(|| find_int_field(payload, b"\"time\":"))?
+        .checked_mul(1_000_000)
 }
 
 /// Find `key` in `payload` and parse the integer that follows it.
@@ -331,6 +361,48 @@ mod tests {
             }
             other => panic!("a busy stream must be held to first data, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_silent_stream_carries_a_keepalive_and_a_busy_one_does_not() {
+        // A stream allowed to be silent has to prove the socket is alive
+        // some other way, or the capture loop's read timeout tears it
+        // down every minute it says nothing -- which is how 21 days of
+        // liquidation capture came back holding only gap markers.
+        let specs = BinancePerp::new().streams("BTCUSDT");
+        let force = specs
+            .iter()
+            .find(|s| s.name == "forceOrder")
+            .expect("forceOrder");
+        let keepalive = BinancePerp::new()
+            .transport(force)
+            .keepalive
+            .expect("a silent stream needs a keepalive");
+        assert!(keepalive.as_secs() > 0 && keepalive.as_secs() <= 120);
+
+        let depth = specs.iter().find(|s| s.name == "depth").expect("depth");
+        assert_eq!(
+            BinancePerp::new().transport(depth).keepalive,
+            None,
+            "on a busy stream the data is the keepalive"
+        );
+    }
+
+    #[test]
+    fn a_polled_payload_carries_its_own_event_time() {
+        // `premiumIndex` has no `E`. Without the fallback every markPrice
+        // manifest reported no exchange time at all.
+        let poll = br#"{"symbol":"BTCUSDT","markPrice":"79695.60","nextFundingTime":1788537600000,"time":1788523201736}"#;
+        assert_eq!(
+            super::event_time_ns(poll),
+            Some(1_788_523_201_736_000_000),
+            "the poll's own timestamp is the event time"
+        );
+        let stream = br#"{"e":"markPriceUpdate","E":1788523201736,"s":"BTCUSDT"}"#;
+        assert_eq!(
+            super::event_time_ns(stream),
+            Some(1_788_523_201_736_000_000)
+        );
     }
 
     #[test]

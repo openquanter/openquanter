@@ -168,8 +168,18 @@ impl Manifest {
     /// should be able to build this crate with nothing else present.
     #[must_use]
     pub fn to_json(&self) -> String {
-        let (exch_first, exch_last) = self.exch_ts_range.unwrap_or((0, 0));
-        let (local_first, local_last) = self.local_ts_range.unwrap_or((0, 0));
+        // A file whose records carry no exchange timestamp -- a REST
+        // poll before its reader knew the field, an hour that held
+        // nothing but control records -- has no range to report. Zero
+        // said that badly: it is a real instant (1970) and reads as one,
+        // so a catalogue built on these manifests dated such a file to
+        // the epoch instead of skipping it.
+        let (exch_first, exch_last) = self
+            .exch_ts_range
+            .map_or((None, None), |(a, b)| (Some(a), Some(b)));
+        let (local_first, local_last) = self
+            .local_ts_range
+            .map_or((None, None), |(a, b)| (Some(a), Some(b)));
 
         let mut out = String::with_capacity(768);
         out.push_str("{\n");
@@ -183,10 +193,10 @@ impl Manifest {
         }
         push_num(&mut out, "records", self.records as i64);
         push_num(&mut out, "bytes_raw", self.bytes_raw as i64);
-        push_num(&mut out, "first_exch_ts", exch_first);
-        push_num(&mut out, "last_exch_ts", exch_last);
-        push_num(&mut out, "first_local_ts", local_first);
-        push_num(&mut out, "last_local_ts", local_last);
+        push_opt_num(&mut out, "first_exch_ts", exch_first);
+        push_opt_num(&mut out, "last_exch_ts", exch_last);
+        push_opt_num(&mut out, "first_local_ts", local_first);
+        push_opt_num(&mut out, "last_local_ts", local_last);
         push_num(&mut out, "gaps", self.gaps as i64);
         push_num(&mut out, "gap_ns_total", self.gap_ns_total);
         out.push_str(&format!(
@@ -207,6 +217,14 @@ impl Manifest {
 
 fn push_num(out: &mut String, key: &str, value: i64) {
     out.push_str(&format!("  \"{key}\": {value},\n"));
+}
+
+/// A number, or `null` where there is nothing to report.
+fn push_opt_num(out: &mut String, key: &str, value: Option<i64>) {
+    match value {
+        Some(v) => push_num(out, key, v),
+        None => out.push_str(&format!("  \"{key}\": null,\n")),
+    }
 }
 
 fn push_str_field(out: &mut String, key: &str, value: &str) {
@@ -368,6 +386,25 @@ mod tests {
         }
         assert!(json.starts_with('{') && json.trim_end().ends_with('}'));
         assert!(json.contains("\"utc_day\": \"2024-10-04\""), "{json}");
+    }
+
+    #[test]
+    fn an_absent_range_is_null_rather_than_the_epoch() {
+        let m = ManifestBuilder::new().build(
+            &StreamId::new("venue", "SYM", "forceOrder"),
+            Window {
+                day: UtcDay(20_000),
+                hour: None,
+            },
+            &Software::new("test 0.1", "abc"),
+            b"",
+        );
+        let json = m.to_json();
+        assert!(
+            json.contains("\"first_exch_ts\": null"),
+            "a file with no exchange timestamps must not claim 1970: {json}"
+        );
+        assert!(json.contains("\"last_local_ts\": null"), "{json}");
     }
 
     #[test]
