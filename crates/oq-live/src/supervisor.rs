@@ -15,6 +15,22 @@
 //! reconnection repairs. A supervisor that reconnected and carried on
 //! would be one that recovered its connection and kept its wrong
 //! numbers.
+//!
+//! # Nor is reconnecting forever an answer
+//!
+//! Condemning a stream resets the disagreement count, because the
+//! replacement deserves to be judged on its own reads. But a count that
+//! is reset on every condemnation can never reach anything, and a
+//! difference whose cause is the books rather than the link survives
+//! every replacement made for it: three checks disagree, the stream is
+//! replaced, the count starts again, and the same difference condemns
+//! the next stream three checks later. Forever, while the strategy goes
+//! on sizing orders against numbers the venue has already contradicted.
+//!
+//! So the replacements are counted too. `FR-RISK-4` makes unknown state
+//! fatal — an irreconcilable difference stops trading rather than
+//! guessing — and a difference that outlives the streams replaced for it
+//! is how this process learns the difference was never theirs.
 
 use core::time::Duration;
 
@@ -28,7 +44,16 @@ pub enum Action {
     RenewKey,
     /// Fetch the venue's own positions and compare.
     CheckPositions,
-    /// Replace the beliefs with the venue's own.
+    /// Ask the venue what it holds and compare it against the books.
+    ///
+    /// Compare, and not adopt. This said "replace the beliefs with the
+    /// venue's own" for as long as nothing carried it out, and the
+    /// sentence was wrong in a way that invites the fix `FR-RISK-4`
+    /// forbids: books that took the venue's number would destroy the
+    /// evidence of how they came to differ, and an irreconcilable
+    /// difference is required to stop trading rather than guess. The
+    /// repair for a difference that will not go away is
+    /// [`Action::Halt`], which is what it now escalates to.
     Reconcile,
     /// Drop the stream and open a new one.
     Reconnect,
@@ -74,6 +99,12 @@ pub struct Supervisor {
     /// How many may fail in a row before the link is treated as the
     /// cause and replaced.
     unreadable_limit: u32,
+    /// Streams condemned for disagreeing with the venue, since the last
+    /// time the two views agreed.
+    condemned: u32,
+    /// How many replacements may fail to restore agreement before the
+    /// difference is taken to be irreconcilable.
+    condemned_limit: u32,
 }
 
 impl Supervisor {
@@ -92,6 +123,12 @@ impl Supervisor {
             // enough that blindness is measured in minutes rather than
             // in the hours it took to notice the last one.
             unreadable_limit: 5,
+            condemned: 0,
+            // Three streams, each condemned by three checks of its own:
+            // nine minutes of the same difference at the default check
+            // interval, across three sockets that were opened fresh to
+            // be rid of it. A link is allowed to be the cause twice.
+            condemned_limit: 3,
         }
     }
 
@@ -174,16 +211,41 @@ impl Supervisor {
         venue: &[oq_gateway::PositionSnapshot],
     ) -> Vec<Action> {
         match self.health.observe(streamed, venue) {
-            Health::Agreed => Vec::new(),
+            Health::Agreed => {
+                // A replacement that restored agreement was the right
+                // answer, and the evidence against the next one starts
+                // from nothing.
+                self.condemned = 0;
+                Vec::new()
+            }
             // Not yet evidence. A fill in flight is visible to one side
             // before the other, and acting on the first difference
             // would reconnect constantly under load.
             Health::Disagreed { .. } => Vec::new(),
             Health::Zombie { .. } => {
                 self.health.reset();
-                vec![Action::Reconnect, Action::Reconcile]
+                self.condemned = self.condemned.saturating_add(1);
+                if self.condemned >= self.condemned_limit {
+                    // Every stream opened to cure this difference saw
+                    // it too, so it is not in the stream. What is left
+                    // is books the venue has contradicted, and a
+                    // strategy sizing its next order against them.
+                    vec![Action::Halt(
+                        "positions still disagree with the venue after replacing the \
+                         stream three times; the difference is not the link, and \
+                         FR-RISK-4 makes unknown state fatal",
+                    )]
+                } else {
+                    vec![Action::Reconnect, Action::Reconcile]
+                }
             }
         }
+    }
+
+    /// Streams condemned since the two views last agreed.
+    #[must_use]
+    pub const fn condemned(&self) -> u32 {
+        self.condemned
     }
 
     /// A placement whose outcome could not be established, even after
@@ -312,6 +374,75 @@ mod tests {
             s.on_positions(&streamed, &venue),
             vec![Action::Reconnect, Action::Reconcile],
             "third disagreement condemns the stream"
+        );
+    }
+
+    /// Three checks condemn a stream; three condemnations stop the run.
+    ///
+    /// These are the numbers off a testnet account that spent twelve
+    /// days in the loop this closes: books holding sixty lots the venue
+    /// said were not there, a difference reported eleven hundred times,
+    /// and three hundred and eighty-eight streams replaced for a fault
+    /// that was never in any of them. The count that measures a stream
+    /// was reset by condemning one, so it could never reach a verdict
+    /// on the difference itself, and the strategy went on sizing orders
+    /// against the books the venue had contradicted.
+    #[test]
+    fn a_disagreement_that_outlives_its_replacements_stops_the_process() {
+        let mut s = Supervisor::new(Timings::default());
+        let (streamed, venue) = (pos(1.0), pos(2.0));
+
+        // Two replacements, each earned by three checks of its own.
+        for nth in 1..=2 {
+            assert!(s.on_positions(&streamed, &venue).is_empty(), "{nth} first");
+            assert!(s.on_positions(&streamed, &venue).is_empty(), "{nth} second");
+            assert_eq!(
+                s.on_positions(&streamed, &venue),
+                vec![Action::Reconnect, Action::Reconcile],
+                "replacement {nth} is still worth trying"
+            );
+        }
+
+        assert!(s.on_positions(&streamed, &venue).is_empty());
+        assert!(s.on_positions(&streamed, &venue).is_empty());
+        assert!(
+            matches!(
+                s.on_positions(&streamed, &venue).first(),
+                Some(Action::Halt(_))
+            ),
+            "a third stream saw the same difference: it is not the stream"
+        );
+        assert_eq!(s.condemned(), 3);
+    }
+
+    /// The zombie check still works, and still costs nothing when it is
+    /// right — which is the case this must not break.
+    #[test]
+    fn a_replacement_that_restores_agreement_spends_the_count() {
+        let mut s = Supervisor::new(Timings::default());
+        let (streamed, venue) = (pos(1.0), pos(2.0));
+
+        for _ in 0..2 {
+            assert!(s.on_positions(&streamed, &venue).is_empty());
+        }
+        assert_eq!(
+            s.on_positions(&streamed, &venue),
+            vec![Action::Reconnect, Action::Reconcile]
+        );
+        assert_eq!(s.condemned(), 1);
+
+        // The fresh stream delivers, and the difference goes away.
+        assert!(s.on_positions(&pos(2.0), &venue).is_empty());
+        assert_eq!(s.condemned(), 0, "a cured difference is not evidence");
+
+        // So a later, unrelated zombie is a first offence again.
+        for _ in 0..2 {
+            assert!(s.on_positions(&streamed, &venue).is_empty());
+        }
+        assert_eq!(
+            s.on_positions(&streamed, &venue),
+            vec![Action::Reconnect, Action::Reconcile],
+            "not a halt: this stream has been condemned once"
         );
     }
 
