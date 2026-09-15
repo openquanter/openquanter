@@ -167,6 +167,19 @@ pub struct Binance {
     /// holding `&self`.
     clock_offset_ms: core::sync::atomic::AtomicI64,
     round_trip_ms: core::sync::atomic::AtomicI64,
+    /// Venue time, in milliseconds, until which this IP is banned. Zero
+    /// when no ban is known.
+    ///
+    /// A `-1003` names the moment the ban lifts, and the ban is extended
+    /// every time it is ignored: on the testnet deployment this was
+    /// found on, the deadline walked forward across five refusals
+    /// because the caller kept its schedule throughout. Not retrying is
+    /// not the same as waiting — the retry was already refused here, and
+    /// the next scheduled call went out regardless.
+    ///
+    /// Atomic for the same reason the offset is: the refusal arrives on
+    /// a path holding `&self`.
+    banned_until_ms: core::sync::atomic::AtomicI64,
 }
 
 impl Binance {
@@ -215,6 +228,7 @@ impl Binance {
             agent: config.into(),
             clock_offset_ms: core::sync::atomic::AtomicI64::new(0),
             round_trip_ms: core::sync::atomic::AtomicI64::new(0),
+            banned_until_ms: core::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -478,6 +492,20 @@ impl Binance {
     /// crate's read paths keep calling something that can only issue a
     /// GET. A write is a different call, and a reviewer sees it.
     fn send_method(&self, method: Method, url: &str, signed: bool) -> Result<String, VenueError> {
+        // Every request the client makes passes here, which is why the
+        // ban is enforced here: a ban is on the IP, not on an endpoint,
+        // so a check on the read path would leave the write paths
+        // walking the deadline forward on the reads' behalf.
+        if let Some(remaining) = self.ban_remaining_ms() {
+            return Err(VenueError::Venue {
+                status: 418,
+                body: format!(
+                    "{} — not sent: this IP is banned for another {remaining} ms; \
+                     sending into a standing ban is what extends it",
+                    redact(url)
+                ),
+            });
+        }
         // Each arm builds and sends in place: the builders are
         // different types per verb, and a POST carries a body where the
         // others do not.
@@ -522,6 +550,13 @@ impl Binance {
                 if (200..300).contains(&status) {
                     return Ok(body);
                 }
+                // A ban names the moment it lifts. Recorded before the
+                // error is returned, so the next call is refused here
+                // rather than spent walking the deadline forward.
+                if let Some(until) = ban_until_ms(&body) {
+                    self.banned_until_ms
+                        .store(until, core::sync::atomic::Ordering::Relaxed);
+                }
                 // The venue's own words, which name the cause. The URL is
                 // deliberately absent: it carries the signature, and an
                 // error is the line most likely to be pasted somewhere
@@ -551,6 +586,44 @@ fn signed_url(base: &str, path: &str, query: &str, stamp_ms: i64, secret: &[u8])
     };
     let signature = hmac_sha256_hex(secret, stamped.as_bytes());
     format!("{base}{path}?{stamped}&signature={signature}")
+}
+
+/// How long a standing ban has left to run, in milliseconds.
+///
+/// `None` once it has lifted, which is also the answer when none was
+/// ever recorded. Measured against venue time, because that is the clock
+/// the deadline is quoted in.
+impl Binance {
+    fn ban_remaining_ms(&self) -> Option<i64> {
+        let until = self
+            .banned_until_ms
+            .load(core::sync::atomic::Ordering::Relaxed);
+        (until > 0)
+            .then(|| until - (now_ms() + self.clock_offset_ms()))
+            .filter(|remaining| *remaining > 0)
+    }
+}
+
+/// The moment a `-1003` says its ban lifts, in venue milliseconds.
+///
+/// Read from the prose because that is the only place the venue puts it:
+/// the code says the request was refused, and the deadline appears
+/// nowhere else in the response. Matched on the digits that follow the
+/// phrase rather than by parsing the sentence, so a reworded message
+/// costs a wait of the caller's own choosing and not a wrong deadline.
+///
+/// A message that carries no deadline — `-1003` also appears as a plain
+/// "too many requests" with a per-minute limit and no ban — yields
+/// `None`, because a deadline invented here would be a silence the
+/// caller could not tell from a real one.
+fn ban_until_ms(body: &str) -> Option<i64> {
+    let rest = body.split("banned until").nth(1)?;
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok().filter(|ms| *ms > 0)
 }
 
 /// Whether a refusal says the request's timestamp was stale.
@@ -1865,5 +1938,83 @@ mod stale_timestamp {
         assert!(!is_stale_timestamp(&venue(
             r#"{"code":-2015,"msg":"Invalid API-key. See recvWindow and -1021 in the docs."}"#
         )));
+    }
+}
+
+#[cfg(test)]
+mod ban_backoff {
+    use super::{Binance, Credentials, Endpoint, Method, VenueError, ban_until_ms, now_ms};
+
+    /// The deadline a ban names, which is the whole point of reading it.
+    #[test]
+    fn a_ban_names_the_moment_it_lifts() {
+        assert_eq!(
+            ban_until_ms(
+                r#"{"code":-1003,"msg":"Way too many requests; IP banned until 1787144158148."}"#
+            ),
+            Some(1_787_144_158_148)
+        );
+    }
+
+    /// Rate limiting without a ban carries no deadline, and inventing
+    /// one here would be indistinguishable from having read a real one.
+    ///
+    /// This is the other spelling of -1003 the same account collected:
+    /// a per-minute limit, refused but not banned.
+    #[test]
+    fn a_limit_without_a_ban_yields_no_deadline() {
+        assert_eq!(
+            ban_until_ms(
+                r#"{"code":-1003,"msg":"Too many requests; current limit of IP(1.2.3.4) is 2400 requests per minute. Please use the websocket for live updates to avoid polling the API."}"#
+            ),
+            None
+        );
+        assert_eq!(ban_until_ms(r#"{"code":-1021,"msg":"Timestamp"}"#), None);
+    }
+
+    /// A reworded message costs a wait, not a wrong deadline.
+    #[test]
+    fn a_deadline_that_cannot_be_read_is_not_guessed() {
+        assert_eq!(ban_until_ms("IP banned until soon."), None);
+        assert_eq!(ban_until_ms("IP banned until 0."), None);
+    }
+
+    /// The ban is enforced before the request is built, and lifts by
+    /// itself when its moment passes.
+    #[test]
+    fn a_standing_ban_refuses_locally_and_then_expires() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let b = Binance::at(Endpoint::Testnet, Credentials::new("k", "s"));
+
+        assert_eq!(b.ban_remaining_ms(), None, "no ban to begin with");
+
+        // Banned a minute into the future, measured on the venue's clock.
+        b.banned_until_ms
+            .store(now_ms() + b.clock_offset_ms() + 60_000, Relaxed);
+        let left = b.ban_remaining_ms().expect("the ban stands");
+        assert!(
+            (55_000..=60_000).contains(&left),
+            "about a minute left, got {left}"
+        );
+
+        // A request made while it stands is refused without being sent:
+        // no network, and the error says why.
+        let e = b
+            .send_method(Method::Get, "https://example.invalid/x?sig=1", true)
+            .expect_err("must not be sent");
+        let VenueError::Venue { status, body } = e else {
+            panic!("expected a local refusal, got {e:?}")
+        };
+        assert_eq!(status, 418);
+        assert!(body.contains("not sent"), "{body}");
+        assert!(
+            !body.contains("sig=1"),
+            "the signature must not leak: {body}"
+        );
+
+        // Once the moment passes, it is gone without anything clearing it.
+        b.banned_until_ms
+            .store(now_ms() + b.clock_offset_ms() - 1, Relaxed);
+        assert_eq!(b.ban_remaining_ms(), None, "an expired ban is not a ban");
     }
 }
