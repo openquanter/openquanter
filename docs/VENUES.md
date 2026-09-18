@@ -331,27 +331,46 @@ Lighter is stated as low deliberately. Writing it from memory would
 produce something that compiles, passes its own tests, and is wrong in
 ways nobody can see — which is worse than not having it.
 
-## Order
+## Order, and where it got to
 
-1. **Finish OKX** — the account-side reads landed, the handshake landed;
-   the reader and `Account` remain. It is the template, and a template
-   with a hole in it teaches the hole.
-2. **Aster** — the family test, and it passed: the whole venue is a path
-   table, because its API *is* Binance's.
-9. **Bitget on UTA v3**, once its shape is read. Demoted from "cheap":
-   the shared family turned out to be the signature and nothing else —
-   a different success code, coins instead of contracts, and an account
-   model that is being replaced while this is written.
-3. **`oq-hash` gains SHA-512**, then **Kraken Futures** — a new family,
-   with the one piece of cryptography that is honestly hand-writable.
-4. **The dependency decision**, explicitly, with the budget table edited
-   and the reason recorded.
-5. **Backpack** — the simplest asymmetric scheme, and therefore the one
-   that proves the decision in (4) works.
-6. **Hyperliquid** — the most demanding, and the one with a Rust
-   implementation to read against.
-7. **Lighter** — after a survey of its own.
-8. **Deribit**, or Coinbase leaves the list.
+**Done, and on `main`:**
+
+1. **OKX, complete** — `Execution`, `Account` and `Events`, conformance
+   passed, selectable as `--venue okx`. Writing the layer above it found
+   the first of its predicted defects: sizes had been converted to
+   coins where this venue and `Instrument` both count contracts.
+2. **Aster, complete** — the family test, and it passed. The whole venue
+   is a sixteen-entry path table, because its API *is* Binance's. A test
+   asserts every Aster path is the Binance path with the version
+   changed, so the day that stops being true, the table says so.
+3. **`oq-hash` gains SHA-512** — checked against the NIST digests and
+   RFC 4231, and the commit that added it states where hand-writing a
+   primitive stops.
+4. **Kraken Futures, execution side** — signing, placement, cancel,
+   status, conformance passed. It found two defects in code that was
+   already shipping: `raw_field` stopped at the first occurrence of a
+   key, so `{"result":"error","error":"..."}` turned a named refusal
+   into an unexplained one; and the conformance suite caught this
+   adapter reporting a captive portal as a *rejection*, which invites a
+   resend into an order that may be resting.
+5. **Bitget on UTA v3, execution side** — conformance passed, with two
+   of its three paths marked as guesses in the module header.
+
+**Blocked, each on something a person has to supply:**
+
+6. **Kraken and Bitget account sides** — one real response each. The
+   flex `/accounts` shape cannot be mapped onto `AccountSnapshot` from
+   the documentation, and a wrong balance is worse than a missing one.
+7. **The dependency decision** — Backpack (Ed25519), Hyperliquid
+   (secp256k1 and Keccak) and Lighter all need asymmetric signing, and
+   the composability budget's note is explicit about what a dependency
+   in this crate costs. Nothing past here moves until that is decided
+   and the budget table edited with the reason.
+8. **Backpack**, then **Hyperliquid**, then **Lighter** — in that order,
+   simplest scheme first, so the decision in (7) is proved by the
+   cheapest of the three. Lighter still needs a survey of its own; it is
+   the one venue here whose signing this document has not read properly.
+9. **Deribit**, or Coinbase leaves the list.
 
 Each step is a pull request, and steps 2 through 7 each begin by writing
 the conformance payloads and end with the adapter passing them.
