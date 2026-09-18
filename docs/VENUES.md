@@ -1,0 +1,281 @@
+# More venues
+
+[English](VENUES.md) · [中文](VENUES.zh-CN.md)
+
+What it takes to add Coinbase, Backpack, Kraken, Bitget, Lighter,
+Hyperliquid and Aster to a gateway that currently speaks to two venues,
+and what has to change before the first line of any of them is written.
+
+Design first, for the reason [the live path](LIVE-PATH.md) was: the
+survey there found nine systems that built the order path and left
+reconciliation for later, and every one carries the same class of bug.
+The equivalent mistake here is writing seven adapters against the shape
+the first two happened to need.
+
+## The claim this rests on
+
+**Seven venues are not seven problems.** They are four signing families,
+three structural differences, and one question about cryptography that
+has to be answered before any of the three decentralised ones can be
+started. Sorted that way, two of the seven are nearly free and one of
+them should probably not be built at all.
+
+## What the survey found
+
+### Coinbase's perpetuals are no longer at Coinbase
+
+Coinbase International Exchange stopped serving derivatives on
+**2026-09-09**, nine days before this was written. Perpetuals in the
+Coinbase app and on coinbase.com now run on a Deribit-powered gateway,
+and API users were moved to a **JSON-RPC** endpoint. The INTX REST API
+this document would otherwise have targeted is marked deprecated in
+Coinbase's own developer documentation.
+
+An INTX adapter would therefore be an adapter to something that has been
+switched off. The real target is Deribit's JSON-RPC, which is not a
+variation on the REST venues here — it is a different protocol family,
+with its own request/response identity model.
+
+This is the survey's best result: it removed work rather than adding it.
+
+### The families
+
+| Family | Members | Shape |
+|---|---|---|
+| **Binance** | `binance` (built), **Aster** | `HMAC-SHA256` hex over the query string; `timestamp` + `recvWindow` |
+| **OKX** | `okx` (built), **Bitget** | base64 of `HMAC-SHA256(timestamp + METHOD + path + body)`; a key/secret/**passphrase** triple |
+| **Kraken** | **Kraken Futures** | `SHA-256(postData + nonce + path)`, then `HMAC-SHA-512` under the base64-decoded secret, then base64. Headers are `APIKey` and `Authent` |
+| **Asymmetric** | **Backpack** (Ed25519), **Hyperliquid** (secp256k1 / EIP-712), **Lighter** (its own scheme, per-key nonce) | A keypair, not a shared secret |
+
+Aster's documentation describes `HMAC SHA256` over "the query string
+concatenated with the request body", with `timestamp` and a `recvWindow`
+defaulting to 5000 — which is Binance's scheme, restated. Bitget signs
+`timestamp + METHOD + requestPath + "?" + queryString + body` and
+base64s it, under `ACCESS-KEY` / `ACCESS-SIGN` / `ACCESS-PASSPHRASE` —
+which is OKX's scheme with different header names.
+
+**So two of the seven land inside families that already exist here.**
+They are the cheapest work on this list and they are the two that
+demonstrate whether the existing abstractions generalise, which is worth
+knowing before the expensive ones start.
+
+### The structural differences
+
+Three things separate venues in ways a signing family does not capture.
+
+**1. What identifies an instrument.** Every venue built so far takes a
+symbol string. Hyperliquid takes a **numeric asset index** — the
+position in the `universe` array of its `meta` response, with spot
+assets at `10000 + index`. Nothing in the current `Instrument` or in any
+call signature carries that. An adapter must resolve symbol to index at
+load and keep the mapping, and the mapping is not stable across venue
+metadata updates.
+
+**2. How many events arrive in one frame.** Binance's user stream sends
+one event per message. OKX's `orders` channel sends a `data` **array**,
+and Hyperliquid's order response returns a `statuses` array — one entry
+per order in the batch. A reader that returns the first and drops the
+rest loses a fill, and a lost fill is a position that never existed.
+
+**3. Whether a client id survives the order.** `L4` in the live-path
+design requires a client order id that is reconstructible, and both
+built venues honour it: one client id, one venue id, for the life of the
+order. **Hyperliquid's modify is a cancel-replace** — it cancels the
+original (old `oid`), opens a replacement (new `oid`), and both carry
+the **same `cloid`**. So the mapping is one-to-many over time, and a
+deduplication table keyed on the client id sees two orders where the
+strategy sees one. NautilusTrader's adapter handles this by suppressing
+the stale cancel and promoting the replacement into a single
+`OrderUpdated`; whatever this workspace does, it has to do something,
+because the default behaviour is a book that believes an order was
+cancelled while it is resting.
+
+### What other implementations paid for
+
+NautilusTrader ships a Hyperliquid adapter written in Rust, and its
+integration document is the most useful artefact this survey found —
+it is a list of what the venue does that a reasonable implementer would
+not expect:
+
+- **An over-precise price fails as `user or API wallet does not exist`.**
+  Prices are capped to five significant figures, and exceeding that
+  makes signature verification fail, which the venue reports as a
+  missing wallet. This is the same class as the defect Binance's first
+  real run found here — a price with the right number of decimals that
+  was not on the tick grid — except the error message points at the
+  wrong thing entirely.
+- **An agent wallet's orders belong to the master account**, and a
+  client that does not set the master address explicitly gets empty
+  holdings from REST, an empty user stream, and orders that never
+  reconcile. Everything connects; nothing matches.
+- **There are no market orders.** They are simulated with an IOC limit
+  at a slippage-adjusted price, which requires a cached quote — so the
+  order path depends on the data path, which is not true of any venue
+  here today.
+- **Rate limits are partly earned.** 10,000 actions plus one per
+  cumulative USDC traded, with a separate cancel allowance. A budget
+  that grows with volume is not the fixed weight-per-minute model
+  `oq-live`'s rate limiter assumes.
+
+CCXT's note on signing cost is worth recording too: a pure-language
+ECDSA implementation signs in about 45 ms, against under 0.05 ms for a
+native curve library. **A 45 ms signature sits inside the order path**,
+and this workspace has a latency gate (`G6`) measured from journal write
+to socket write. Whichever way the cryptography question below is
+answered, the answer has a number attached to it.
+
+## The cryptography question
+
+`scripts/check-composability.sh` records the policy, and it is explicit:
+
+> Signing and JSON reading are written out by hand rather than pulled
+> in: this is the crate that holds the API secret, and every dependency
+> here is one more thing trusted with it.
+
+That policy is affordable for SHA-256 and HMAC, which are deterministic
+bit operations with published test vectors — `oq-hash` passes RFC 4231.
+It is not affordable for the asymmetric schemes:
+
+- **Kraken** needs **SHA-512**, which `oq-hash` does not have. This one
+  *is* affordable: it is the same shape of work as SHA-256, with the
+  same kind of vectors to check against.
+- **Backpack** needs **Ed25519**. **Hyperliquid** needs **secp256k1
+  ECDSA plus Keccak-256** for EIP-712. **Lighter** needs its own
+  scheme, over a curve, with a per-API-key nonce.
+
+Hand-writing elliptic-curve arithmetic is not the same act as
+hand-writing a hash. It is constant-time field arithmetic, point
+multiplication, and — for ECDSA — nonce generation where a bias leaks
+the key. These keys do not merely place orders: a wallet key moves
+funds. **The safe options are to take an audited dependency or to not
+build these venues**, and pretending there is a third is how a workspace
+ends up with its own curve implementation.
+
+The budget table says raising a budget is a deliberate act, to be made
+in the commit that adds the dependency, saying what it buys. This is
+that act, when it comes: one entry per curve, named, with the
+alternative recorded as refused rather than unconsidered.
+
+## Decisions
+
+### V1 — Organise by signing family, not by CEX and DEX
+
+The intuitive split is centralised against decentralised. It is the
+wrong axis: **Aster is a perpetual DEX whose API is Binance's**, down to
+`recvWindow` defaulting to 5000, while Backpack is a centralised
+exchange that needs Ed25519. Sorting by how a request is signed and
+what identifies an order puts the reusable work together and the
+genuinely new work where it belongs.
+
+### V2 — The two family members come first
+
+Aster and Bitget are the cheapest and the most informative. Each drops
+into a family that exists, so each one is a test of whether the
+abstractions generalise or whether they encode one venue's habits. If
+adding Aster requires editing `binance.rs`, the abstraction is wrong and
+it is much better to learn that from a venue that costs days than from
+one that costs weeks.
+
+### V3 — Coinbase means Deribit, or it means nothing
+
+An INTX adapter targets a switched-off service. Either the target
+becomes Deribit's JSON-RPC gateway — a protocol family with no member
+here yet, and a bigger piece of work than any REST venue on this list —
+or Coinbase leaves the list. Recorded rather than silently dropped.
+
+### V4 — A venue reader returns a list, not an option
+
+`Events::read` currently answers `Option<UserEvent>`. OKX's `orders`
+channel and Hyperliquid's `statuses` both carry several. The signature
+becomes a list, and `UserStreamReader` holds the surplus in a queue that
+`next` drains before reading the socket again. This is not a
+Hyperliquid change — it is already required by the OKX work in flight.
+
+### V5 — Resolving an instrument is the adapter's job, and it has state
+
+Hyperliquid's numeric asset index has to come from somewhere, and that
+somewhere is a `meta` response the adapter fetches and keeps. The
+`Instrument` type stays free of it: what changes is that an adapter may
+need to be *prepared* before it can trade a symbol, which today is only
+true in the weak sense of reading a listing. Making preparation explicit
+also gives Hyperliquid's five-significant-figure price cap a place to
+live, so an over-precise price is refused here rather than returned as
+a missing wallet.
+
+### V6 — One client id may outlive its venue id
+
+`L4` stands, but the invariant it implies — one client id, one venue id
+— is Binance's and OKX's, not a property of venues. The order book
+model needs a venue id that can change under a stable client id, and a
+deduplication key that does not treat the replacement as a second order.
+Whatever shape this takes, it is decided once, here, rather than
+discovered separately in each adapter.
+
+### V7 — Documented shapes are labelled as documented shapes
+
+Every adapter's conformance payloads will come from the venues' public
+documentation, because no account exists to capture real ones from.
+`okx.rs` already carries the right disclosure and it is the model:
+
+> It has not been run against OKX. Every pure function here is tested
+> against payloads taken from the venue's documented shapes, and that is
+> not the same as having placed an order. […] Assume this one has its
+> own five.
+
+Each new adapter carries the same paragraph, names its own venue, and
+stays out of `Endpoint::Live` until someone has run it. A module that
+cannot say this honestly is not ready to be merged.
+
+### V8 — Rejection is read from the body, everywhere, by default
+
+Binance says no with an HTTP status. OKX says no with HTTP 200 and a
+code. **Hyperliquid also says no with HTTP 200**, inside
+`statuses[].error`. Two of the four families already put the refusal in
+the body, so the body is the rule and the status line is the exception —
+`classify` is right and every new adapter implements it before anything
+else, with a conformance case for exactly this.
+
+## Per-venue notes, with confidence stated
+
+| Venue | Family | Confidence | The thing most likely to bite |
+|---|---|---|---|
+| **Aster** | Binance | High — documentation read | Whether its perpetual semantics match Binance's as closely as its signing does |
+| **Bitget** | OKX | High — documentation read | Header names differ; the signature covers `?` + query string explicitly |
+| **Kraken Futures** | Kraken | Medium — algorithm confirmed, order semantics not | Needs SHA-512; symbols are `PF_XBTUSD`, so symbol mapping is not cosmetic |
+| **Backpack** | Ed25519 | Medium — signing scheme read | Parameters are sorted alphabetically before signing, which is a whole class of bug on its own |
+| **Hyperliquid** | secp256k1 | Medium-high — both the venue's docs and a Rust adapter's notes read | Everything in "What other implementations paid for" |
+| **Lighter** | Own scheme | **Low** | Per-API-key nonces, key indices 0–254 with 0–3 reserved, and a signing scheme this survey has not yet read properly |
+| **Coinbase** | — | n/a | It moved. See V3 |
+
+Lighter is stated as low deliberately. Writing it from memory would
+produce something that compiles, passes its own tests, and is wrong in
+ways nobody can see — which is worse than not having it.
+
+## Order
+
+1. **Finish OKX** — the account-side reads landed, the handshake landed;
+   the reader and `Account` remain. It is the template, and a template
+   with a hole in it teaches the hole.
+2. **Aster**, then **Bitget** — the family test. Cheap, and they either
+   validate the abstractions or condemn them.
+3. **`oq-hash` gains SHA-512**, then **Kraken Futures** — a new family,
+   with the one piece of cryptography that is honestly hand-writable.
+4. **The dependency decision**, explicitly, with the budget table edited
+   and the reason recorded.
+5. **Backpack** — the simplest asymmetric scheme, and therefore the one
+   that proves the decision in (4) works.
+6. **Hyperliquid** — the most demanding, and the one with a Rust
+   implementation to read against.
+7. **Lighter** — after a survey of its own.
+8. **Deribit**, or Coinbase leaves the list.
+
+Each step is a pull request, and steps 2 through 7 each begin by writing
+the conformance payloads and end with the adapter passing them.
+
+## What this does not cover
+
+Market data. Every venue here also publishes a book and a trade stream,
+and `oq-l2feed` has its own venue abstraction with its own conformance
+suite. The two sides are deliberately separate — an execution adapter
+and a capture adapter for one venue are different objects — and adding
+seven venues to the capture side is a second document.
