@@ -93,6 +93,40 @@ fn the_kraken_adapter_conforms() {
     assert!(r.conforms(), "{}", r.summary_line("kraken-futures"));
 }
 
+/// Payloads Bitget's unified-account documentation shows.
+///
+/// Documented shapes again, and here the exposure is larger than usual:
+/// the place-order response is read from the venue's docs, but the
+/// query shapes are written to its naming rather than quoted. The
+/// adapter's module header says which is which.
+fn bitget() -> Responses {
+    Responses {
+        venue: "bitget-uta",
+        client_id: "oq0001",
+        accepted: r#"{"code":"00000","msg":"success","requestTime":1695806875837,"data":{"clientOid":"oq0001","orderId":"121211212122"}}"#,
+        accepted_venue_id: "121211212122",
+        rejected: (
+            200,
+            r#"{"code":"40762","msg":"The order size is greater than the max open size","requestTime":1695806875837,"data":null}"#,
+        ),
+        rejected_code: Some(40_762),
+        unavailable: (502, "<html>bad gateway</html>"),
+        absent: r#"{"code":"00000","msg":"success","requestTime":1695806875837,"data":[]}"#,
+        present: r#"{"code":"00000","msg":"success","requestTime":1695806875837,"data":[{"orderId":"121211212122","clientOid":"oq0001","status":"live","filledQty":"0"}]}"#,
+        foreign: "<html>captive portal</html>",
+    }
+}
+
+#[test]
+fn the_bitget_adapter_conforms() {
+    let r = check(
+        &bitget(),
+        oq_gateway::bitget::classify,
+        oq_gateway::bitget::order_from_query,
+    );
+    assert!(r.conforms(), "{}", r.summary_line("bitget-uta"));
+}
+
 #[test]
 fn the_binance_adapter_conforms() {
     let r = check(
