@@ -858,12 +858,15 @@ pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
 /// case, and the client id is how it gets resolved.
 fn ack_from(body: &str, client_id: &str) -> Placed {
     match (
+        // This venue numbers its orders, so the number is read as one
+        // and kept as the text it arrived as — the field is a handle,
+        // not an arithmetic value.
         field_i64(body, "orderId"),
         field_str(body, "clientOrderId"),
         field_str(body, "status"),
     ) {
         (Some(venue_id), Some(echoed), Some(status)) => Placed::Accepted(OrderAck {
-            venue_id,
+            venue_id: venue_id.to_string(),
             client_id: echoed,
             status,
             executed_qty: field_str(body, "executedQty").unwrap_or_else(|| "0".to_string()),
@@ -1416,7 +1419,7 @@ mod order_entry {
             r#"{"orderId":283194212,"clientOrderId":"oq-1","status":"NEW","executedQty":"0.000"}"#;
         match ack_from(body, "oq-1") {
             Placed::Accepted(a) => {
-                assert_eq!(a.venue_id, 283_194_212);
+                assert_eq!(a.venue_id, "283194212");
                 assert_eq!(a.client_id, "oq-1");
                 assert_eq!(a.status, "NEW");
                 assert_eq!(a.executed_qty, "0.000");
@@ -1608,7 +1611,7 @@ pub fn parse_user_event(payload: &str) -> Option<UserEvent> {
             Some(UserEvent::Order(OrderUpdate {
                 symbol: field_str(inner, "s")?,
                 client_id: field_str(inner, "c")?,
-                venue_id: field_i64(inner, "i")?,
+                venue_id: field_i64(inner, "i")?.to_string(),
                 status: field_str(inner, "X")?,
                 last_qty: field_str(inner, "l").unwrap_or_else(|| "0".into()),
                 cumulative_qty: field_str(inner, "z").unwrap_or_else(|| "0".into()),
@@ -1649,7 +1652,7 @@ mod user_stream {
         match parse_user_event(FILL) {
             Some(UserEvent::Order(u)) => {
                 assert_eq!(u.client_id, "oq-1", "the id the caller chose");
-                assert_eq!(u.venue_id, 283_194_212);
+                assert_eq!(u.venue_id, "283194212");
                 assert_eq!(u.status, "FILLED");
                 assert_eq!(u.cumulative_qty, "0.002");
                 assert_eq!(u.last_price, "119999.90");

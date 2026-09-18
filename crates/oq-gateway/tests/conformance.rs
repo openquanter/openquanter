@@ -24,7 +24,7 @@ fn binance() -> Responses {
         venue: "binance-perp",
         client_id: "oq-1",
         accepted: r#"{"orderId":283194212,"symbol":"BTCUSDT","status":"NEW","clientOrderId":"oq-1","price":"60000","avgPrice":"0.00","origQty":"0.002","executedQty":"0"}"#,
-        accepted_venue_id: 283_194_212,
+        accepted_venue_id: "283194212",
         rejected: (
             400,
             r#"{"code":-4014,"msg":"Price not increased by tick size."}"#,
@@ -43,7 +43,7 @@ fn okx() -> Responses {
         venue: "okx-swap",
         client_id: "oq0001",
         accepted: r#"{"code":"0","msg":"","data":[{"clOrdId":"oq0001","ordId":"312269865356374016","tag":"","sCode":"0","sMsg":""}]}"#,
-        accepted_venue_id: 312_269_865_356_374_016,
+        accepted_venue_id: "312269865356374016",
         rejected: (
             200,
             r#"{"code":"1","msg":"","data":[{"clOrdId":"oq0001","ordId":"","sCode":"51008","sMsg":"Order placement failed due to insufficient balance"}]}"#,
@@ -140,7 +140,7 @@ fn an_adapter_that_cannot_say_no_such_order_is_caught() {
             return None;
         }
         Some(oq_gateway::exec::OrderAck {
-            venue_id: 1,
+            venue_id: "1".to_string(),
             client_id: client_id.to_string(),
             status: "NEW".to_string(),
             executed_qty: "0".to_string(),

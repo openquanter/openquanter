@@ -128,8 +128,18 @@ pub enum Placed {
 /// The venue's acknowledgement of an order that exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderAck {
-    /// The venue's own id.
-    pub venue_id: i64,
+    /// The venue's own id, as the venue wrote it.
+    ///
+    /// Text, not a number. Two venues here number their orders and a
+    /// third names them with a UUID, and an integer field would have
+    /// meant either refusing that venue or inventing a number for it —
+    /// and an invented id is one that cannot be quoted back in a
+    /// support ticket.
+    ///
+    /// Nothing joins on this. [`OrderUpdate::client_id`] is the join
+    /// key, by `L4`, precisely so the venue's own handle can be whatever
+    /// the venue likes.
+    pub venue_id: String,
     /// The id the caller chose, echoed back.
     pub client_id: String,
     /// The venue's status word, unmapped.
@@ -214,6 +224,26 @@ pub fn decimal(value: i64, scale: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_venue_id_can_be_a_name_rather_than_a_number() {
+        // Two venues here number their orders; a third names them with
+        // a UUID. An integer field would have meant refusing that venue
+        // or inventing a number for it, and an invented id is one that
+        // cannot be quoted back in a support ticket.
+        //
+        // Nothing joins on this — `client_id` is the join key by L4 —
+        // which is exactly why the venue's own handle is allowed to be
+        // whatever the venue likes.
+        let ack = OrderAck {
+            venue_id: "179f9af8-e45e-469d-b3e9-2fd4675cb7d0".to_string(),
+            client_id: "oq1".to_string(),
+            status: "placed".to_string(),
+            executed_qty: "0".to_string(),
+        };
+        assert_eq!(ack.venue_id, "179f9af8-e45e-469d-b3e9-2fd4675cb7d0");
+        assert_eq!(ack.client_id, "oq1", "the join key is still the caller's");
+    }
 
     #[test]
     fn a_fixed_point_price_becomes_exact_decimal_text() {
@@ -482,7 +512,8 @@ pub struct OrderUpdate {
     pub symbol: String,
     /// The id the caller chose. The join key for everything else.
     pub client_id: String,
-    pub venue_id: i64,
+    /// The venue's own id, as the venue wrote it. See [`OrderAck::venue_id`].
+    pub venue_id: String,
     /// The venue's status word, unmapped for the same reason as
     /// [`OrderAck::status`].
     pub status: String,

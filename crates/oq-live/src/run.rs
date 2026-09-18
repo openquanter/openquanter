@@ -1960,7 +1960,7 @@ mod unreadable_reports {
             maker: false,
             event_ms: 0,
             symbol: "BTCUSDT".into(),
-            venue_id: 0,
+            venue_id: "0".to_string(),
         }
     }
 
