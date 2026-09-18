@@ -151,9 +151,104 @@ enum Method {
     Delete,
 }
 
+/// Which dialect of this API a client speaks.
+///
+/// Two venues ship the same API. Same signing — `HMAC-SHA256` hex over
+/// the query string, `timestamp` and `recvWindow`. Same field names.
+/// Same client id rule, character for character. Same `listenKey` model
+/// for the account stream, down to the renewal. What differs is the
+/// version in every path — Binance's perpetuals sit under `/fapi/v1`
+/// and `/fapi/v2`, Aster's under `/fapi/v3` — and the hosts.
+///
+/// A path table rather than a second adapter. A copy would be a second
+/// place for every fix to be applied, and the first one applied is the
+/// one that gets it: this crate has one adapter whose defects were
+/// found by running it, and those fixes belong to both venues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    /// Binance USDT-M perpetuals.
+    #[default]
+    Binance,
+    /// Aster perpetuals. The same API under `/fapi/v3`.
+    Aster,
+}
+
+/// Everything that differs between two venues speaking one API.
+///
+/// One table, so the two columns can be compared by eye. A path that is
+/// wrong here is a correctly signed request to the wrong endpoint, which
+/// a venue answers with something that reads like a bad parameter.
+struct Wire {
+    id: &'static str,
+    mainnet: &'static str,
+    testnet: &'static str,
+    mainnet_stream: &'static str,
+    testnet_stream: &'static str,
+    order: &'static str,
+    account: &'static str,
+    position_risk: &'static str,
+    open_orders: &'static str,
+    listen_key: &'static str,
+    user_trades: &'static str,
+    time: &'static str,
+    ticker_price: &'static str,
+    position_side_dual: &'static str,
+    klines: &'static str,
+    exchange_info: &'static str,
+}
+
+const BINANCE_WIRE: Wire = Wire {
+    id: "binance-perp",
+    mainnet: "https://fapi.binance.com",
+    testnet: "https://testnet.binancefuture.com",
+    mainnet_stream: "wss://fstream.binance.com",
+    testnet_stream: "wss://stream.binancefuture.com",
+    order: "/fapi/v1/order",
+    account: "/fapi/v2/account",
+    position_risk: "/fapi/v2/positionRisk",
+    open_orders: "/fapi/v1/openOrders",
+    listen_key: "/fapi/v1/listenKey",
+    user_trades: "/fapi/v1/userTrades",
+    time: "/fapi/v1/time",
+    ticker_price: "/fapi/v1/ticker/price",
+    position_side_dual: "/fapi/v1/positionSide/dual",
+    klines: "/fapi/v1/klines",
+    exchange_info: "/fapi/v1/exchangeInfo",
+};
+
+const ASTER_WIRE: Wire = Wire {
+    id: "aster-perp",
+    mainnet: "https://fapi.asterdex.com",
+    testnet: "https://fapi.asterdex-testnet.com",
+    mainnet_stream: "wss://fstream.asterdex.com",
+    testnet_stream: "wss://fstream.asterdex-testnet.com",
+    order: "/fapi/v3/order",
+    account: "/fapi/v3/account",
+    position_risk: "/fapi/v3/positionRisk",
+    open_orders: "/fapi/v3/openOrders",
+    listen_key: "/fapi/v3/listenKey",
+    user_trades: "/fapi/v3/userTrades",
+    time: "/fapi/v3/time",
+    ticker_price: "/fapi/v3/ticker/price",
+    position_side_dual: "/fapi/v3/positionSide/dual",
+    klines: "/fapi/v3/klines",
+    exchange_info: "/fapi/v3/exchangeInfo",
+};
+
+impl Dialect {
+    const fn wire(self) -> &'static Wire {
+        match self {
+            Self::Binance => &BINANCE_WIRE,
+            Self::Aster => &ASTER_WIRE,
+        }
+    }
+}
+
 /// A client for one deployment of the venue.
 pub struct Binance {
     base: String,
+    /// Which venue's paths this client uses.
+    dialect: Dialect,
     creds: Credentials,
     agent: ureq::Agent,
     /// Venue clock minus local clock, in milliseconds.
@@ -184,9 +279,9 @@ pub struct Binance {
 
 impl Binance {
     /// Mainnet USDT-M futures.
-    pub const MAINNET: &'static str = "https://fapi.binance.com";
+    pub const MAINNET: &'static str = BINANCE_WIRE.mainnet;
     /// The testnet, which is where anything new should be pointed first.
-    pub const TESTNET: &'static str = "https://testnet.binancefuture.com";
+    pub const TESTNET: &'static str = BINANCE_WIRE.testnet;
 
     /// Build a client against a named deployment.
     ///
@@ -195,14 +290,37 @@ impl Binance {
     /// character is production and an enum cannot be.
     #[must_use]
     pub fn at(endpoint: Endpoint, creds: Credentials) -> Self {
-        let base = match endpoint {
-            Endpoint::Testnet => Self::TESTNET,
-            Endpoint::Live => Self::MAINNET,
-        };
-        Self::new(base, creds)
+        Self::speaking(Dialect::Binance, endpoint, creds)
     }
 
-    /// Build a client against `base`.
+    /// Aster's perpetuals, over the same API.
+    ///
+    /// Named rather than reached through `new` with the right host,
+    /// because the host is not the only difference and a client pointed
+    /// at Aster with Binance's paths would sign every request correctly
+    /// and send all of them to endpoints that do not exist.
+    #[must_use]
+    pub fn aster(endpoint: Endpoint, creds: Credentials) -> Self {
+        Self::speaking(Dialect::Aster, endpoint, creds)
+    }
+
+    /// Build a client for one venue and one deployment.
+    #[must_use]
+    pub fn speaking(dialect: Dialect, endpoint: Endpoint, creds: Credentials) -> Self {
+        let wire = dialect.wire();
+        let base = match endpoint {
+            Endpoint::Testnet => wire.testnet,
+            Endpoint::Live => wire.mainnet,
+        };
+        let mut client = Self::new(base, creds);
+        client.dialect = dialect;
+        client
+    }
+
+    /// Build a client against `base`, speaking Binance's paths.
+    ///
+    /// `base` exists for a test or a proxy. It does not select the
+    /// venue — [`Binance::speaking`] does, and nothing else can.
     #[must_use]
     pub fn new(base: impl Into<String>, creds: Credentials) -> Self {
         // Generous, because the alternative is worse. A read that times
@@ -224,6 +342,7 @@ impl Binance {
             .build();
         Self {
             base: base.into(),
+            dialect: Dialect::Binance,
             creds,
             agent: config.into(),
             clock_offset_ms: core::sync::atomic::AtomicI64::new(0),
@@ -258,7 +377,7 @@ impl Binance {
         let mut last_err = None;
         for _ in 0..3 {
             let t0 = now_ms();
-            match self.get_public("/fapi/v1/time", "") {
+            match self.get_public(self.dialect.wire().time, "") {
                 Ok(body) => {
                     let t1 = now_ms();
                     let venue_ms =
@@ -331,7 +450,7 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn account(&self) -> Result<AccountSnapshot, VenueError> {
-        let body = self.get_signed("/fapi/v2/account", "")?;
+        let body = self.get_signed(self.dialect.wire().account, "")?;
         let read_at_ms = now_ms() + self.clock_offset_ms();
         Ok(AccountSnapshot {
             wallet_balance: need_f64(&body, "totalWalletBalance")?,
@@ -350,7 +469,10 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn positions(&self, symbol: &str) -> Result<Vec<PositionSnapshot>, VenueError> {
-        let body = self.get_signed("/fapi/v2/positionRisk", &format!("symbol={symbol}"))?;
+        let body = self.get_signed(
+            self.dialect.wire().position_risk,
+            &format!("symbol={symbol}"),
+        )?;
         let mut out = Vec::new();
         for o in objects(&body) {
             let amount = need_f64(&o, "positionAmt")?;
@@ -380,7 +502,7 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>, VenueError> {
-        let body = self.get_signed("/fapi/v1/openOrders", &format!("symbol={symbol}"))?;
+        let body = self.get_signed(self.dialect.wire().open_orders, &format!("symbol={symbol}"))?;
         objects(&body)
             .into_iter()
             .map(|o| {
@@ -415,7 +537,7 @@ impl Binance {
         if let Some(t) = since_ms {
             query.push_str(&format!("&startTime={t}"));
         }
-        let body = self.get_signed("/fapi/v1/userTrades", &query)?;
+        let body = self.get_signed(self.dialect.wire().user_trades, &query)?;
         objects(&body)
             .into_iter()
             .map(|o| {
@@ -923,7 +1045,7 @@ impl Execution for Binance {
         }
         let url = signed_url(
             &self.base,
-            "/fapi/v1/order",
+            self.dialect.wire().order,
             &order_query(order, instrument),
             now_ms() + self.clock_offset_ms(),
             self.creds.secret_bytes(),
@@ -957,7 +1079,7 @@ impl Execution for Binance {
     fn cancel(&self, symbol: &str, client_id: &str) -> Placed {
         let url = signed_url(
             &self.base,
-            "/fapi/v1/order",
+            self.dialect.wire().order,
             &format!("symbol={symbol}&origClientOrderId={client_id}"),
             now_ms() + self.clock_offset_ms(),
             self.creds.secret_bytes(),
@@ -974,7 +1096,7 @@ impl Execution for Binance {
 
     fn order_status(&self, symbol: &str, client_id: &str) -> Result<Option<OrderAck>, VenueError> {
         let body = match self.get_signed(
-            "/fapi/v1/order",
+            self.dialect.wire().order,
             &format!("symbol={symbol}&origClientOrderId={client_id}"),
         ) {
             Ok(b) => b,
@@ -1023,7 +1145,7 @@ impl crate::account::Account for Binance {
     fn id(&self) -> &'static str {
         // Matches the market-data side's identifier for the same venue,
         // so a run's records and its archive file under one name.
-        "binance-perp"
+        self.dialect.wire().id
     }
 
     fn id_rules(&self) -> crate::broker::IdRules {
@@ -1044,7 +1166,7 @@ impl crate::account::Account for Binance {
         // the returned range differ from the one asked for.
         let limit = minutes.clamp(1, 1500);
         let body = self.get_public(
-            "/fapi/v1/klines",
+            self.dialect.wire().klines,
             &format!("symbol={symbol}&interval=1m&limit={limit}"),
         )?;
         let (price_scale, qty_scale) = match crate::account::Account::instrument(self, symbol) {
@@ -1144,6 +1266,97 @@ fn decimal_field(body: &str, key: &str, scale: u8) -> Option<i64> {
     }
     digits.push_str(&frac);
     digits.parse().ok()
+}
+
+#[cfg(test)]
+mod dialects {
+    use super::*;
+
+    #[test]
+    fn the_first_venues_paths_are_unchanged() {
+        // This adapter is trading a live testnet account right now.
+        // Every path below is one that run is using, and a lookup table
+        // is a new place to get one wrong — so they are pinned here
+        // rather than trusted to a refactor.
+        let w = Dialect::Binance.wire();
+        assert_eq!(w.id, "binance-perp");
+        assert_eq!(w.mainnet, "https://fapi.binance.com");
+        assert_eq!(w.testnet, "https://testnet.binancefuture.com");
+        assert_eq!(w.mainnet_stream, "wss://fstream.binance.com");
+        assert_eq!(w.testnet_stream, "wss://stream.binancefuture.com");
+        assert_eq!(w.order, "/fapi/v1/order");
+        assert_eq!(w.account, "/fapi/v2/account");
+        assert_eq!(w.position_risk, "/fapi/v2/positionRisk");
+        assert_eq!(w.open_orders, "/fapi/v1/openOrders");
+        assert_eq!(w.listen_key, "/fapi/v1/listenKey");
+        assert_eq!(w.user_trades, "/fapi/v1/userTrades");
+        assert_eq!(w.time, "/fapi/v1/time");
+        assert_eq!(w.ticker_price, "/fapi/v1/ticker/price");
+        assert_eq!(w.position_side_dual, "/fapi/v1/positionSide/dual");
+        assert_eq!(w.klines, "/fapi/v1/klines");
+        assert_eq!(w.exchange_info, "/fapi/v1/exchangeInfo");
+    }
+
+    #[test]
+    fn aster_is_the_same_api_with_one_version_number_changed() {
+        // The finding this dialect exists for, as an assertion: every
+        // path is the first venue's with v1 or v2 replaced by v3. If a
+        // future Aster endpoint stops following that, this fails and the
+        // table stops being the right shape for the problem.
+        let b = Dialect::Binance.wire();
+        let a = Dialect::Aster.wire();
+        for (binance_path, aster_path) in [
+            (b.order, a.order),
+            (b.account, a.account),
+            (b.position_risk, a.position_risk),
+            (b.open_orders, a.open_orders),
+            (b.listen_key, a.listen_key),
+            (b.user_trades, a.user_trades),
+            (b.time, a.time),
+            (b.ticker_price, a.ticker_price),
+            (b.position_side_dual, a.position_side_dual),
+            (b.klines, a.klines),
+            (b.exchange_info, a.exchange_info),
+        ] {
+            assert_eq!(
+                aster_path,
+                binance_path.replace("/v1/", "/v3/").replace("/v2/", "/v3/"),
+                "{binance_path} and {aster_path} should differ only in the version"
+            );
+        }
+        assert_eq!(a.id, "aster-perp", "a run's records name their venue");
+    }
+
+    #[test]
+    fn a_dialect_opens_its_own_stream_and_not_the_other_ones() {
+        use crate::account::Account as _;
+        let creds = || Credentials::new("k", "s");
+        let aster_test = Binance::aster(Endpoint::Testnet, creds());
+        // The specific failure this guards against: comparing the base
+        // against *Binance's* testnet host would send an Aster testnet
+        // client to Binance's mainnet stream, which connects fine and
+        // delivers a silence that reads like a quiet account.
+        assert_eq!(aster_test.stream_host(), ASTER_WIRE.testnet_stream);
+        assert_eq!(
+            Binance::aster(Endpoint::Live, creds()).stream_host(),
+            ASTER_WIRE.mainnet_stream
+        );
+        assert_eq!(
+            Binance::at(Endpoint::Testnet, creds()).stream_host(),
+            BINANCE_WIRE.testnet_stream
+        );
+        assert_eq!(aster_test.id(), "aster-perp");
+        assert_eq!(Binance::at(Endpoint::Testnet, creds()).id(), "binance-perp");
+    }
+
+    #[test]
+    fn a_client_built_from_a_bare_base_still_speaks_the_first_venue() {
+        // `new` is for a test or a proxy and says nothing about which
+        // venue is on the other end, so it must not drift to the newer
+        // one.
+        let c = Binance::new("https://example.test", Credentials::new("k", "s"));
+        assert_eq!(c.dialect, Dialect::Binance);
+    }
 }
 
 #[cfg(test)]
@@ -1298,9 +1511,9 @@ mod order_entry {
 
 impl Binance {
     /// Mainnet user data stream host.
-    pub const MAINNET_STREAM: &'static str = "wss://fstream.binance.com";
+    pub const MAINNET_STREAM: &'static str = BINANCE_WIRE.mainnet_stream;
     /// Testnet user data stream host.
-    pub const TESTNET_STREAM: &'static str = "wss://stream.binancefuture.com";
+    pub const TESTNET_STREAM: &'static str = BINANCE_WIRE.testnet_stream;
 
     /// The stream host matching this client's REST base.
     ///
@@ -1309,10 +1522,16 @@ impl Binance {
     /// would show as an account that never trades while orders fill.
     #[must_use]
     pub fn stream_host(&self) -> &'static str {
-        if self.base == Self::TESTNET {
-            Self::TESTNET_STREAM
+        // Compared against this dialect's own testnet, not Binance's: a
+        // client pointed at Aster's testnet would otherwise take the
+        // else branch and open Binance's mainnet stream, which
+        // authenticates, delivers another account's silence, and looks
+        // like a quiet account.
+        let wire = self.dialect.wire();
+        if self.base == wire.testnet {
+            wire.testnet_stream
         } else {
-            Self::MAINNET_STREAM
+            wire.mainnet_stream
         }
     }
 
@@ -1321,7 +1540,7 @@ impl Binance {
     /// # Errors
     /// Anything the request reports, or a body without a key.
     pub fn open_user_stream(&self) -> Result<UserStream, VenueError> {
-        let url = format!("{}/fapi/v1/listenKey", self.base);
+        let url = format!("{}{}", self.base, self.dialect.wire().listen_key);
         let body = self.send_method(Method::Post, &url, true)?;
         let key = field_str(&body, "listenKey").ok_or_else(|| malformed("listen key", &body))?;
         Ok(UserStream::new(
@@ -1340,7 +1559,7 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn keepalive_user_stream(&self) -> Result<(), VenueError> {
-        let url = format!("{}/fapi/v1/listenKey", self.base);
+        let url = format!("{}{}", self.base, self.dialect.wire().listen_key);
         self.send_method(Method::Put, &url, true).map(|_| ())
     }
 
@@ -1349,7 +1568,7 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn close_user_stream(&self) -> Result<(), VenueError> {
-        let url = format!("{}/fapi/v1/listenKey", self.base);
+        let url = format!("{}{}", self.base, self.dialect.wire().listen_key);
         self.send_method(Method::Delete, &url, true).map(|_| ())
     }
 }
@@ -1545,7 +1764,10 @@ impl Binance {
     /// # Errors
     /// Anything the request reports, or a symbol the venue does not list.
     pub fn exchange_info(&self, symbol: &str) -> Result<String, VenueError> {
-        let body = self.get_public("/fapi/v1/exchangeInfo", &format!("symbol={symbol}"))?;
+        let body = self.get_public(
+            self.dialect.wire().exchange_info,
+            &format!("symbol={symbol}"),
+        )?;
         // The `symbol=` filter is advisory: at least one deployment
         // ignores it and answers with every contract it lists. So the
         // one wanted has to be found inside the response rather than
@@ -1566,7 +1788,10 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn ticker_price(&self, symbol: &str) -> Result<String, VenueError> {
-        self.get_public("/fapi/v1/ticker/price", &format!("symbol={symbol}"))
+        self.get_public(
+            self.dialect.wire().ticker_price,
+            &format!("symbol={symbol}"),
+        )
     }
 }
 
@@ -1581,7 +1806,7 @@ impl Binance {
     /// # Errors
     /// Anything the request reports, or a body without the field.
     pub fn is_hedged_account(&self) -> Result<bool, VenueError> {
-        let body = self.get_signed("/fapi/v1/positionSide/dual", "")?;
+        let body = self.get_signed(self.dialect.wire().position_side_dual, "")?;
         field_bool(&body, "dualSidePosition").ok_or_else(|| malformed("position mode", &body))
     }
 }
