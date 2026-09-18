@@ -77,7 +77,8 @@ use oq_types::{Instrument, QtyLots, Side, TimeInForce};
 use crate::VenueError;
 use crate::creds::Credentials;
 use crate::exec::{
-    Endpoint, Execution, NewOrder, OrderAck, Placed, PositionSide, Reject, Unresolved, decimal,
+    Endpoint, Execution, Handshake, NewOrder, Opening, OrderAck, Placed, PositionSide, Reject,
+    Unresolved, UserStream, decimal,
 };
 use crate::json::{array_field, field_str, malformed, objects};
 
@@ -1480,6 +1481,237 @@ mod account_reads {
         assert_eq!(
             parse_server_time(body).expect("a readable time"),
             1_597_026_383_085
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// The private channel.
+//
+// The socket opens unauthenticated and stays that way until it is told
+// otherwise, which is the difference `UserStream::with_opening` exists
+// for. Everything here is pure: the frames are text and the answers are
+// a function of one message.
+// ---------------------------------------------------------------------
+
+/// Where the private channel lives.
+///
+/// Demo trading is a *different host* here, unlike the REST side where
+/// it is the same host and a header. Two mechanisms for one distinction
+/// is the venue's choice, not this adapter's, and the cost of getting it
+/// wrong is opposite in each direction: the wrong host fails loudly, the
+/// missing header trades live money.
+pub const PRIVATE_WS_LIVE: &str = "wss://ws.okx.com:8443/ws/v5/private";
+/// The demo trading private channel.
+pub const PRIVATE_WS_DEMO: &str = "wss://wspap.okx.com:8443/ws/v5/private";
+
+/// The `login` frame, signed.
+///
+/// The signature covers `timestamp + "GET" + "/users/self/verify"` with
+/// an empty body, and `timestamp` is **seconds** since the epoch — not
+/// the ISO text the REST side signs. One venue, two timestamp formats,
+/// and a frame signed with the wrong one is refused with a message that
+/// says only that the login failed.
+#[must_use]
+pub fn login_frame(key: &str, passphrase: &str, secret: &[u8], now_seconds: i64) -> String {
+    let timestamp = now_seconds.to_string();
+    let signature = sign(secret, &timestamp, "GET", "/users/self/verify", "");
+    format!(
+        r#"{{"op":"login","args":[{{"apiKey":"{key}","passphrase":"{passphrase}","timestamp":"{timestamp}","sign":"{signature}"}}]}}"#
+    )
+}
+
+/// What one message says about a `login`.
+///
+/// A refusal arrives as an `error` event carrying a code, in the same
+/// place the confirmation would, which is why the caller is given three
+/// outcomes and not two.
+#[must_use]
+pub fn login_answer(message: &str) -> Handshake {
+    let event = field_str(message, "event");
+    match event.as_deref() {
+        Some("login") => {
+            // A `login` event with a non-zero code is a refusal wearing
+            // the confirmation's name.
+            if field_str(message, "code").as_deref() == Some("0") {
+                Handshake::Confirmed
+            } else {
+                Handshake::Refused
+            }
+        }
+        Some("error") => Handshake::Refused,
+        // Connection-count notices and anything else the venue chooses
+        // to say first.
+        _ => Handshake::Unrelated,
+    }
+}
+
+/// Subscribe to this account's order updates for one instrument type.
+#[must_use]
+pub fn subscribe_orders_frame(inst_type: &str) -> String {
+    format!(r#"{{"op":"subscribe","args":[{{"channel":"orders","instType":"{inst_type}"}}]}}"#)
+}
+
+/// What one message says about that subscription.
+///
+/// Waited on rather than assumed. A subscription that silently failed
+/// leaves a socket that is logged in, connected, and delivering
+/// nothing — which is the failure this whole handshake exists to make
+/// impossible to mistake for a quiet account.
+#[must_use]
+pub fn subscribe_answer(message: &str) -> Handshake {
+    match field_str(message, "event").as_deref() {
+        Some("subscribe") => Handshake::Confirmed,
+        Some("error") => Handshake::Refused,
+        _ => Handshake::Unrelated,
+    }
+}
+
+impl Okx {
+    /// The private channel, with everything that has to be said on it.
+    ///
+    /// There is no key to renew: this venue authenticates the socket
+    /// rather than issuing a bearer token, so the `UserStream`'s key is
+    /// empty and renewal is a no-op. That is a real difference and not
+    /// an omission — a stream here dies with its connection, not with a
+    /// clock.
+    ///
+    /// # Errors
+    /// When the credentials carry no passphrase, which this venue needs
+    /// and which is not a signature problem however the venue reports it.
+    pub fn user_stream(&self) -> Result<UserStream, VenueError> {
+        let Some(passphrase) = self.creds.passphrase() else {
+            return Err(VenueError::Transport(
+                "OKX needs a passphrase as well as a key and a secret; \
+                 set OQ_VENUE_PASSPHRASE or use Credentials::with_passphrase"
+                    .to_string(),
+            ));
+        };
+        let url = if self.simulated {
+            PRIVATE_WS_DEMO
+        } else {
+            PRIVATE_WS_LIVE
+        };
+        let seconds = (now_ms() + self.clock_offset_ms) / 1_000;
+        Ok(
+            UserStream::new(url.to_string(), String::new()).with_opening(vec![
+                Opening::awaited(
+                    login_frame(
+                        self.creds.key(),
+                        passphrase,
+                        self.creds.secret_bytes(),
+                        seconds,
+                    ),
+                    login_answer,
+                ),
+                Opening::awaited(subscribe_orders_frame("SWAP"), subscribe_answer),
+            ]),
+        )
+    }
+}
+
+#[cfg(test)]
+mod private_channel {
+    use super::*;
+
+    #[test]
+    fn a_login_is_signed_over_the_verify_path_with_a_seconds_timestamp() {
+        let frame = login_frame("thekey", "thepass", b"secret", 1_538_054_050);
+        // The timestamp goes in as seconds, not as the ISO text the
+        // REST side signs.
+        assert!(frame.contains(r#""timestamp":"1538054050""#), "{frame}");
+        assert!(frame.contains(r#""apiKey":"thekey""#));
+        assert!(frame.contains(r#""passphrase":"thepass""#));
+        // The signature is over the documented message, and it is the
+        // whole of it: a signature computed over anything else is
+        // refused with a message that says only "Login failed".
+        let expected = sign(b"secret", "1538054050", "GET", "/users/self/verify", "");
+        assert!(
+            frame.contains(&format!(r#""sign":"{expected}""#)),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn a_login_event_with_a_bad_code_is_a_refusal_wearing_the_confirmations_name() {
+        assert_eq!(
+            login_answer(r#"{"event":"login","code":"0","msg":""}"#),
+            Handshake::Confirmed
+        );
+        assert_eq!(
+            login_answer(r#"{"event":"login","code":"60009","msg":"Login failed."}"#),
+            Handshake::Refused
+        );
+        assert_eq!(
+            login_answer(r#"{"event":"error","code":"60009","msg":"Login failed."}"#),
+            Handshake::Refused
+        );
+        // The venue says this before it says anything useful.
+        assert_eq!(
+            login_answer(r#"{"event":"channel-conn-count","channel":"orders","connCount":"1"}"#),
+            Handshake::Unrelated
+        );
+        // An order update is not an answer to a login.
+        assert_eq!(
+            login_answer(r#"{"arg":{"channel":"orders"},"data":[{"ordId":"1"}]}"#),
+            Handshake::Unrelated
+        );
+    }
+
+    #[test]
+    fn a_subscription_is_waited_on_rather_than_assumed() {
+        assert_eq!(
+            subscribe_answer(r#"{"event":"subscribe","arg":{"channel":"orders"}}"#),
+            Handshake::Confirmed
+        );
+        assert_eq!(
+            subscribe_answer(r#"{"event":"error","code":"60012","msg":"Invalid request"}"#),
+            Handshake::Refused
+        );
+        assert_eq!(
+            subscribe_answer(r#"{"arg":{"channel":"orders"},"data":[]}"#),
+            Handshake::Unrelated
+        );
+    }
+
+    #[test]
+    fn demo_trading_is_a_different_host_here() {
+        let creds = Credentials::new("k", "s")
+            .with_passphrase("p")
+            .expect("a non-empty passphrase");
+        let demo = Okx::at(Endpoint::Testnet, creds.clone())
+            .user_stream()
+            .expect("a passphrase was given");
+        assert_eq!(demo.url(), PRIVATE_WS_DEMO);
+        let live = Okx::at(Endpoint::Live, creds)
+            .user_stream()
+            .expect("a passphrase was given");
+        assert_eq!(live.url(), PRIVATE_WS_LIVE);
+        // Login first, then the subscription that depends on it.
+        assert_eq!(live.opening().len(), 2);
+    }
+
+    #[test]
+    fn a_stream_without_a_passphrase_is_refused_before_it_is_opened() {
+        let creds = Credentials::new("k", "s");
+        assert!(
+            Okx::at(Endpoint::Testnet, creds).user_stream().is_err(),
+            "an unsigned login would be refused by the venue as a bad signature"
+        );
+    }
+
+    #[test]
+    fn a_stream_here_has_no_key_to_renew() {
+        let creds = Credentials::new("k", "s")
+            .with_passphrase("p")
+            .expect("a non-empty passphrase");
+        let stream = Okx::at(Endpoint::Testnet, creds)
+            .user_stream()
+            .expect("a passphrase was given");
+        assert_eq!(
+            stream.key(),
+            "",
+            "this venue authenticates the socket rather than issuing a token"
         );
     }
 }

@@ -26,7 +26,7 @@ use core::time::Duration;
 use std::time::Instant;
 
 use crate::binance::{VenueError, parse_user_event};
-use crate::exec::{UserEvent, UserStream};
+use crate::exec::{Handshake, Opening, UserEvent, UserStream};
 
 /// How often this venue speaks on a stream with nothing to report.
 ///
@@ -118,6 +118,16 @@ impl UserStreamReader {
         reader
             .set_read_timeout(read_timeout)
             .map_err(|e| VenueError::Transport(e.to_string()))?;
+        // A venue that authenticates in its URL has nothing to say here
+        // and this costs it nothing. One that authenticates on the
+        // socket is not connected until this returns: an open socket
+        // that never logged in answers every read with a timeout, which
+        // is the shape of a quiet account and not of a broken one.
+        if !stream.opening().is_empty() {
+            perform_opening(stream.opening(), &mut reader, OPENING_READ_BUDGET)?;
+            // Whatever answered is also evidence the link is alive.
+            reader.last_message = Instant::now();
+        }
         Ok(reader)
     }
 
@@ -234,6 +244,264 @@ pub const KEY_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 /// How often to renew.
 pub const KEY_RENEWAL: Duration = Duration::from_secs(20 * 60);
+
+/// How many reads an opening frame may go unanswered before the stream
+/// is called unusable.
+///
+/// Counted in reads rather than in seconds because a read here is
+/// already bounded by the socket's timeout, and a budget in messages is
+/// a budget a test can exhaust without waiting for a clock.
+const OPENING_READ_BUDGET: usize = 20;
+
+/// The two things opening a stream needs from a socket.
+///
+/// A trait so the sequence below can be exercised without one. A login
+/// that is only ever run against a live venue is a login that gets
+/// debugged in production, and this one cannot be reached from a unit
+/// test any other way.
+trait Wire {
+    fn send(&mut self, text: &str) -> Result<(), VenueError>;
+    /// `Ok(None)` when the read timed out and nothing arrived.
+    fn read(&mut self) -> Result<Option<String>, VenueError>;
+}
+
+impl Wire for UserStreamReader {
+    fn send(&mut self, text: &str) -> Result<(), VenueError> {
+        self.socket
+            .send(tungstenite::Message::Text(text.into()))
+            .map_err(|e| VenueError::Transport(e.to_string()))
+    }
+
+    fn read(&mut self) -> Result<Option<String>, VenueError> {
+        match self.socket.read() {
+            Ok(tungstenite::Message::Text(text)) => Ok(Some(text.to_string())),
+            // A ping or a pong is the link working, not an answer.
+            Ok(_) => Ok(None),
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(VenueError::Transport(e.to_string())),
+        }
+    }
+}
+
+/// Send each opening frame and wait for the answer it is owed.
+///
+/// Sequential rather than pipelined: a venue that requires a login
+/// before a subscription will refuse the subscription that arrived
+/// first, and the refusal is easy to read as the login having failed.
+fn perform_opening(
+    opening: &[Opening],
+    wire: &mut impl Wire,
+    budget: usize,
+) -> Result<(), VenueError> {
+    for step in opening {
+        wire.send(step.frame())?;
+        let Some(answer) = step.answer() else {
+            continue;
+        };
+        let mut reads = 0usize;
+        loop {
+            if reads >= budget {
+                return Err(VenueError::Transport(
+                    "the venue never answered the frame that opens this stream; \
+                     a socket that is open but not logged in delivers silence, \
+                     which reads as a quiet account"
+                        .to_string(),
+                ));
+            }
+            reads += 1;
+            let Some(text) = wire.read()? else { continue };
+            match answer(&text) {
+                Handshake::Confirmed => break,
+                Handshake::Refused => {
+                    return Err(VenueError::Transport(format!(
+                        "the venue refused the frame that opens this stream: {text}"
+                    )));
+                }
+                // Not about this frame. A venue is free to say something
+                // else first and one of them does.
+                Handshake::Unrelated => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod opening_sequence {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// A socket that was never opened.
+    struct Fake {
+        sent: Vec<String>,
+        /// `None` is a read that timed out.
+        inbox: VecDeque<Option<String>>,
+    }
+
+    impl Fake {
+        fn with(messages: Vec<Option<&str>>) -> Self {
+            Self {
+                sent: Vec::new(),
+                inbox: messages
+                    .into_iter()
+                    .map(|m| m.map(str::to_string))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Wire for Fake {
+        fn send(&mut self, text: &str) -> Result<(), VenueError> {
+            self.sent.push(text.to_string());
+            Ok(())
+        }
+        fn read(&mut self) -> Result<Option<String>, VenueError> {
+            // An exhausted inbox is a socket with nothing to say, which
+            // is a timeout and not an error.
+            Ok(self.inbox.pop_front().flatten())
+        }
+    }
+
+    /// The shape of answer a venue that logs in on the socket gives.
+    fn login_answer(message: &str) -> Handshake {
+        if message.contains(r#""event":"login""#) {
+            if message.contains(r#""code":"0""#) {
+                Handshake::Confirmed
+            } else {
+                Handshake::Refused
+            }
+        } else if message.contains(r#""event":"error""#) {
+            Handshake::Refused
+        } else {
+            Handshake::Unrelated
+        }
+    }
+
+    #[test]
+    fn a_venue_that_authenticates_in_its_url_sends_nothing() {
+        let mut wire = Fake::with(vec![]);
+        perform_opening(&[], &mut wire, OPENING_READ_BUDGET).expect("no frames is not a failure");
+        assert!(
+            wire.sent.is_empty(),
+            "an empty opening must cost the existing venue nothing"
+        );
+    }
+
+    #[test]
+    fn a_login_is_confirmed_before_the_next_frame_is_sent() {
+        // Sequential on purpose: a subscription that overtakes the login
+        // is refused, and that refusal reads like a failed login.
+        let mut wire = Fake::with(vec![Some(r#"{"event":"login","code":"0"}"#)]);
+        perform_opening(
+            &[
+                Opening::awaited("login".to_string(), login_answer),
+                Opening::sent("subscribe".to_string()),
+            ],
+            &mut wire,
+            OPENING_READ_BUDGET,
+        )
+        .expect("a confirmed login");
+        assert_eq!(wire.sent, vec!["login", "subscribe"]);
+    }
+
+    #[test]
+    fn a_refused_login_fails_the_connection_and_carries_the_reason() {
+        // The failure that arrives exactly where the confirmation would.
+        let refusal = r#"{"event":"error","code":"60009","msg":"Login failed."}"#;
+        let mut wire = Fake::with(vec![Some(refusal)]);
+        let e = perform_opening(
+            &[
+                Opening::awaited("login".to_string(), login_answer),
+                Opening::sent("subscribe".to_string()),
+            ],
+            &mut wire,
+            OPENING_READ_BUDGET,
+        )
+        .expect_err("a refused login is not a usable stream");
+        assert!(
+            format!("{e}").contains("Login failed."),
+            "the venue's own words are the ones worth reporting: {e}"
+        );
+        assert_eq!(
+            wire.sent,
+            vec!["login"],
+            "nothing may be subscribed on a stream that did not log in"
+        );
+    }
+
+    #[test]
+    fn a_message_that_is_not_an_answer_does_not_end_the_wait() {
+        // A venue is free to say something else first, and one does.
+        let mut wire = Fake::with(vec![
+            Some(r#"{"event":"channel-conn-count","channel":"orders"}"#),
+            None,
+            Some(r#"{"event":"login","code":"0"}"#),
+        ]);
+        perform_opening(
+            &[Opening::awaited("login".to_string(), login_answer)],
+            &mut wire,
+            OPENING_READ_BUDGET,
+        )
+        .expect("an unrelated message is not a refusal");
+    }
+
+    #[test]
+    fn a_login_that_is_never_answered_gives_up_rather_than_waiting_forever() {
+        // The whole point of the budget: an open socket that never
+        // logged in answers every read with a timeout, which is exactly
+        // what a quiet account looks like.
+        let mut wire = Fake::with(vec![None; 4]);
+        let e = perform_opening(
+            &[Opening::awaited("login".to_string(), login_answer)],
+            &mut wire,
+            3,
+        )
+        .expect_err("silence is not a login");
+        assert!(format!("{e}").contains("never answered"), "{e}");
+    }
+
+    #[test]
+    fn a_frame_that_needs_no_answer_does_not_wait_for_one() {
+        let mut wire = Fake::with(vec![]);
+        perform_opening(
+            &[Opening::sent("subscribe".to_string())],
+            &mut wire,
+            OPENING_READ_BUDGET,
+        )
+        .expect("a frame that awaits nothing");
+        assert_eq!(wire.sent, vec!["subscribe"]);
+    }
+
+    #[test]
+    fn two_openings_are_the_same_when_the_same_thing_gets_sent() {
+        // Equality is over the frame, because comparing two function
+        // pointers is not something the language promises an answer to.
+        fn other_answer(_: &str) -> Handshake {
+            Handshake::Confirmed
+        }
+        let a = Opening::awaited("login".to_string(), login_answer);
+        let b = Opening::awaited("login".to_string(), other_answer);
+        assert_eq!(a, b);
+        assert_ne!(a, Opening::sent("login".to_string()));
+        assert_ne!(a, Opening::awaited("other".to_string(), login_answer));
+    }
+
+    #[test]
+    fn a_login_frame_does_not_print_its_signature() {
+        // It carries an HMAC over the account's secret.
+        let opening = Opening::awaited(r#"{"op":"login","sign":"AAAA"}"#.to_string(), login_answer);
+        let shown = format!("{opening:?}");
+        assert!(!shown.contains("AAAA"), "a signature must not reach a log");
+        assert!(shown.contains("awaits_answer"));
+    }
+}
 
 #[cfg(test)]
 mod tests {
