@@ -1443,6 +1443,202 @@ mod account_reads {
     }
 }
 
+/// Read `/api/v5/market/candles`.
+///
+/// Two differences from the venue this workspace met first, and both are
+/// silent when missed.
+///
+/// **The rows arrive newest first.** A warm-up fed backwards computes
+/// its indicators on time running the wrong way and returns numbers
+/// rather than an error, so they are reversed here — once, where the
+/// venue's order is known.
+///
+/// **`vol` counts contracts**, like every other size on this venue, and
+/// is kept that way: `qty_scale` counts contracts too.
+///
+/// Field positions happen to match the first venue's — timestamp, open,
+/// high, low, close, volume — which is worth saying out loud, because it
+/// means an index copied from there is right for the wrong reason.
+///
+/// # Errors
+/// When the envelope is a failure, or a row this build needs cannot be
+/// read.
+pub fn parse_candles(
+    body: &str,
+    price_scale: u8,
+    qty_scale: u8,
+) -> Result<Vec<crate::klines::Kline>, VenueError> {
+    let Some(code) = field_str(body, "code") else {
+        return Err(malformed("candles", body));
+    };
+    if code != "0" {
+        return Err(VenueError::Venue {
+            status: 200,
+            body: body.to_string(),
+        });
+    }
+    let Some(data) = array_field(body, "data") else {
+        return Err(malformed("candles", body));
+    };
+    // `rows` splits an array of arrays and counts from the outside, so
+    // it wants the brackets `array_field` just removed. Put them back
+    // rather than teaching it a second shape.
+    let rows = crate::klines::rows(&format!("[{data}]"));
+    if rows.is_empty() {
+        return Err(malformed("candles", body));
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        if r.len() < 6 {
+            return Err(malformed("candle row", body));
+        }
+        let at = |i: usize, scale: u8| -> Result<i64, VenueError> {
+            crate::klines::scaled(&r[i], scale).ok_or_else(|| malformed("candle field", body))
+        };
+        out.push(crate::klines::Kline {
+            open_ms: r[0]
+                .parse::<i64>()
+                .map_err(|_| malformed("candle timestamp", body))?,
+            high: at(2, price_scale)?,
+            low: at(3, price_scale)?,
+            close: at(4, price_scale)?,
+            volume: at(5, qty_scale)?,
+        });
+    }
+    // Oldest first, which is the order a warm-up replays in.
+    out.reverse();
+    Ok(out)
+}
+
+impl Okx {
+    /// Recent one-minute bars, for a warm-up.
+    ///
+    /// Unsigned: history is public, so a warm-up cannot fail for a
+    /// reason that has anything to do with this account's keys.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports.
+    pub fn recent_bars(
+        &self,
+        inst_id: &str,
+        minutes: usize,
+    ) -> Result<Vec<crate::klines::Kline>, VenueError> {
+        let listing = self.listing(inst_id)?;
+        // The venue caps a page at 300. Clamped rather than paged: a
+        // silent second request would make the range that comes back
+        // differ from the one that was asked for.
+        let limit = minutes.clamp(1, 300);
+        let body = self.get_public(
+            "/api/v5/market/candles",
+            &format!("instId={inst_id}&bar=1m&limit={limit}"),
+        )?;
+        parse_candles(&body, listing.price_scale, listing.size_scale)
+    }
+}
+
+/// The shape the engine trades against, from a listing.
+///
+/// Pure, so the unit decision is testable without a socket — and it is
+/// the decision most worth pinning: `sized` rather than `linear`,
+/// because a quantity here counts contracts and `contract_size` says
+/// what one is worth. `linear` would declare that a quantity *is* the
+/// underlying, which is the hundredfold error stated as a type.
+#[must_use]
+pub fn instrument_of(listing: &Listing) -> Instrument {
+    Instrument::sized(
+        listing.price_scale,
+        listing.size_scale,
+        listing.contract_value,
+    )
+    .with_grid(listing.price_tick, listing.lot_size)
+}
+
+impl crate::account::Account for Okx {
+    fn id(&self) -> &'static str {
+        // Matches the market-data side's name for the same venue, so a
+        // run's records and its archive file under one name.
+        "okx-swap"
+    }
+
+    fn id_rules(&self) -> crate::broker::IdRules {
+        crate::broker::IdRules::OKX
+    }
+
+    fn recent_bars(
+        &self,
+        symbol: &str,
+        minutes: usize,
+    ) -> Result<Vec<crate::klines::Kline>, VenueError> {
+        Self::recent_bars(self, symbol, minutes)
+    }
+
+    fn sync_clock(&mut self) -> Result<i64, VenueError> {
+        Self::sync_clock(self)
+    }
+
+    fn round_trip_ms(&self) -> i64 {
+        Self::round_trip_ms(self)
+    }
+
+    /// The listing, as the shape the engine trades against.
+    ///
+    /// `sized` rather than `linear`: a quantity here is a count of
+    /// contracts and `contract_size` is what one is worth, which is the
+    /// distinction `Execution::place` depends on.
+    ///
+    /// The listing's `min_size` has nowhere to go — `Instrument` carries
+    /// a minimum notional, and a minimum contract count is not one.
+    /// `Listing::size_text` still enforces it for a caller converting a
+    /// coin amount, so the floor is checked on the path that has the
+    /// listing and unchecked on the path that has only this. Recorded
+    /// rather than papered over with a converted number that would be
+    /// wrong whenever the price moved.
+    fn instrument(&self, symbol: &str) -> Result<Instrument, String> {
+        let listing = self.listing(symbol).map_err(|e| e.to_string())?;
+        Ok(instrument_of(&listing))
+    }
+
+    fn is_hedged(&self) -> Result<bool, VenueError> {
+        self.is_hedged_account()
+    }
+
+    fn positions(&self, symbol: &str) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+        Self::positions(self, symbol)
+    }
+
+    /// The settlement currency is USDT, because these are USDT-margined
+    /// swaps. A USDC-margined or coin-margined account settles in
+    /// something else and would need this to say so rather than to
+    /// report a balance the account does not hold.
+    fn balances(&self) -> Result<crate::binance::AccountSnapshot, VenueError> {
+        Self::balances(self, "USDT")
+    }
+
+    fn open_orders(&self, symbol: &str) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+        Self::open_orders(self, symbol)
+    }
+
+    fn open_user_stream(&self) -> Result<UserStream, VenueError> {
+        self.user_stream()
+    }
+
+    /// Nothing to renew.
+    ///
+    /// This venue authenticates the socket rather than issuing a bearer
+    /// token, so there is no key with an expiry and no request that
+    /// extends one. A no-op rather than an error: the caller's schedule
+    /// is correct, there is simply nothing for it to do here.
+    fn keepalive_user_stream(&self) -> Result<(), VenueError> {
+        Ok(())
+    }
+
+    /// Nothing to close, for the same reason. The stream ends when the
+    /// socket does.
+    fn close_user_stream(&self) -> Result<(), VenueError> {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------
 // The private channel.
 //
@@ -1773,6 +1969,99 @@ mod account_stream {
             panic!("kept as itself");
         };
         assert_eq!(kind, "positions");
+    }
+}
+
+#[cfg(test)]
+mod account_trait {
+    use super::*;
+
+    /// BTC-USDT-SWAP as the venue lists it: one contract is 0.01 BTC,
+    /// the price grid is 0.1, the lot size is 0.01 contracts.
+    fn btc_listing() -> Listing {
+        Listing {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            contract_value: 1_000_000,
+            price_scale: 1,
+            price_tick: 1,
+            size_scale: 2,
+            lot_size: 1,
+            min_size: 1,
+        }
+    }
+
+    #[test]
+    fn a_quantity_is_a_contract_count_and_the_instrument_says_so() {
+        let i = instrument_of(&btc_listing());
+        // `linear` would say a quantity is the underlying, which is the
+        // hundredfold error written as a type.
+        assert_eq!(
+            i.contract_size, 1_000_000,
+            "one contract is 0.01 BTC at CONTRACT_SCALE"
+        );
+        assert_eq!(i.qty_scale, 2);
+        assert_eq!(i.price_scale, 1);
+        assert_eq!(i.price_tick, 1);
+        assert_eq!(i.qty_step, 1);
+        // One lot is one hundredth of a contract, which is a ten
+        // thousandth of a BTC. The engine gets that from the pair.
+        assert!(i.qty_on_grid(oq_types::QtyLots(500)));
+    }
+
+    /// Newest first, which is the order this venue answers in.
+    const CANDLES: &str = r#"{"code":"0","msg":"","data":[
+        ["1700000120000","78100","78200","78050","78150","10","0.1","7815","1"],
+        ["1700000060000","78000","78150","77950","78100","20","0.2","15620","1"]]}"#;
+
+    #[test]
+    fn candles_come_back_newest_first_and_are_replayed_oldest_first() {
+        let bars = parse_candles(CANDLES, 1, 2).expect("readable candles");
+        assert_eq!(bars.len(), 2);
+        assert_eq!(
+            bars[0].open_ms, 1_700_000_060_000,
+            "a warm-up replays forwards; fed backwards it computes \
+             indicators on time running the wrong way and returns a \
+             number rather than an error"
+        );
+        assert_eq!(bars[1].open_ms, 1_700_000_120_000);
+        // Prices at the listing's scale: 78150.0 is 781500 at one dp.
+        assert_eq!(bars[1].close, 781_500);
+        assert_eq!(bars[1].high, 782_000);
+        assert_eq!(bars[1].low, 780_500);
+        // Volume stays in contracts, like every other size here: 10
+        // contracts at a scale of two.
+        assert_eq!(bars[1].volume, 1_000);
+    }
+
+    #[test]
+    fn a_candle_refusal_is_not_an_empty_history() {
+        // The same HTTP-200 trap as everywhere else on this venue.
+        let body = r#"{"code":"51001","msg":"Instrument ID does not exist","data":[]}"#;
+        assert!(parse_candles(body, 1, 2).is_err());
+        // And an envelope with no rows is a failed read, not a market
+        // that has never traded.
+        assert!(parse_candles(r#"{"code":"0","data":[]}"#, 1, 2).is_err());
+    }
+
+    #[test]
+    fn the_adapter_names_itself_the_way_the_capture_side_does() {
+        use crate::account::Account as _;
+        let okx = Okx::at(Endpoint::Testnet, Credentials::new("k", "s"));
+        assert_eq!(okx.id(), "okx-swap");
+        // Narrower than the first venue's, so an id that works there is
+        // not guaranteed here.
+        assert_eq!(okx.id_rules().max_len, 32);
+        assert!(!okx.id_rules().punctuation_allowed);
+    }
+
+    #[test]
+    fn a_stream_here_needs_neither_renewal_nor_closing() {
+        use crate::account::Account as _;
+        // Not an omission: this venue authenticates the socket instead
+        // of issuing a token, so there is no expiry to outrun.
+        let okx = Okx::at(Endpoint::Testnet, Credentials::new("k", "s"));
+        assert!(okx.keepalive_user_stream().is_ok());
+        assert!(okx.close_user_stream().is_ok());
     }
 }
 
