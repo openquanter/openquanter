@@ -115,6 +115,38 @@ the stale cancel and promoting the replacement into a single
 because the default behaviour is a book that believes an order was
 cancelled while it is resting.
 
+### Kraken Futures, read before writing
+
+Three findings, and the first one has already been acted on.
+
+**Order ids are names, not numbers.** `179f9af8-e45e-469d-b3e9-2fd4675cb7d0`.
+`OrderAck::venue_id` and `OrderUpdate::venue_id` were `i64`, which was
+true of the first two venues and false of this one — so the type was
+carrying a constraint no caller needed, since `L4` makes `client_id` the
+join key precisely so a venue's handle can be anything. Fixed ahead of
+the adapter.
+
+**A client order id is globally unique here, and that is a gift.**
+`L4` records that Binance's `clientOrderId` is unique only among *open*
+orders, so it is not an idempotency token — and all three surveyed
+projects treated it as one. Kraken's is unique across the account's
+history, up to 100 characters, and a repeat is refused by name
+(`clientOrderIdAlreadyExist`). That makes a resend after an
+[`Placed::Unknown`] answerable by the venue rather than by inference,
+which is the single hardest case in the order path. The adapter should
+use it; nothing else here can.
+
+**Sizes and prices arrive as JSON numbers**, not as decimal strings.
+Both other venues quote, and this crate keeps the venue's text precisely
+because a float cannot hold what the text says. Here the text *is* a
+float literal, so the raw field is still what gets kept — but nothing
+downstream should be surprised to find `9392.749993345933` where the
+other venues would have sent `"9392.75"`.
+
+Rejections arrive inside HTTP 200, as `sendStatus.status` plus a
+`REJECT` event — the third of four families to do it that way, and the
+reason V8 below says the body is the rule.
+
 ### What other implementations paid for
 
 NautilusTrader ships a Hyperliquid adapter written in Rust, and its
@@ -266,7 +298,7 @@ else, with a conformance case for exactly this.
 |---|---|---|---|
 | **Aster** | Binance | High — documentation read | Whether its perpetual semantics match Binance's as closely as its signing does |
 | **Bitget** | OKX (signing only) | Medium — signing read, but the target moved | Mid-migration to UTA v3; and the family is the signature only — the success code is `"00000"` rather than `"0"`, and sizes are in **coins** where OKX counts contracts |
-| **Kraken Futures** | Kraken | Medium — algorithm confirmed, order semantics not | Needs SHA-512; symbols are `PF_XBTUSD`, so symbol mapping is not cosmetic |
+| **Kraken Futures** | Kraken | High — algorithm, order and position responses read | SHA-512 is in (`oq-hash`); symbols are `PF_XBTUSD`; sizes are JSON numbers; and its globally-unique client id is worth using rather than ignoring |
 | **Backpack** | Ed25519 | Medium — signing scheme read | Parameters are sorted alphabetically before signing, which is a whole class of bug on its own |
 | **Hyperliquid** | secp256k1 | Medium-high — both the venue's docs and a Rust adapter's notes read | Everything in "What other implementations paid for" |
 | **Lighter** | Own scheme | **Low** | Per-API-key nonces, key indices 0–254 with 0–3 reserved, and a signing scheme this survey has not yet read properly |
