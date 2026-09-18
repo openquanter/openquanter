@@ -38,6 +38,31 @@ with its own request/response identity model.
 
 This is the survey's best result: it removed work rather than adding it.
 
+### Bitget is moving too, and it started three days ago
+
+Bitget began migrating classic accounts to a **Unified Trading Account**
+on **2026-09-15**, in batches by user activity. The API consequence is
+stated plainly in their upgrade guide: **a UTA key cannot call the
+classic endpoints**. Integrations on the classic API (v2) have to move
+to the UTA API (v3).
+
+So the `/api/v2/mix/*` paths this document would have targeted are the
+ones that stop working for every account that gets migrated, and the
+migration is under way rather than announced. A classic-API adapter
+would be the Coinbase mistake made a second time, with three days'
+notice instead of nine.
+
+The target is UTA v3. That is not a rename: it is a different account
+model — one balance across products rather than a margin coin per
+contract — so the position and balance reads are shaped differently even
+where the signing is not.
+
+**Two of seven venues turned out to be mid-migration.** That is the
+strongest argument this survey produced for doing the survey: both were
+found by reading the venue's own documentation before writing an
+adapter, and both would otherwise have been found by an adapter that
+stopped working.
+
 ### The families
 
 | Family | Members | Shape |
@@ -240,7 +265,7 @@ else, with a conformance case for exactly this.
 | Venue | Family | Confidence | The thing most likely to bite |
 |---|---|---|---|
 | **Aster** | Binance | High — documentation read | Whether its perpetual semantics match Binance's as closely as its signing does |
-| **Bitget** | OKX | High — documentation read | Header names differ; the signature covers `?` + query string explicitly |
+| **Bitget** | OKX (signing only) | Medium — signing read, but the target moved | Mid-migration to UTA v3; and the family is the signature only — the success code is `"00000"` rather than `"0"`, and sizes are in **coins** where OKX counts contracts |
 | **Kraken Futures** | Kraken | Medium — algorithm confirmed, order semantics not | Needs SHA-512; symbols are `PF_XBTUSD`, so symbol mapping is not cosmetic |
 | **Backpack** | Ed25519 | Medium — signing scheme read | Parameters are sorted alphabetically before signing, which is a whole class of bug on its own |
 | **Hyperliquid** | secp256k1 | Medium-high — both the venue's docs and a Rust adapter's notes read | Everything in "What other implementations paid for" |
@@ -256,8 +281,12 @@ ways nobody can see — which is worse than not having it.
 1. **Finish OKX** — the account-side reads landed, the handshake landed;
    the reader and `Account` remain. It is the template, and a template
    with a hole in it teaches the hole.
-2. **Aster**, then **Bitget** — the family test. Cheap, and they either
-   validate the abstractions or condemn them.
+2. **Aster** — the family test, and it passed: the whole venue is a path
+   table, because its API *is* Binance's.
+9. **Bitget on UTA v3**, once its shape is read. Demoted from "cheap":
+   the shared family turned out to be the signature and nothing else —
+   a different success code, coins instead of contracts, and an account
+   model that is being replaced while this is written.
 3. **`oq-hash` gains SHA-512**, then **Kraken Futures** — a new family,
    with the one piece of cryptography that is honestly hand-writable.
 4. **The dependency decision**, explicitly, with the budget table edited
