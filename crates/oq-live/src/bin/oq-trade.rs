@@ -40,6 +40,7 @@ use oq_gateway::Credentials;
 use oq_gateway::account::Account;
 use oq_gateway::binance::Binance;
 use oq_gateway::exec::Endpoint;
+use oq_gateway::okx::Okx;
 use oq_l2feed::venue::Deployment;
 use oq_live::run::{RunConfig, run, smallest_allowed};
 use oq_risk::Limits;
@@ -53,6 +54,9 @@ USAGE:
     OQ_VENUE_KEY=<key> OQ_VENUE_SECRET=<secret> oq-trade [OPTIONS]
 
 OPTIONS:
+    --venue <NAME>         binance | okx [default: binance]
+                           The symbol is the venue's own spelling:
+                           BTCUSDT on one, BTC-USDT-SWAP on the other.
     --symbol <SYMBOL>      Contract [default: BTCUSDT]
     --strategy <NAME>      observe | probe [default: observe]
     --window-ms <MS>       Tick width [default: 1000]
@@ -317,7 +321,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let venue: Box<dyn Account> = Box::new(Binance::at(endpoint, creds));
+    // Named, not inferred from the symbol. A symbol that parses on two
+    // venues would otherwise pick one silently, and the one it picked
+    // would be whichever this file happened to check first.
+    let venue_name = value("--venue").unwrap_or_else(|| "binance".to_string());
+    let venue: Box<dyn Account> = match venue_name.as_str() {
+        "binance" => Box::new(Binance::at(endpoint, creds)),
+        "okx" => Box::new(Okx::at(endpoint, creds)),
+        other => {
+            eprintln!(
+                "venue            {other:?} is not a venue this build speaks; \
+                 try binance or okx"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    // Which venue, said once, before anything is sent to it. The run's
+    // log is read afterwards by someone deciding what happened, and
+    // `--symbol BTCUSDT` against the wrong venue fails in a way that
+    // looks like a bad contract rather than a bad flag.
+    println!("venue            {} ({deployment:?})", venue.id());
 
     match strategy_name.as_str() {
         "observe" => run(venue, |_| Observe { ticks: 0 }, &cfg),
