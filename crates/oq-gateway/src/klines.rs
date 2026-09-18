@@ -91,7 +91,7 @@ fn rows(body: &str) -> Vec<Vec<String>> {
 }
 
 /// A quoted or bare decimal as an integer count at `scale`.
-fn scaled(text: &str, scale: u8) -> Option<i64> {
+pub(crate) fn scaled(text: &str, scale: u8) -> Option<i64> {
     let t = text.trim();
     let (whole, frac) = t.split_once('.').unwrap_or((t, ""));
     let mut digits = String::from(whole);

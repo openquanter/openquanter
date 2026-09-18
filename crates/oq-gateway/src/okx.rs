@@ -906,25 +906,19 @@ impl Okx {
 
     /// Both legs of one instrument, as the venue holds them.
     ///
-    /// `contract_value` is the caller's because it comes from the
-    /// listing and does not change: fetching it here would put a second
-    /// request on a path that runs every minute, to learn something that
-    /// was already known.
-    ///
     /// # Errors
     /// Whatever the venue or the transport reports, or a payload this
     /// build cannot read.
     pub fn positions(
         &self,
         inst_id: &str,
-        contract_value: i64,
     ) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
         let body = self.send(
             "GET",
             &format!("/api/v5/account/positions?instType=SWAP&instId={inst_id}"),
             "",
         )?;
-        parse_positions(&body, contract_value)
+        parse_positions(&body)
     }
 
     /// The account's balance in one settlement currency.
@@ -943,17 +937,13 @@ impl Okx {
     /// # Errors
     /// Whatever the venue or the transport reports, or a payload this
     /// build cannot read.
-    pub fn open_orders(
-        &self,
-        inst_id: &str,
-        contract_value: i64,
-    ) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+    pub fn open_orders(&self, inst_id: &str) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
         let body = self.send(
             "GET",
             &format!("/api/v5/trade/orders-pending?instType=SWAP&instId={inst_id}"),
             "",
         )?;
-        parse_open_orders(&body, contract_value)
+        parse_open_orders(&body)
     }
 
     /// Whether this account reports a long and a short separately.
@@ -1070,38 +1060,10 @@ fn status_of(state: &str) -> Option<&'static str> {
     }
 }
 
-/// A contract count as a quantity of the underlying, exactly.
-///
-/// `sz` and `pos` count contracts; everything above this module counts
-/// the underlying. This is the module header's hundredfold error taken
-/// in the direction a *read* makes it — and a read gets no balance check
-/// downstream to catch it, so it is the quieter of the two.
-///
-/// Exact rather than rounded, and it can be: the divisor is a power of
-/// ten, so the quotient terminates and the text below is all of it. A
-/// float here would turn a position into 57.999999999999993 lots one
-/// call later, which is what `amount_text` exists to prevent.
-fn qty_text_from_contracts(contracts: &str, contract_value: i64) -> Option<String> {
-    if contract_value <= 0 {
-        return None;
-    }
-    let trimmed = contracts.trim();
-    let negative = trimmed.starts_with('-');
-    let (count, count_scale) = parse_decimal(trimmed.trim_start_matches('-'))?;
-    let scaled = i128::from(count) * i128::from(contract_value);
-    // Derived rather than written as 8, so that a change to
-    // `CONTRACT_SCALE` moves this with it instead of past it.
-    let contract_scale = u8::try_from(oq_types::CONTRACT_SCALE.ilog10()).ok()?;
-    let scale = count_scale.checked_add(contract_scale)?;
-    let value = i64::try_from(scaled).ok()?;
-    let text = decimal(value, scale);
-    Some(if negative { format!("-{text}") } else { text })
-}
-
 /// Read `/api/v5/account/positions`.
 ///
-/// `contract_value` comes from the listing, because nothing in the
-/// response says how much of the underlying one contract is.
+/// Sizes stay in contracts, which is the unit `Instrument` counts in on
+/// this venue.
 ///
 /// # Sign comes from `posSide`, not from `pos`
 ///
@@ -1121,10 +1083,7 @@ fn qty_text_from_contracts(contracts: &str, contract_value: i64) -> Option<Strin
 /// When the envelope is a failure, or a field this build needs cannot be
 /// read. Named per field: the usual cause is a renamed key and the fix
 /// depends on which one.
-pub fn parse_positions(
-    body: &str,
-    contract_value: i64,
-) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+pub fn parse_positions(body: &str) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
     let mut out = Vec::new();
     for item in envelope(body, "positions")? {
         let Some(inst_id) = field_str(&item, "instId") else {
@@ -1145,9 +1104,13 @@ pub fn parse_positions(
         if pos.trim().is_empty() {
             continue;
         }
-        let Some(magnitude) = qty_text_from_contracts(&pos, contract_value) else {
-            return Err(malformed("position size in contracts", &item));
-        };
+        // The venue's own text, kept exactly. `pos` counts contracts and
+        // so does `Instrument`'s quantity on this venue — `place` says
+        // so: "a quantity is a number of contracts on both venues". A
+        // conversion to coins here would be read back through
+        // `instrument.qty_scale` as if it were contracts, off by the
+        // contract size in the direction nothing downstream can see.
+        let magnitude = pos.trim().to_string();
         let amount_text = match leg {
             "SHORT" => format!("-{}", magnitude.trim_start_matches('-')),
             "LONG" => magnitude.trim_start_matches('-').to_string(),
@@ -1230,17 +1193,13 @@ pub fn parse_balance(
 
 /// Read `/api/v5/trade/orders-pending`.
 ///
-/// Sizes arrive in contracts here too, and are converted for the same
-/// reason.
+/// Sizes arrive in contracts and stay in them.
 ///
 /// # Errors
 /// When the envelope is a failure, or a field this build needs cannot be
 /// read — including a side or a state this build does not know, which is
 /// refused rather than guessed.
-pub fn parse_open_orders(
-    body: &str,
-    contract_value: i64,
-) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+pub fn parse_open_orders(body: &str) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
     let mut out = Vec::new();
     for item in envelope(body, "open orders")? {
         let Some(symbol) = field_str(&item, "instId") else {
@@ -1273,9 +1232,8 @@ pub fn parse_open_orders(
             if raw.trim().is_empty() {
                 return Ok(0.0);
             }
-            qty_text_from_contracts(&raw, contract_value)
-                .and_then(|t| t.parse::<f64>().ok())
-                .ok_or_else(|| malformed(key, &item))
+            // Contracts, like every other size this venue reports.
+            raw.parse::<f64>().map_err(|_| malformed(key, &item))
         };
         out.push(crate::binance::OpenOrder {
             symbol,
@@ -1324,10 +1282,6 @@ pub fn parse_server_time(body: &str) -> Result<i64, VenueError> {
         .ok_or_else(|| malformed("server time", body))
 }
 
-/// One contract of BTC-USDT-SWAP is 0.01 BTC, at `CONTRACT_SCALE`.
-#[cfg(test)]
-const BTC_CT_VAL: i64 = 1_000_000;
-
 #[cfg(test)]
 mod account_reads {
     use super::*;
@@ -1338,7 +1292,7 @@ mod account_reads {
         // reading `code` would report a flat account here, and a flat
         // account is an instruction to open a position.
         let body = r#"{"code":"50011","msg":"Too many requests","data":[]}"#;
-        let e = parse_positions(body, BTC_CT_VAL).expect_err("a refusal is not a flat account");
+        let e = parse_positions(body).expect_err("a refusal is not a flat account");
         assert!(
             matches!(e, VenueError::Venue { status: 200, .. }),
             "a non-zero code must surface as the venue refusing: {e:?}"
@@ -1346,24 +1300,28 @@ mod account_reads {
     }
 
     #[test]
-    fn contracts_become_the_underlying_exactly() {
-        // Five contracts of 0.01 BTC is 0.05 BTC, and the text says so
-        // to the last digit. This is the hundredfold error the module
-        // header names, in the direction a read makes it.
+    fn a_position_reads_back_through_the_instruments_own_scale() {
+        // The defect this test exists for: sizes were converted into
+        // coins here, and `oq-live` reads them back with
+        // `instrument.qty_scale` — which on this venue counts
+        // *contracts*, because `Execution::place` sends `order.qty` as a
+        // contract count. Five contracts came back as "0.05000000", and
+        // 0.05 read at a contract scale is not five of anything.
+        //
+        // BTC-USDT-SWAP: one contract is 0.01 BTC and the lot size is
+        // 0.01 contracts, so the instrument's quantity scale is 2.
+        const QTY_SCALE: u8 = 2;
+        let body = r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP",
+            "posSide":"long","pos":"5","avgPx":"78313.4","upl":"-0.5"}]}"#;
+        let legs = parse_positions(body).expect("a readable position");
+        // What `adopted_lots` does to the text this returns.
+        let lots = crate::klines::scaled(&legs[0].amount_text, QTY_SCALE)
+            .expect("the venue's text is a number");
         assert_eq!(
-            qty_text_from_contracts("5", BTC_CT_VAL).as_deref(),
-            Some("0.05000000")
+            lots, 500,
+            "five contracts at a scale of two is 500 lots; anything else \
+             means the unit changed somewhere between here and the book"
         );
-        // The venue's own lot size is 0.01 contracts, so a fractional
-        // count is a legal size and not a malformed one.
-        assert_eq!(
-            qty_text_from_contracts("0.5", BTC_CT_VAL).as_deref(),
-            Some("0.005000000")
-        );
-        // A listing that does not say what a contract is worth cannot be
-        // converted, and guessing one is how a position is off by a
-        // factor nobody sees.
-        assert_eq!(qty_text_from_contracts("5", 0), None);
     }
 
     #[test]
@@ -1375,11 +1333,11 @@ mod account_reads {
             let body = format!(
                 r#"{{"code":"0","msg":"","data":[{{"instType":"SWAP","instId":"BTC-USDT-SWAP","posSide":"short","pos":"{pos}","avgPx":"76880.6","upl":"-21.5"}}]}}"#
             );
-            let legs = parse_positions(&body, BTC_CT_VAL).expect("a readable position");
+            let legs = parse_positions(&body).expect("a readable position");
             assert_eq!(legs.len(), 1);
             assert_eq!(legs[0].position_side, "SHORT");
-            assert_eq!(legs[0].amount_text, "-0.05000000", "pos was {pos:?}");
-            assert!((legs[0].amount - -0.05).abs() < 1e-12, "pos was {pos:?}");
+            assert_eq!(legs[0].amount_text, "-5", "pos was {pos:?}");
+            assert!((legs[0].amount - -5.0).abs() < 1e-12, "pos was {pos:?}");
             assert!((legs[0].entry_price - 76_880.6).abs() < 1e-9);
         }
     }
@@ -1393,7 +1351,7 @@ mod account_reads {
             {"instId":"BTC-USDT-SWAP","posSide":"long","pos":"0","avgPx":"","upl":""},
             {"instId":"BTC-USDT-SWAP","posSide":"short","pos":"","avgPx":"","upl":""}
         ]}"#;
-        let legs = parse_positions(body, BTC_CT_VAL).expect("a readable position");
+        let legs = parse_positions(body).expect("a readable position");
         assert_eq!(legs.len(), 1, "the empty leg is silence, not a zero");
         assert_eq!(legs[0].position_side, "LONG");
         assert_eq!(legs[0].amount, 0.0);
@@ -1406,7 +1364,7 @@ mod account_reads {
     fn a_position_mode_this_build_does_not_know_is_refused() {
         let body = r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","posSide":"sideways","pos":"1"}]}"#;
         assert!(
-            parse_positions(body, BTC_CT_VAL).is_err(),
+            parse_positions(body).is_err(),
             "an unrecognised leg must not become BOTH"
         );
     }
@@ -1443,15 +1401,15 @@ mod account_reads {
         let body = r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP",
             "ordId":"312269865356374016","clOrdId":"oq0001","px":"78000","sz":"5",
             "accFillSz":"1","side":"buy","posSide":"long","state":"partially_filled"}]}"#;
-        let orders = parse_open_orders(body, BTC_CT_VAL).expect("a readable order");
+        let orders = parse_open_orders(body).expect("a readable order");
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].side, "BUY");
         assert_eq!(orders[0].position_side, "LONG");
         assert_eq!(orders[0].status, "PARTIALLY_FILLED");
         assert_eq!(orders[0].order_id, 312_269_865_356_374_016);
         // Sizes are contracts here too.
-        assert!((orders[0].orig_qty - 0.05).abs() < 1e-12);
-        assert!((orders[0].executed_qty - 0.01).abs() < 1e-12);
+        assert!((orders[0].orig_qty - 5.0).abs() < 1e-12);
+        assert!((orders[0].executed_qty - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -1460,7 +1418,7 @@ mod account_reads {
             "clOrdId":"a","px":"1","sz":"1","accFillSz":"0","side":"buy","posSide":"long",
             "state":"something_new"}]}"#;
         assert!(
-            parse_open_orders(body, BTC_CT_VAL).is_err(),
+            parse_open_orders(body).is_err(),
             "an unknown state must not be reported as resting"
         );
     }
@@ -1569,26 +1527,16 @@ pub fn subscribe_answer(message: &str) -> Handshake {
 
 /// OKX's reader.
 ///
-/// Holds the contract value, because this venue's messages count
-/// contracts and `OrderUpdate` carries quantities of the underlying.
-/// That is the module header's hundredfold error in the place a stream
-/// makes it, and a stream makes it on every fill.
-#[derive(Debug, Clone, Copy)]
-pub struct Events {
-    contract_value: i64,
-}
-
-impl Events {
-    /// `contract_value` comes from the listing, at `CONTRACT_SCALE`.
-    #[must_use]
-    pub const fn new(contract_value: i64) -> Self {
-        Self { contract_value }
-    }
-}
+/// Holds nothing. It briefly held a contract value, on the belief that a
+/// fill's size had to be converted into coins — see the commit that
+/// removed it. Sizes stay in contracts, because that is the unit
+/// `Instrument` counts in on this venue, so there is nothing to look up.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Events;
 
 impl crate::exec::Events for Events {
     fn read(&self, message: &str) -> Vec<UserEvent> {
-        parse_user_events(message, self.contract_value)
+        parse_user_events(message)
     }
 }
 
@@ -1598,7 +1546,7 @@ impl crate::exec::Events for Events {
 /// can report several fills. Returning the first would lose the rest,
 /// and a lost fill is a position that never existed.
 #[must_use]
-pub fn parse_user_events(message: &str, contract_value: i64) -> Vec<UserEvent> {
+pub fn parse_user_events(message: &str) -> Vec<UserEvent> {
     // A frame carrying `event` is the venue talking about the
     // subscription — an acknowledgement, an error, a connection count —
     // not about the account.
@@ -1622,7 +1570,7 @@ pub fn parse_user_events(message: &str, contract_value: i64) -> Vec<UserEvent> {
     };
     objects(&data)
         .into_iter()
-        .map(|item| match read_order_update(&item, contract_value) {
+        .map(|item| match read_order_update(&item) {
             Some(update) => UserEvent::Order(update),
             // Unreadable, not absent. The payload survives so the
             // difference stays visible downstream.
@@ -1635,21 +1583,24 @@ pub fn parse_user_events(message: &str, contract_value: i64) -> Vec<UserEvent> {
 }
 
 /// One entry of the `orders` channel's `data` array.
-fn read_order_update(item: &str, contract_value: i64) -> Option<OrderUpdate> {
-    let qty = |key: &str| -> Option<String> {
+fn read_order_update(item: &str) -> Option<OrderUpdate> {
+    // The venue's own text, kept. Contracts, like every other size here,
+    // and `run.rs` reads it back through `instrument.qty_scale`, which
+    // counts contracts on this venue too.
+    let qty = |key: &str| -> String {
         let raw = field_str(item, key).unwrap_or_default();
         if raw.trim().is_empty() {
-            return Some("0".to_string());
+            return "0".to_string();
         }
-        qty_text_from_contracts(&raw, contract_value)
+        raw
     };
     Some(OrderUpdate {
         symbol: field_str(item, "instId")?,
         client_id: field_str(item, "clOrdId").unwrap_or_default(),
         venue_id: field_str(item, "ordId").and_then(|v| v.parse::<i64>().ok())?,
         status: status_of(&field_str(item, "state")?)?.to_string(),
-        last_qty: qty("fillSz")?,
-        cumulative_qty: qty("accFillSz")?,
+        last_qty: qty("fillSz"),
+        cumulative_qty: qty("accFillSz"),
         last_price: field_str(item, "fillPx")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "0".to_string()),
@@ -1680,13 +1631,10 @@ impl Okx {
     /// an omission — a stream here dies with its connection, not with a
     /// clock.
     ///
-    /// `contract_value` is the listing's, and is needed here rather
-    /// than later because the reader converts every fill's size with it.
-    ///
     /// # Errors
     /// When the credentials carry no passphrase, which this venue needs
     /// and which is not a signature problem however the venue reports it.
-    pub fn user_stream(&self, contract_value: i64) -> Result<UserStream, VenueError> {
+    pub fn user_stream(&self) -> Result<UserStream, VenueError> {
         let Some(passphrase) = self.creds.passphrase() else {
             return Err(VenueError::Transport(
                 "OKX needs a passphrase as well as a key and a secret; \
@@ -1700,23 +1648,21 @@ impl Okx {
             PRIVATE_WS_LIVE
         };
         let seconds = (now_ms() + self.clock_offset_ms) / 1_000;
-        Ok(UserStream::new(
-            url.to_string(),
-            String::new(),
-            std::sync::Arc::new(Events::new(contract_value)),
+        Ok(
+            UserStream::new(url.to_string(), String::new(), std::sync::Arc::new(Events))
+                .with_opening(vec![
+                    Opening::awaited(
+                        login_frame(
+                            self.creds.key(),
+                            passphrase,
+                            self.creds.secret_bytes(),
+                            seconds,
+                        ),
+                        login_answer,
+                    ),
+                    Opening::awaited(subscribe_orders_frame("SWAP"), subscribe_answer),
+                ]),
         )
-        .with_opening(vec![
-            Opening::awaited(
-                login_frame(
-                    self.creds.key(),
-                    passphrase,
-                    self.creds.secret_bytes(),
-                    seconds,
-                ),
-                login_answer,
-            ),
-            Opening::awaited(subscribe_orders_frame("SWAP"), subscribe_answer),
-        ]))
     }
 }
 
@@ -1736,7 +1682,7 @@ mod account_stream {
 
     #[test]
     fn a_frame_with_two_fills_produces_two_events() {
-        let events = parse_user_events(TWO_FILLS, BTC_CT_VAL);
+        let events = parse_user_events(TWO_FILLS);
         assert_eq!(
             events.len(),
             2,
@@ -1747,9 +1693,9 @@ mod account_stream {
             panic!("both entries are order updates: {events:?}");
         };
         // Sizes are contracts on the wire and the underlying here.
-        assert_eq!(a.last_qty, "0.01000000");
-        assert_eq!(b.last_qty, "0.04000000");
-        assert_eq!(b.cumulative_qty, "0.05000000");
+        assert_eq!(a.last_qty, "1");
+        assert_eq!(b.last_qty, "4");
+        assert_eq!(b.cumulative_qty, "5");
         // The vocabulary is translated, as it is on the REST side.
         assert_eq!(a.status, "PARTIALLY_FILLED");
         assert_eq!(b.status, "FILLED");
@@ -1763,31 +1709,27 @@ mod account_stream {
     }
 
     #[test]
-    fn the_reader_carries_the_contract_value_it_was_built_with() {
-        // The whole reason this is a trait rather than a pointer.
-        let reader = Events::new(BTC_CT_VAL);
-        assert_eq!(reader.read(TWO_FILLS).len(), 2);
-        // A different contract size reads the same frame differently,
-        // which is exactly the hundredfold error being avoided.
-        let tenth = Events::new(BTC_CT_VAL / 10);
-        let events = tenth.read(TWO_FILLS);
+    fn the_reader_keeps_the_venues_own_sizes() {
+        // It used to convert these into coins, which was wrong: `run.rs`
+        // reads a fill's size back through `instrument.qty_scale`, and
+        // on this venue that scale counts contracts. The conversion was
+        // off by the contract size, in the direction nothing downstream
+        // could see.
+        let events = Events.read(TWO_FILLS);
         let UserEvent::Order(a) = &events[0] else {
             panic!("an order update");
         };
-        assert_eq!(a.last_qty, "0.00100000");
+        assert_eq!(a.last_qty, "1", "the venue said one contract");
+        assert_eq!(events.len(), 2);
     }
 
     #[test]
     fn a_subscription_acknowledgement_is_not_an_account_event() {
         // It arrives on the same socket and must produce nothing.
         assert!(
-            parse_user_events(
-                r#"{"event":"subscribe","arg":{"channel":"orders"}}"#,
-                BTC_CT_VAL
-            )
-            .is_empty()
+            parse_user_events(r#"{"event":"subscribe","arg":{"channel":"orders"}}"#).is_empty()
         );
-        assert!(parse_user_events(r#"{"event":"error","code":"60012"}"#, BTC_CT_VAL).is_empty());
+        assert!(parse_user_events(r#"{"event":"error","code":"60012"}"#).is_empty());
     }
 
     #[test]
@@ -1798,7 +1740,7 @@ mod account_stream {
         let body = r#"{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP",
             "ordId":"9","clOrdId":"oq9","state":"canceled","side":"sell","posSide":"short",
             "fillSz":"","fillPx":"","accFillSz":"0","tradeId":"","uTime":"1700000000003"}]}"#;
-        let events = parse_user_events(body, BTC_CT_VAL);
+        let events = parse_user_events(body);
         let UserEvent::Order(u) = &events[0] else {
             panic!("an order update");
         };
@@ -1814,7 +1756,7 @@ mod account_stream {
         // changed something produces evidence rather than silence.
         let body = r#"{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP",
             "ordId":"9","state":"teleported","side":"buy","posSide":"long"}]}"#;
-        let events = parse_user_events(body, BTC_CT_VAL);
+        let events = parse_user_events(body);
         assert_eq!(events.len(), 1);
         let UserEvent::Other { kind, payload } = &events[0] else {
             panic!("an unreadable entry is kept, not dropped: {events:?}");
@@ -1826,7 +1768,7 @@ mod account_stream {
     #[test]
     fn a_channel_this_build_does_not_map_is_kept_rather_than_dropped() {
         let body = r#"{"arg":{"channel":"positions"},"data":[{"instId":"BTC-USDT-SWAP"}]}"#;
-        let events = parse_user_events(body, BTC_CT_VAL);
+        let events = parse_user_events(body);
         let UserEvent::Other { kind, .. } = &events[0] else {
             panic!("kept as itself");
         };
@@ -1904,11 +1846,11 @@ mod private_channel {
             .with_passphrase("p")
             .expect("a non-empty passphrase");
         let demo = Okx::at(Endpoint::Testnet, creds.clone())
-            .user_stream(BTC_CT_VAL)
+            .user_stream()
             .expect("a passphrase was given");
         assert_eq!(demo.url(), PRIVATE_WS_DEMO);
         let live = Okx::at(Endpoint::Live, creds)
-            .user_stream(BTC_CT_VAL)
+            .user_stream()
             .expect("a passphrase was given");
         assert_eq!(live.url(), PRIVATE_WS_LIVE);
         // Login first, then the subscription that depends on it.
@@ -1919,9 +1861,7 @@ mod private_channel {
     fn a_stream_without_a_passphrase_is_refused_before_it_is_opened() {
         let creds = Credentials::new("k", "s");
         assert!(
-            Okx::at(Endpoint::Testnet, creds)
-                .user_stream(BTC_CT_VAL)
-                .is_err(),
+            Okx::at(Endpoint::Testnet, creds).user_stream().is_err(),
             "an unsigned login would be refused by the venue as a bad signature"
         );
     }
@@ -1932,7 +1872,7 @@ mod private_channel {
             .with_passphrase("p")
             .expect("a non-empty passphrase");
         let stream = Okx::at(Endpoint::Testnet, creds)
-            .user_stream(BTC_CT_VAL)
+            .user_stream()
             .expect("a passphrase was given");
         assert_eq!(
             stream.key(),
