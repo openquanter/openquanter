@@ -25,7 +25,7 @@
 use core::time::Duration;
 use std::time::Instant;
 
-use crate::binance::{VenueError, parse_user_event};
+use crate::binance::VenueError;
 use crate::exec::{Handshake, Opening, UserEvent, UserStream};
 
 /// How often this venue speaks on a stream with nothing to report.
@@ -53,6 +53,15 @@ pub struct UserStreamReader {
     last_message: Instant,
     /// Silence beyond which the connection is presumed dead.
     stale_after: Duration,
+    /// How this venue's messages are read.
+    events: std::sync::Arc<dyn crate::exec::Events>,
+    /// Events from a frame that carried more than one.
+    ///
+    /// One venue sends a `data` array, so a single read can produce
+    /// several fills. They are held here and delivered one per `next`
+    /// rather than dropped, because the caller's contract is one event
+    /// per call and the alternative loses every fill after the first.
+    pending: std::collections::VecDeque<UserEvent>,
 }
 
 /// How long a stream has been silent, when that is long enough to
@@ -114,6 +123,8 @@ impl UserStreamReader {
             // would inherit the epoch and be condemned on its first read.
             last_message: Instant::now(),
             stale_after: DEFAULT_STALE_AFTER,
+            events: stream.events(),
+            pending: std::collections::VecDeque::new(),
         };
         reader
             .set_read_timeout(read_timeout)
@@ -170,6 +181,13 @@ impl UserStreamReader {
         // `oq-live`'s market data path learned this and grew a staleness
         // check; this module was left with a comment saying the caller
         // would do it, and the caller did not.
+        // A frame that carried several events is drained before the
+        // socket is read again. Everything queued here already happened
+        // on the account, and reading ahead of it would deliver a later
+        // fill before an earlier one.
+        if let Some(event) = self.pending.pop_front() {
+            return StreamOutcome::Event(event);
+        }
         if let Some(silent) = silence_verdict(self.last_message, self.stale_after) {
             // Restarted here, so a caller that reconnects into another
             // dead socket gets its next verdict a full window later
@@ -183,8 +201,12 @@ impl UserStreamReader {
         match self.socket.read() {
             Ok(tungstenite::Message::Text(text)) => {
                 self.last_message = Instant::now();
-                match parse_user_event(&text) {
-                    Some(event) => StreamOutcome::Event(event),
+                let mut events = self.events.read(&text).into_iter();
+                match events.next() {
+                    Some(first) => {
+                        self.pending.extend(events);
+                        StreamOutcome::Event(first)
+                    }
                     None => StreamOutcome::Ignored,
                 }
             }
