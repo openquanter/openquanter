@@ -37,7 +37,7 @@ impl Recording {
     fn accepting() -> Self {
         Self::answering(
             Placed::Accepted(OrderAck {
-                venue_id: 1,
+                venue_id: "1".to_string(),
                 client_id: "live-1".into(),
                 status: "NEW".into(),
                 executed_qty: "0".into(),
@@ -254,7 +254,7 @@ fn an_unknown_placement_the_venue_does_know_about_counts_as_sent() {
             reason: "timeout".into(),
         }),
         Some(OrderAck {
-            venue_id: 9,
+            venue_id: "9".to_string(),
             client_id: "live-1".into(),
             status: "NEW".into(),
             executed_qty: "0".into(),

@@ -17,7 +17,7 @@ fn fill(client_id: &str, trade_id: i64) -> OrderUpdate {
     OrderUpdate {
         symbol: "ETHUSDT".into(),
         client_id: client_id.into(),
-        venue_id: trade_id,
+        venue_id: trade_id.to_string(),
         status: "FILLED".into(),
         last_qty: "0.001".into(),
         cumulative_qty: "0.001".into(),

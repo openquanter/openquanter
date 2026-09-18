@@ -573,9 +573,7 @@ pub fn ack_from(body: &str, client_id: &str) -> Placed {
             reason: format!("accepted with no order in it: {}", truncate(body)),
         });
     };
-    let venue_id = field_str(&datum, "ordId")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or_default();
+    let venue_id = field_str(&datum, "ordId").unwrap_or_default();
     Placed::Accepted(OrderAck {
         venue_id,
         // Echoed when the venue gives it back, and the caller's own
@@ -1793,7 +1791,7 @@ fn read_order_update(item: &str) -> Option<OrderUpdate> {
     Some(OrderUpdate {
         symbol: field_str(item, "instId")?,
         client_id: field_str(item, "clOrdId").unwrap_or_default(),
-        venue_id: field_str(item, "ordId").and_then(|v| v.parse::<i64>().ok())?,
+        venue_id: field_str(item, "ordId")?,
         status: status_of(&field_str(item, "state")?)?.to_string(),
         last_qty: qty("fillSz"),
         cumulative_qty: qty("accFillSz"),
@@ -2238,7 +2236,7 @@ mod tests {
         let body = r#"{"code":"0","msg":"","data":[{"clOrdId":"oq0001","ordId":"312269865356374016","tag":"","sCode":"0","sMsg":""}]}"#;
         match classify(200, body, "oq0001") {
             Placed::Accepted(a) => {
-                assert_eq!(a.venue_id, 312_269_865_356_374_016);
+                assert_eq!(a.venue_id, "312269865356374016");
                 assert_eq!(a.client_id, "oq0001");
             }
             other => panic!("expected an acceptance, got {other:?}"),
@@ -2510,7 +2508,7 @@ mod tests {
     fn an_existing_order_comes_back_with_its_state() {
         let body = r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","ordId":"312269865356374016","clOrdId":"oq0001","state":"live","accFillSz":"0","sz":"5"}]}"#;
         let ack = order_from_query(body, "oq0001").expect("the order exists");
-        assert_eq!(ack.venue_id, 312_269_865_356_374_016);
+        assert_eq!(ack.venue_id, "312269865356374016");
         assert_eq!(ack.status, "live");
         assert_eq!(ack.executed_qty, "0");
     }

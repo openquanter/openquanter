@@ -34,7 +34,7 @@ impl Execution for Accepting {
     fn place(&self, order: &NewOrder, _i: &Instrument) -> Placed {
         *self.n.borrow_mut() += 1;
         Placed::Accepted(OrderAck {
-            venue_id: *self.n.borrow() as i64,
+            venue_id: self.n.borrow().to_string(),
             client_id: order.client_id.clone(),
             status: "NEW".into(),
             executed_qty: "0".into(),
@@ -43,7 +43,7 @@ impl Execution for Accepting {
     fn cancel(&self, _symbol: &str, client_id: &str) -> Placed {
         self.cancelled.borrow_mut().push(client_id.to_string());
         Placed::Accepted(OrderAck {
-            venue_id: 0,
+            venue_id: "0".to_string(),
             client_id: client_id.to_string(),
             status: "CANCELED".into(),
             executed_qty: "0".into(),
@@ -513,7 +513,7 @@ impl Execution for WontCancel {
     fn place(&self, order: &NewOrder, _i: &Instrument) -> Placed {
         *self.n.borrow_mut() += 1;
         Placed::Accepted(OrderAck {
-            venue_id: *self.n.borrow() as i64,
+            venue_id: self.n.borrow().to_string(),
             client_id: order.client_id.clone(),
             status: "NEW".into(),
             executed_qty: "0".into(),
@@ -654,7 +654,7 @@ impl Execution for Mute {
     }
     fn cancel(&self, _symbol: &str, client_id: &str) -> Placed {
         Placed::Accepted(OrderAck {
-            venue_id: 0,
+            venue_id: "0".to_string(),
             client_id: client_id.to_string(),
             status: "CANCELED".into(),
             executed_qty: "0".into(),
@@ -665,7 +665,7 @@ impl Execution for Mute {
             return Err(VenueError::Transport("still unreachable".into()));
         }
         Ok(self.resting.then(|| OrderAck {
-            venue_id: 1,
+            venue_id: "1".to_string(),
             client_id: c.to_string(),
             status: "NEW".into(),
             executed_qty: "0".into(),
