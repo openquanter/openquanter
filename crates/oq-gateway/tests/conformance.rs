@@ -56,6 +56,43 @@ fn okx() -> Responses {
     }
 }
 
+/// Payloads Kraken Futures documents, and what each one means.
+///
+/// Documented shapes, not captured ones — the module header says so and
+/// this is where that costs something: if the venue's real refusal
+/// differs from the one written here, this suite passes and the adapter
+/// is still wrong. It is the same standard the other two were written
+/// to before they were run.
+fn kraken() -> Responses {
+    Responses {
+        venue: "kraken-futures",
+        client_id: "oq0001",
+        accepted: r#"{"result":"success","sendStatus":{"order_id":"179f9af8-e45e-469d-b3e9-2fd4675cb7d0","status":"placed","cliOrdId":"oq0001","receivedTime":"2019-09-05T16:33:50.734Z"},"serverTime":"2019-09-05T16:33:50.734Z"}"#,
+        // A name, not a number. The whole reason `venue_id` is text.
+        accepted_venue_id: "179f9af8-e45e-469d-b3e9-2fd4675cb7d0",
+        rejected: (
+            200,
+            r#"{"result":"success","sendStatus":{"order_id":"","status":"insufficientAvailableFunds","cliOrdId":"oq0001","orderEvents":[]},"serverTime":"2019-09-05T16:33:50.734Z"}"#,
+        ),
+        // The venue names its refusals in words rather than in codes.
+        rejected_code: None,
+        unavailable: (502, "<html>bad gateway</html>"),
+        absent: r#"{"result":"success","orders":[],"serverTime":"2019-09-05T16:33:50.734Z"}"#,
+        present: r#"{"result":"success","orders":[{"order_id":"179f9af8-e45e-469d-b3e9-2fd4675cb7d0","cliOrdId":"oq0001","status":"untouched","filledSize":0}],"serverTime":"2019-09-05T16:33:50.734Z"}"#,
+        foreign: "<html>captive portal</html>",
+    }
+}
+
+#[test]
+fn the_kraken_adapter_conforms() {
+    let r = check(
+        &kraken(),
+        oq_gateway::kraken::classify,
+        oq_gateway::kraken::order_from_query,
+    );
+    assert!(r.conforms(), "{}", r.summary_line("kraken-futures"));
+}
+
 #[test]
 fn the_binance_adapter_conforms() {
     let r = check(
