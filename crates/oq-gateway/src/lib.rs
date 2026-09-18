@@ -63,8 +63,8 @@ pub use binance::parse_user_event;
 pub use binance::{AccountSnapshot, Binance, OpenOrder, PositionSnapshot, Trade, VenueError};
 pub use creds::Credentials;
 pub use exec::{
-    Endpoint, Execution, Handshake, NewOrder, Opening, OrderAck, OrderUpdate, Placed, PositionSide,
-    Reject, Unresolved, UserEvent, UserStream,
+    Endpoint, Events, Execution, Handshake, NewOrder, Opening, OrderAck, OrderUpdate, Placed,
+    PositionSide, Reject, Unresolved, UserEvent, UserStream,
 };
 pub use reconcile::{Divergence, Expectation, ExpectedLeg, Reconciliation, Tolerance, reconcile};
 pub use snapshot::{Part, Snapshot, SnapshotBuilder};

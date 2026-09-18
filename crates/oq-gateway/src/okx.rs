@@ -77,8 +77,8 @@ use oq_types::{Instrument, QtyLots, Side, TimeInForce};
 use crate::VenueError;
 use crate::creds::Credentials;
 use crate::exec::{
-    Endpoint, Execution, Handshake, NewOrder, Opening, OrderAck, Placed, PositionSide, Reject,
-    Unresolved, UserStream, decimal,
+    Endpoint, Execution, Handshake, NewOrder, Opening, OrderAck, OrderUpdate, Placed, PositionSide,
+    Reject, Unresolved, UserEvent, UserStream, decimal,
 };
 use crate::json::{array_field, field_str, malformed, objects};
 
@@ -1567,6 +1567,110 @@ pub fn subscribe_answer(message: &str) -> Handshake {
     }
 }
 
+/// OKX's reader.
+///
+/// Holds the contract value, because this venue's messages count
+/// contracts and `OrderUpdate` carries quantities of the underlying.
+/// That is the module header's hundredfold error in the place a stream
+/// makes it, and a stream makes it on every fill.
+#[derive(Debug, Clone, Copy)]
+pub struct Events {
+    contract_value: i64,
+}
+
+impl Events {
+    /// `contract_value` comes from the listing, at `CONTRACT_SCALE`.
+    #[must_use]
+    pub const fn new(contract_value: i64) -> Self {
+        Self { contract_value }
+    }
+}
+
+impl crate::exec::Events for Events {
+    fn read(&self, message: &str) -> Vec<UserEvent> {
+        parse_user_events(message, self.contract_value)
+    }
+}
+
+/// Every account event one frame from the `orders` channel carries.
+///
+/// A list because this venue batches: `data` is an array, and one frame
+/// can report several fills. Returning the first would lose the rest,
+/// and a lost fill is a position that never existed.
+#[must_use]
+pub fn parse_user_events(message: &str, contract_value: i64) -> Vec<UserEvent> {
+    // A frame carrying `event` is the venue talking about the
+    // subscription — an acknowledgement, an error, a connection count —
+    // not about the account.
+    if field_str(message, "event").is_some() {
+        return Vec::new();
+    }
+    let Some(channel) = field_str(message, "channel") else {
+        return Vec::new();
+    };
+    if channel != "orders" {
+        // An account event this build does not map. Kept rather than
+        // dropped: a venue that adds a channel should produce something
+        // a reader can see.
+        return vec![UserEvent::Other {
+            kind: channel,
+            payload: message.to_string(),
+        }];
+    }
+    let Some(data) = array_field(message, "data") else {
+        return Vec::new();
+    };
+    objects(&data)
+        .into_iter()
+        .map(|item| match read_order_update(&item, contract_value) {
+            Some(update) => UserEvent::Order(update),
+            // Unreadable, not absent. The payload survives so the
+            // difference stays visible downstream.
+            None => UserEvent::Other {
+                kind: "orders".to_string(),
+                payload: item,
+            },
+        })
+        .collect()
+}
+
+/// One entry of the `orders` channel's `data` array.
+fn read_order_update(item: &str, contract_value: i64) -> Option<OrderUpdate> {
+    let qty = |key: &str| -> Option<String> {
+        let raw = field_str(item, key).unwrap_or_default();
+        if raw.trim().is_empty() {
+            return Some("0".to_string());
+        }
+        qty_text_from_contracts(&raw, contract_value)
+    };
+    Some(OrderUpdate {
+        symbol: field_str(item, "instId")?,
+        client_id: field_str(item, "clOrdId").unwrap_or_default(),
+        venue_id: field_str(item, "ordId").and_then(|v| v.parse::<i64>().ok())?,
+        status: status_of(&field_str(item, "state")?)?.to_string(),
+        last_qty: qty("fillSz")?,
+        cumulative_qty: qty("accFillSz")?,
+        last_price: field_str(item, "fillPx")
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "0".to_string()),
+        side: side_of(&field_str(item, "side")?)?.to_string(),
+        position_side: leg_of(&field_str(item, "posSide")?)?.to_string(),
+        // `T` is taker, `M` is maker. Absent means this update is not a
+        // fill, and taker is the safe reading: crediting a maker rebate
+        // to an order that paid is the error that flatters a backtest.
+        maker: field_str(item, "execType").as_deref() == Some("M"),
+        // Empty on an update that is not a fill. That and a zero must
+        // both be `None`, or a deduplication table acquires an entry
+        // that swallows every subsequent non-fill.
+        trade_id: field_str(item, "tradeId")
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|id| *id > 0),
+        event_ms: field_str(item, "uTime")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or_default(),
+    })
+}
+
 impl Okx {
     /// The private channel, with everything that has to be said on it.
     ///
@@ -1576,10 +1680,13 @@ impl Okx {
     /// an omission — a stream here dies with its connection, not with a
     /// clock.
     ///
+    /// `contract_value` is the listing's, and is needed here rather
+    /// than later because the reader converts every fill's size with it.
+    ///
     /// # Errors
     /// When the credentials carry no passphrase, which this venue needs
     /// and which is not a signature problem however the venue reports it.
-    pub fn user_stream(&self) -> Result<UserStream, VenueError> {
+    pub fn user_stream(&self, contract_value: i64) -> Result<UserStream, VenueError> {
         let Some(passphrase) = self.creds.passphrase() else {
             return Err(VenueError::Transport(
                 "OKX needs a passphrase as well as a key and a secret; \
@@ -1593,20 +1700,137 @@ impl Okx {
             PRIVATE_WS_LIVE
         };
         let seconds = (now_ms() + self.clock_offset_ms) / 1_000;
-        Ok(
-            UserStream::new(url.to_string(), String::new()).with_opening(vec![
-                Opening::awaited(
-                    login_frame(
-                        self.creds.key(),
-                        passphrase,
-                        self.creds.secret_bytes(),
-                        seconds,
-                    ),
-                    login_answer,
-                ),
-                Opening::awaited(subscribe_orders_frame("SWAP"), subscribe_answer),
-            ]),
+        Ok(UserStream::new(
+            url.to_string(),
+            String::new(),
+            std::sync::Arc::new(Events::new(contract_value)),
         )
+        .with_opening(vec![
+            Opening::awaited(
+                login_frame(
+                    self.creds.key(),
+                    passphrase,
+                    self.creds.secret_bytes(),
+                    seconds,
+                ),
+                login_answer,
+            ),
+            Opening::awaited(subscribe_orders_frame("SWAP"), subscribe_answer),
+        ]))
+    }
+}
+
+#[cfg(test)]
+mod account_stream {
+    use super::*;
+    use crate::exec::Events as _;
+
+    /// One frame, two fills. The reason `read` answers a list.
+    const TWO_FILLS: &str = r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[
+        {"instId":"BTC-USDT-SWAP","ordId":"1","clOrdId":"oq1","state":"partially_filled",
+         "side":"buy","posSide":"long","fillSz":"1","fillPx":"78000","accFillSz":"1",
+         "tradeId":"501","execType":"M","uTime":"1700000000001"},
+        {"instId":"BTC-USDT-SWAP","ordId":"1","clOrdId":"oq1","state":"filled",
+         "side":"buy","posSide":"long","fillSz":"4","fillPx":"78010","accFillSz":"5",
+         "tradeId":"502","execType":"T","uTime":"1700000000002"}]}"#;
+
+    #[test]
+    fn a_frame_with_two_fills_produces_two_events() {
+        let events = parse_user_events(TWO_FILLS, BTC_CT_VAL);
+        assert_eq!(
+            events.len(),
+            2,
+            "returning the first would lose a fill, which is a position that never existed"
+        );
+        let (first, second) = (&events[0], &events[1]);
+        let (UserEvent::Order(a), UserEvent::Order(b)) = (first, second) else {
+            panic!("both entries are order updates: {events:?}");
+        };
+        // Sizes are contracts on the wire and the underlying here.
+        assert_eq!(a.last_qty, "0.01000000");
+        assert_eq!(b.last_qty, "0.04000000");
+        assert_eq!(b.cumulative_qty, "0.05000000");
+        // The vocabulary is translated, as it is on the REST side.
+        assert_eq!(a.status, "PARTIALLY_FILLED");
+        assert_eq!(b.status, "FILLED");
+        assert_eq!(a.side, "BUY");
+        assert_eq!(a.position_side, "LONG");
+        // execType M is maker, T is taker.
+        assert!(a.maker);
+        assert!(!b.maker);
+        assert_eq!(a.trade_id, Some(501));
+        assert_eq!(b.event_ms, 1_700_000_000_002);
+    }
+
+    #[test]
+    fn the_reader_carries_the_contract_value_it_was_built_with() {
+        // The whole reason this is a trait rather than a pointer.
+        let reader = Events::new(BTC_CT_VAL);
+        assert_eq!(reader.read(TWO_FILLS).len(), 2);
+        // A different contract size reads the same frame differently,
+        // which is exactly the hundredfold error being avoided.
+        let tenth = Events::new(BTC_CT_VAL / 10);
+        let events = tenth.read(TWO_FILLS);
+        let UserEvent::Order(a) = &events[0] else {
+            panic!("an order update");
+        };
+        assert_eq!(a.last_qty, "0.00100000");
+    }
+
+    #[test]
+    fn a_subscription_acknowledgement_is_not_an_account_event() {
+        // It arrives on the same socket and must produce nothing.
+        assert!(
+            parse_user_events(
+                r#"{"event":"subscribe","arg":{"channel":"orders"}}"#,
+                BTC_CT_VAL
+            )
+            .is_empty()
+        );
+        assert!(parse_user_events(r#"{"event":"error","code":"60012"}"#, BTC_CT_VAL).is_empty());
+    }
+
+    #[test]
+    fn an_update_with_no_trade_id_is_not_given_one() {
+        // A cancellation carries an empty tradeId. Mapping it to zero
+        // would give a deduplication table an entry that swallows every
+        // later non-fill.
+        let body = r#"{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP",
+            "ordId":"9","clOrdId":"oq9","state":"canceled","side":"sell","posSide":"short",
+            "fillSz":"","fillPx":"","accFillSz":"0","tradeId":"","uTime":"1700000000003"}]}"#;
+        let events = parse_user_events(body, BTC_CT_VAL);
+        let UserEvent::Order(u) = &events[0] else {
+            panic!("an order update");
+        };
+        assert_eq!(u.trade_id, None);
+        assert_eq!(u.status, "CANCELED");
+        assert_eq!(u.last_qty, "0");
+        assert_eq!(u.last_price, "0");
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_read_survives_as_itself() {
+        // Unreadable is not absent: the payload is kept so a venue that
+        // changed something produces evidence rather than silence.
+        let body = r#"{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP",
+            "ordId":"9","state":"teleported","side":"buy","posSide":"long"}]}"#;
+        let events = parse_user_events(body, BTC_CT_VAL);
+        assert_eq!(events.len(), 1);
+        let UserEvent::Other { kind, payload } = &events[0] else {
+            panic!("an unreadable entry is kept, not dropped: {events:?}");
+        };
+        assert_eq!(kind, "orders");
+        assert!(payload.contains("teleported"));
+    }
+
+    #[test]
+    fn a_channel_this_build_does_not_map_is_kept_rather_than_dropped() {
+        let body = r#"{"arg":{"channel":"positions"},"data":[{"instId":"BTC-USDT-SWAP"}]}"#;
+        let events = parse_user_events(body, BTC_CT_VAL);
+        let UserEvent::Other { kind, .. } = &events[0] else {
+            panic!("kept as itself");
+        };
+        assert_eq!(kind, "positions");
     }
 }
 
@@ -1680,11 +1904,11 @@ mod private_channel {
             .with_passphrase("p")
             .expect("a non-empty passphrase");
         let demo = Okx::at(Endpoint::Testnet, creds.clone())
-            .user_stream()
+            .user_stream(BTC_CT_VAL)
             .expect("a passphrase was given");
         assert_eq!(demo.url(), PRIVATE_WS_DEMO);
         let live = Okx::at(Endpoint::Live, creds)
-            .user_stream()
+            .user_stream(BTC_CT_VAL)
             .expect("a passphrase was given");
         assert_eq!(live.url(), PRIVATE_WS_LIVE);
         // Login first, then the subscription that depends on it.
@@ -1695,7 +1919,9 @@ mod private_channel {
     fn a_stream_without_a_passphrase_is_refused_before_it_is_opened() {
         let creds = Credentials::new("k", "s");
         assert!(
-            Okx::at(Endpoint::Testnet, creds).user_stream().is_err(),
+            Okx::at(Endpoint::Testnet, creds)
+                .user_stream(BTC_CT_VAL)
+                .is_err(),
             "an unsigned login would be refused by the venue as a bad signature"
         );
     }
@@ -1706,7 +1932,7 @@ mod private_channel {
             .with_passphrase("p")
             .expect("a non-empty passphrase");
         let stream = Okx::at(Endpoint::Testnet, creds)
-            .user_stream()
+            .user_stream(BTC_CT_VAL)
             .expect("a passphrase was given");
         assert_eq!(
             stream.key(),

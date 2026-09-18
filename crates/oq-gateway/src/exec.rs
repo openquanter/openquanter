@@ -255,6 +255,36 @@ mod tests {
     }
 }
 
+/// Reads a venue's account-stream messages.
+///
+/// A trait rather than a function pointer, because reading a message can
+/// require knowing something first: OKX reports sizes in contracts, and
+/// turning one into a quantity of the underlying needs the contract
+/// value from its listing. A pointer has nowhere to keep that, and
+/// passing contracts upward instead would put one venue's unit into a
+/// type whose whole purpose is not to have one.
+///
+/// `Send + Sync` because a stream is a value a caller may move between
+/// threads, and finding out otherwise at the point of moving it is a
+/// worse time than now.
+pub trait Events: Send + Sync {
+    /// Every account event this message carries, in the order it
+    /// carries them.
+    ///
+    /// A list, not an option. Binance sends one event per message and
+    /// OKX sends a `data` array; a reader that returned the first and
+    /// dropped the rest would lose a fill, and a lost fill is a position
+    /// that never existed.
+    ///
+    /// Empty is for a message that is not an account event — a
+    /// subscription acknowledgement, a heartbeat. It is not for one that
+    /// is an account event and could not be read: that is
+    /// [`UserEvent::Other`], which keeps the payload so a venue that
+    /// added an event type produces something a reader can see rather
+    /// than nothing.
+    fn read(&self, message: &str) -> Vec<UserEvent>;
+}
+
 /// Where a user data stream lives, and the key that opens it.
 ///
 /// The key is a bearer credential with an expiry: anyone holding it can
@@ -262,12 +292,18 @@ mod tests {
 /// was issued unless renewed. Both halves matter — the first is why it
 /// is not printed, the second is why a stream that has been quiet is
 /// not evidence of a quiet account.
-#[derive(Clone, PartialEq, Eq)]
+/// Not `PartialEq`: two streams are the same when they read the same
+/// account, and the reader below is a trait object whose identity is an
+/// address rather than a meaning. Nothing compared two of these, so the
+/// derive went rather than acquiring a sense it could not keep.
+#[derive(Clone)]
 pub struct UserStream {
     /// Full websocket URL, key included.
     url: String,
     /// The key alone, for renewal and closing.
     key: String,
+    /// How this venue's messages are read.
+    events: std::sync::Arc<dyn Events>,
     /// What has to be said on the socket before it carries anything.
     ///
     /// Empty for a venue that authenticates in the URL. A venue that
@@ -366,13 +402,26 @@ impl core::fmt::Debug for Opening {
 }
 
 impl UserStream {
+    /// `events` is required rather than defaulted.
+    ///
+    /// A default would be one venue's reader, and the venue that forgot
+    /// to pass its own would not fail to compile. It would connect, stay
+    /// silent, and look exactly like an account where nothing happens —
+    /// a shape this crate has already paid thirty-three hours for once.
     #[must_use]
-    pub fn new(url: String, key: String) -> Self {
+    pub fn new(url: String, key: String, events: std::sync::Arc<dyn Events>) -> Self {
         Self {
             url,
             key,
+            events,
             opening: Vec::new(),
         }
+    }
+
+    /// How to read a message from this stream.
+    #[must_use]
+    pub fn events(&self) -> std::sync::Arc<dyn Events> {
+        std::sync::Arc::clone(&self.events)
     }
 
     /// The frames to send once the socket is open.

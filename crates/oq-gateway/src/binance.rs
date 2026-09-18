@@ -1327,6 +1327,7 @@ impl Binance {
         Ok(UserStream::new(
             format!("{}/ws/{key}", self.stream_host()),
             key,
+            std::sync::Arc::new(Events),
         ))
     }
 
@@ -1350,6 +1351,24 @@ impl Binance {
     pub fn close_user_stream(&self) -> Result<(), VenueError> {
         let url = format!("{}/fapi/v1/listenKey", self.base);
         self.send_method(Method::Delete, &url, true).map(|_| ())
+    }
+}
+
+/// Binance's reader.
+///
+/// A unit struct because this venue's reader needs to know nothing:
+/// every size in its messages is already a quantity of the underlying,
+/// and every frame carries at most one event. The other venue's reader
+/// is not so lucky, which is why the trait exists at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Events;
+
+impl crate::exec::Events for Events {
+    fn read(&self, message: &str) -> Vec<UserEvent> {
+        // One event or none. The list is the trait's shape rather than
+        // this venue's, and collecting an `Option` is how a venue that
+        // sends one says so.
+        parse_user_event(message).into_iter().collect()
     }
 }
 
@@ -1504,7 +1523,11 @@ mod user_stream {
 
     #[test]
     fn a_stream_does_not_print_its_own_credential() {
-        let s = UserStream::new("wss://x/ws/SECRETKEY".into(), "SECRETKEY".into());
+        let s = UserStream::new(
+            "wss://x/ws/SECRETKEY".into(),
+            "SECRETKEY".into(),
+            std::sync::Arc::new(Events),
+        );
         let shown = format!("{s:?}");
         assert!(!shown.contains("SECRETKEY"), "{shown}");
     }
