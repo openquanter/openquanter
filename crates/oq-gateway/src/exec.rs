@@ -268,12 +268,124 @@ pub struct UserStream {
     url: String,
     /// The key alone, for renewal and closing.
     key: String,
+    /// What has to be said on the socket before it carries anything.
+    ///
+    /// Empty for a venue that authenticates in the URL. A venue that
+    /// authenticates on the socket puts its login here, and the reader
+    /// sends these in order before it reports a single event — because
+    /// a stream that is open but not logged in delivers silence, and
+    /// silence is what this crate spent thirty-three hours mistaking
+    /// for a quiet account.
+    opening: Vec<Opening>,
+}
+
+/// A frame to send when a stream opens, and how to know it worked.
+#[derive(Clone)]
+pub struct Opening {
+    frame: String,
+    answer: Option<fn(&str) -> Handshake>,
+}
+
+/// Equality is over what gets sent, not over where the answer reader
+/// lives.
+///
+/// Written out because two function pointers comparing equal is not
+/// something the language promises — the same function can have two
+/// addresses — so a derived `PartialEq` here would be a comparison that
+/// is right in a debug build and arbitrary in a release one. What a
+/// caller means by "the same opening" is the same frame, waited on the
+/// same way.
+impl PartialEq for Opening {
+    fn eq(&self, other: &Self) -> bool {
+        self.frame == other.frame && self.answer.is_some() == other.answer.is_some()
+    }
+}
+
+impl Eq for Opening {}
+
+/// What one message says about a frame that is waiting for an answer.
+///
+/// Three outcomes rather than two, for the same reason placement has
+/// three: a message that is not an answer is not a refusal, and folding
+/// them together would either abandon a login that was about to succeed
+/// or accept one that had already failed. OKX answers a bad passphrase
+/// with an error frame that arrives exactly where the confirmation
+/// would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handshake {
+    /// The frame was accepted.
+    Confirmed,
+    /// The venue refused it. Carried as text because the reason is the
+    /// venue's and belongs in the error a caller sees.
+    Refused,
+    /// Not about this frame. Keep reading.
+    Unrelated,
+}
+
+impl Opening {
+    /// A frame that needs no answer, such as a subscription a venue
+    /// acknowledges by simply starting to deliver.
+    #[must_use]
+    pub const fn sent(frame: String) -> Self {
+        Self {
+            frame,
+            answer: None,
+        }
+    }
+
+    /// A frame whose answer decides whether the stream is usable.
+    #[must_use]
+    pub const fn awaited(frame: String, answer: fn(&str) -> Handshake) -> Self {
+        Self {
+            frame,
+            answer: Some(answer),
+        }
+    }
+
+    /// The text to send.
+    #[must_use]
+    pub fn frame(&self) -> &str {
+        &self.frame
+    }
+
+    /// How to read a message that might answer it.
+    #[must_use]
+    pub const fn answer(&self) -> Option<fn(&str) -> Handshake> {
+        self.answer
+    }
+}
+
+/// By hand, so a login frame cannot print its signature into a log.
+impl core::fmt::Debug for Opening {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Opening")
+            .field("frame", &"<redacted>")
+            .field("awaits_answer", &self.answer.is_some())
+            .finish()
+    }
 }
 
 impl UserStream {
     #[must_use]
     pub fn new(url: String, key: String) -> Self {
-        Self { url, key }
+        Self {
+            url,
+            key,
+            opening: Vec::new(),
+        }
+    }
+
+    /// The frames to send once the socket is open.
+    #[must_use]
+    pub fn with_opening(mut self, opening: Vec<Opening>) -> Self {
+        self.opening = opening;
+        self
+    }
+
+    /// What has to be said before this stream carries anything.
+    #[must_use]
+    pub fn opening(&self) -> &[Opening] {
+        &self.opening
     }
 
     /// The URL to connect to. Contains the key.
@@ -295,6 +407,7 @@ impl core::fmt::Debug for UserStream {
         f.debug_struct("UserStream")
             .field("url", &"<redacted>")
             .field("key", &"<redacted>")
+            .field("opening", &self.opening.len())
             .finish()
     }
 }
