@@ -219,7 +219,7 @@ mod tests {
         OrderUpdate {
             symbol: "BTCUSDT".into(),
             client_id: client_id.into(),
-            venue_id: 1,
+            venue_id: "1".to_string(),
             status: status.into(),
             last_qty: "0.001".into(),
             cumulative_qty: "0.001".into(),
@@ -324,7 +324,7 @@ mod ownership {
         OrderUpdate {
             symbol: "BTCUSDT".into(),
             client_id: client_id.into(),
-            venue_id: 1,
+            venue_id: "1".to_string(),
             status: status.into(),
             last_qty: "0.001".into(),
             cumulative_qty: "0.001".into(),

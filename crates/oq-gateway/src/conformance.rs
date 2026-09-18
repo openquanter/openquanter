@@ -52,8 +52,12 @@ pub struct Responses {
     pub client_id: &'static str,
     /// A response accepting an order.
     pub accepted: &'static str,
-    /// The venue's own id in that response.
-    pub accepted_venue_id: i64,
+    /// The venue's own id in that response, as text.
+    ///
+    /// Text because one venue's is a UUID. What the suite checks is
+    /// that the adapter carried it through unchanged, not that it
+    /// parsed as anything.
+    pub accepted_venue_id: &'static str,
     /// A response refusing an order, and the HTTP status it arrived
     /// with.
     ///

@@ -37,7 +37,7 @@ impl Execution for Watching {
             .unwrap_or_default();
         *self.seen_at_place.borrow_mut() = kinds;
         Placed::Accepted(OrderAck {
-            venue_id: 1,
+            venue_id: "1".to_string(),
             client_id: order.client_id.clone(),
             status: "NEW".into(),
             executed_qty: "0".into(),
@@ -45,7 +45,7 @@ impl Execution for Watching {
     }
     fn cancel(&self, _s: &str, c: &str) -> Placed {
         Placed::Accepted(OrderAck {
-            venue_id: 0,
+            venue_id: "0".to_string(),
             client_id: c.into(),
             status: "CANCELED".into(),
             executed_qty: "0".into(),
