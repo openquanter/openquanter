@@ -146,37 +146,6 @@ impl Okx {
 // and none of it touches a socket.
 // ---------------------------------------------------------------------
 
-/// Base64, RFC 4648, with padding.
-///
-/// Hand-written for the same reason the hashes are: this is in the path
-/// that signs requests against an account, and every dependency there is
-/// one more thing trusted with the secret.
-pub(crate) fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
 /// `2026-08-18T02:03:04.567Z`, which is the only format OKX accepts.
 ///
 /// Computed from the epoch by hand rather than by a date library: the
@@ -221,7 +190,7 @@ pub(crate) fn sign(
     body: &str,
 ) -> String {
     let message = format!("{timestamp}{method}{request_path}{body}");
-    base64(&hmac_sha256(secret, message.as_bytes()))
+    crate::b64::encode(&hmac_sha256(secret, message.as_bytes()))
 }
 
 /// Why an order could not be expressed in contracts.
@@ -2384,7 +2353,7 @@ mod tests {
         let ts = "2026-08-18T02:03:04.567Z";
         let body = r#"{"instId":"BTC-USDT-SWAP"}"#;
         let got = sign(b"secret", ts, "POST", "/api/v5/trade/order", body);
-        let expected = base64(&hmac_sha256(
+        let expected = crate::b64::encode(&hmac_sha256(
             b"secret",
             format!("{ts}POST/api/v5/trade/order{body}").as_bytes(),
         ));
@@ -2399,15 +2368,15 @@ mod tests {
     /// signature rather than the encoder.
     #[test]
     fn base64_matches_the_standard_vectors() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foob"), "Zm9vYg==");
-        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(crate::b64::encode(b""), "");
+        assert_eq!(crate::b64::encode(b"f"), "Zg==");
+        assert_eq!(crate::b64::encode(b"fo"), "Zm8=");
+        assert_eq!(crate::b64::encode(b"foo"), "Zm9v");
+        assert_eq!(crate::b64::encode(b"foob"), "Zm9vYg==");
+        assert_eq!(crate::b64::encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(crate::b64::encode(b"foobar"), "Zm9vYmFy");
         // High bytes, since a digest is not ASCII.
-        assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
+        assert_eq!(crate::b64::encode(&[0xff, 0xfe, 0xfd]), "//79");
     }
 
     /// The venue accepts one timestamp format and rejects every other.

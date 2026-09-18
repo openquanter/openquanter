@@ -44,6 +44,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account;
+pub(crate) mod b64;
 pub mod binance;
 pub mod broker;
 pub mod conformance;
@@ -51,6 +52,7 @@ pub mod creds;
 pub mod exec;
 pub(crate) mod json;
 pub mod klines;
+pub mod kraken;
 pub mod okx;
 pub mod reconcile;
 pub mod record;
