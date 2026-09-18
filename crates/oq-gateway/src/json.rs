@@ -106,13 +106,30 @@ pub(crate) fn object_containing(body: &str, needle: &str) -> Option<String> {
 
 pub(crate) fn raw_field(body: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
-    let at = body.find(&needle)? + needle.len();
-    let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
-    if let Some(inner) = rest.strip_prefix('"') {
-        return unescape_until_quote(inner);
+    let mut from = 0usize;
+    loop {
+        // Keep looking past a match that is not a key.
+        //
+        // A field's *name* can appear as another field's *value*, and
+        // one venue does it in the response that matters most:
+        // `{"result":"error","error":"invalidArgument"}`. Stopping at
+        // the first occurrence found the word `error` sitting in
+        // `result`'s value, saw a comma where a colon should be, and
+        // reported the field as absent — turning a named refusal into
+        // an unexplained one.
+        let at = body[from..].find(&needle)? + from + needle.len();
+        let rest = body[at..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            from = at;
+            continue;
+        };
+        let rest = rest.trim_start();
+        if let Some(inner) = rest.strip_prefix('"') {
+            return unescape_until_quote(inner);
+        }
+        let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
+        return Some(rest[..end].trim().to_string());
     }
-    let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
-    Some(rest[..end].trim().to_string())
 }
 
 /// The contents of the array following `"key":`, bracket-matched to its
@@ -249,6 +266,19 @@ pub(crate) fn field_bool(body: &str, key: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_that_appears_as_a_value_first_does_not_hide_the_field() {
+        // Kraken's refusal envelope, which is where this was found:
+        // `error` is both the value of `result` and the name of the
+        // field carrying the reason. Stopping at the first match made
+        // a named refusal look like an unexplained one.
+        let body = r#"{"result":"error","error":"invalidArgument","serverTime":"x"}"#;
+        assert_eq!(raw_field(body, "error").as_deref(), Some("invalidArgument"));
+        assert_eq!(raw_field(body, "result").as_deref(), Some("error"));
+        // And a key that genuinely is not there is still absent.
+        assert_eq!(raw_field(body, "reason"), None);
+    }
 
     #[test]
     fn an_array_field_is_read_whole_rather_than_to_its_first_comma() {
