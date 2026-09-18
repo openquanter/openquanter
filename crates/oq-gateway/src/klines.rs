@@ -59,7 +59,7 @@ const VOLUME: usize = 5;
 /// Deliberately small: the payload is numbers and quoted decimals, with
 /// no nesting below the second level and no escapes to speak of. A
 /// general parser would be more code to audit for a shape this fixed.
-fn rows(body: &str) -> Vec<Vec<String>> {
+pub(crate) fn rows(body: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     let mut depth = 0u32;
     let mut field = String::new();
