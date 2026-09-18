@@ -79,7 +79,7 @@ use crate::creds::Credentials;
 use crate::exec::{
     Endpoint, Execution, NewOrder, OrderAck, Placed, PositionSide, Reject, Unresolved, decimal,
 };
-use crate::json::{field_str, objects};
+use crate::json::{array_field, field_str, malformed, objects};
 
 /// A client for one OKX deployment.
 pub struct Okx {
@@ -94,6 +94,13 @@ pub struct Okx {
     simulated: bool,
     /// Venue clock minus local clock, in milliseconds.
     clock_offset_ms: i64,
+    /// The round trip measured while the offset was taken.
+    ///
+    /// Kept because a clock offset alone cannot say whether it is worth
+    /// believing: the estimate is the midpoint of a round trip, so a
+    /// long trip is a wide interval, and a caller refused for a stale
+    /// timestamp needs to know which of the two it is looking at.
+    round_trip_ms: i64,
 }
 
 impl Okx {
@@ -122,6 +129,7 @@ impl Okx {
             agent: config.into(),
             simulated: matches!(endpoint, Endpoint::Testnet),
             clock_offset_ms: 0,
+            round_trip_ms: 0,
         }
     }
 
@@ -859,6 +867,620 @@ impl Okx {
         } else {
             Err(VenueError::Venue { status, body: text })
         }
+    }
+}
+
+impl Okx {
+    /// A GET that carries no signature.
+    ///
+    /// Public data needs no key, and asking for it with one means a
+    /// warm-up can fail for a reason that has nothing to do with the
+    /// market. The simulated header still goes on: demo trading has its
+    /// own book, and a run that read live prices and traded demo would
+    /// be comparing two different markets without saying so.
+    fn get_public(&self, path: &str, query: &str) -> Result<String, VenueError> {
+        let url = if query.is_empty() {
+            format!("{}{path}", self.base)
+        } else {
+            format!("{}{path}?{query}", self.base)
+        };
+        let mut request = self.agent.get(&url);
+        if self.simulated {
+            request = request.header("x-simulated-trading", "1");
+        }
+        let mut response = request
+            .call()
+            .map_err(|e| VenueError::Transport(e.to_string()))?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| VenueError::Transport(e.to_string()))?;
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err(VenueError::Venue { status, body: text })
+        }
+    }
+
+    /// Both legs of one instrument, as the venue holds them.
+    ///
+    /// `contract_value` is the caller's because it comes from the
+    /// listing and does not change: fetching it here would put a second
+    /// request on a path that runs every minute, to learn something that
+    /// was already known.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports, or a payload this
+    /// build cannot read.
+    pub fn positions(
+        &self,
+        inst_id: &str,
+        contract_value: i64,
+    ) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+        let body = self.send(
+            "GET",
+            &format!("/api/v5/account/positions?instType=SWAP&instId={inst_id}"),
+            "",
+        )?;
+        parse_positions(&body, contract_value)
+    }
+
+    /// The account's balance in one settlement currency.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports, or a payload this
+    /// build cannot read.
+    pub fn balances(&self, ccy: &str) -> Result<crate::binance::AccountSnapshot, VenueError> {
+        let read_at = now_ms();
+        let body = self.send("GET", &format!("/api/v5/account/balance?ccy={ccy}"), "")?;
+        parse_balance(&body, ccy, read_at)
+    }
+
+    /// Everything resting on one instrument.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports, or a payload this
+    /// build cannot read.
+    pub fn open_orders(
+        &self,
+        inst_id: &str,
+        contract_value: i64,
+    ) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+        let body = self.send(
+            "GET",
+            &format!("/api/v5/trade/orders-pending?instType=SWAP&instId={inst_id}"),
+            "",
+        )?;
+        parse_open_orders(&body, contract_value)
+    }
+
+    /// Whether this account reports a long and a short separately.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports, or a `posMode` this
+    /// build does not know.
+    pub fn is_hedged_account(&self) -> Result<bool, VenueError> {
+        let body = self.send("GET", "/api/v5/account/config", "")?;
+        parse_position_mode(&body)
+    }
+
+    /// Measure the venue's clock against this one, and keep the offset.
+    ///
+    /// The estimate is the midpoint of the round trip, which is the best
+    /// a single request can do and is why the trip is kept beside it: an
+    /// offset taken across a slow link is a wide interval reported as a
+    /// number, and a caller refused for a stale timestamp needs to know
+    /// which of the two it is looking at.
+    ///
+    /// # Errors
+    /// Whatever the transport reports, or a time this build cannot read.
+    pub fn sync_clock(&mut self) -> Result<i64, VenueError> {
+        let before = now_ms();
+        let body = self.get_public("/api/v5/public/time", "")?;
+        let after = now_ms();
+        let venue = parse_server_time(&body)?;
+        let trip = after - before;
+        self.round_trip_ms = trip;
+        self.clock_offset_ms = venue - (before + trip / 2);
+        Ok(self.clock_offset_ms)
+    }
+
+    /// The round trip measured when the clock was last synced, or zero
+    /// before it has been.
+    #[must_use]
+    pub const fn round_trip_ms(&self) -> i64 {
+        self.round_trip_ms
+    }
+}
+
+// ---------------------------------------------------------------------
+// Account reads.
+//
+// Pure, for the same reason the order path's classifiers are: a parser
+// that needs a socket gets tested against the shapes somebody imagined
+// rather than the ones the venue sends.
+// ---------------------------------------------------------------------
+
+/// The `data` array of a v5 envelope, split into its objects.
+///
+/// `code` is checked here rather than at every call site, because on
+/// this venue a failure arrives as HTTP 200 with a non-zero code — the
+/// same trap [`classify`] exists for on the order path. A read that
+/// skipped it would hand back an empty `data`, and an empty list of
+/// positions is indistinguishable from a flat account.
+fn envelope(body: &str, what: &'static str) -> Result<Vec<String>, VenueError> {
+    let Some(code) = field_str(body, "code") else {
+        return Err(malformed(what, body));
+    };
+    if code != "0" {
+        return Err(VenueError::Venue {
+            status: 200,
+            body: body.to_string(),
+        });
+    }
+    let Some(data) = array_field(body, "data") else {
+        return Err(malformed(what, body));
+    };
+    Ok(objects(&data))
+}
+
+/// OKX's leg name in the vocabulary the rest of this workspace reads.
+///
+/// Not cosmetic, and not a place for a permissive fallback. `oq-live`
+/// matches on these strings — `book.rs` reads `FILLED`, `run.rs` reads
+/// `CANCELED` — so an adapter passing its own spelling through produces
+/// a caller that never sees an order end. Two adapters that disagree
+/// about a word do not fail to compile; they fail by booking a position
+/// that is not there. `None` for anything unrecognised, so a venue that
+/// adds a mode is a refused read rather than a silent `BOTH`.
+fn leg_of(pos_side: &str) -> Option<&'static str> {
+    match pos_side {
+        "long" => Some("LONG"),
+        "short" => Some("SHORT"),
+        // One-way netting, which this workspace spells `BOTH`.
+        "net" => Some("BOTH"),
+        _ => None,
+    }
+}
+
+/// OKX's order side in the same shared vocabulary.
+fn side_of(side: &str) -> Option<&'static str> {
+    match side {
+        "buy" => Some("BUY"),
+        "sell" => Some("SELL"),
+        _ => None,
+    }
+}
+
+/// OKX's order state in the same shared vocabulary.
+///
+/// `mmp_canceled` folds into `CANCELED` because that is what it is: an
+/// order withdrawn by the venue's market-maker protection. The caller
+/// needs to stop expecting a fill, and the reason it stopped belongs in
+/// a log rather than in a state machine that has no branch for it.
+fn status_of(state: &str) -> Option<&'static str> {
+    match state {
+        "live" => Some("NEW"),
+        "partially_filled" => Some("PARTIALLY_FILLED"),
+        "filled" => Some("FILLED"),
+        "canceled" | "mmp_canceled" => Some("CANCELED"),
+        _ => None,
+    }
+}
+
+/// A contract count as a quantity of the underlying, exactly.
+///
+/// `sz` and `pos` count contracts; everything above this module counts
+/// the underlying. This is the module header's hundredfold error taken
+/// in the direction a *read* makes it — and a read gets no balance check
+/// downstream to catch it, so it is the quieter of the two.
+///
+/// Exact rather than rounded, and it can be: the divisor is a power of
+/// ten, so the quotient terminates and the text below is all of it. A
+/// float here would turn a position into 57.999999999999993 lots one
+/// call later, which is what `amount_text` exists to prevent.
+fn qty_text_from_contracts(contracts: &str, contract_value: i64) -> Option<String> {
+    if contract_value <= 0 {
+        return None;
+    }
+    let trimmed = contracts.trim();
+    let negative = trimmed.starts_with('-');
+    let (count, count_scale) = parse_decimal(trimmed.trim_start_matches('-'))?;
+    let scaled = i128::from(count) * i128::from(contract_value);
+    // Derived rather than written as 8, so that a change to
+    // `CONTRACT_SCALE` moves this with it instead of past it.
+    let contract_scale = u8::try_from(oq_types::CONTRACT_SCALE.ilog10()).ok()?;
+    let scale = count_scale.checked_add(contract_scale)?;
+    let value = i64::try_from(scaled).ok()?;
+    let text = decimal(value, scale);
+    Some(if negative { format!("-{text}") } else { text })
+}
+
+/// Read `/api/v5/account/positions`.
+///
+/// `contract_value` comes from the listing, because nothing in the
+/// response says how much of the underlying one contract is.
+///
+/// # Sign comes from `posSide`, not from `pos`
+///
+/// Under hedging the venue reports a long and a short as separate legs,
+/// and the sign of `pos` on the short leg is a detail of the venue this
+/// adapter declines to depend on: the leg name already says which
+/// direction it is, so the sign is taken from the name and the magnitude
+/// from the number. A venue that flipped that convention would then be a
+/// venue this still reads correctly.
+///
+/// A flat leg is kept rather than dropped. A leg reported at zero and a
+/// leg the venue does not mention are the same fact to everything above,
+/// and dropping the first once told a model that a position it had just
+/// closed was absent.
+///
+/// # Errors
+/// When the envelope is a failure, or a field this build needs cannot be
+/// read. Named per field: the usual cause is a renamed key and the fix
+/// depends on which one.
+pub fn parse_positions(
+    body: &str,
+    contract_value: i64,
+) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+    let mut out = Vec::new();
+    for item in envelope(body, "positions")? {
+        let Some(inst_id) = field_str(&item, "instId") else {
+            return Err(malformed("position instId", &item));
+        };
+        let Some(pos_side) = field_str(&item, "posSide") else {
+            return Err(malformed("position posSide", &item));
+        };
+        let Some(leg) = leg_of(&pos_side) else {
+            return Err(malformed("position posSide", &item));
+        };
+        let Some(pos) = field_str(&item, "pos") else {
+            return Err(malformed("position pos", &item));
+        };
+        // An empty `pos` is the venue declining to say, which is not the
+        // same as a zero it did say. Nothing is claimed about a leg that
+        // was not reported.
+        if pos.trim().is_empty() {
+            continue;
+        }
+        let Some(magnitude) = qty_text_from_contracts(&pos, contract_value) else {
+            return Err(malformed("position size in contracts", &item));
+        };
+        let amount_text = match leg {
+            "SHORT" => format!("-{}", magnitude.trim_start_matches('-')),
+            "LONG" => magnitude.trim_start_matches('-').to_string(),
+            // Netting keeps whatever sign the venue gave it: here the
+            // number is the direction, because the name is not.
+            _ => magnitude,
+        };
+        let Ok(amount) = amount_text.parse::<f64>() else {
+            return Err(malformed("position size", &item));
+        };
+        // A flat leg has no average price and no unrealized profit, and
+        // the venue says so with an empty string rather than a zero.
+        // That is an absence, not an unreadable number.
+        let entry_text = field_str(&item, "avgPx").unwrap_or_default();
+        let entry_price = if entry_text.trim().is_empty() {
+            0.0
+        } else {
+            entry_text
+                .parse::<f64>()
+                .map_err(|_| malformed("position avgPx", &item))?
+        };
+        let upl = field_str(&item, "upl").unwrap_or_default();
+        let unrealized = if upl.trim().is_empty() {
+            0.0
+        } else {
+            upl.parse::<f64>()
+                .map_err(|_| malformed("position upl", &item))?
+        };
+        out.push(crate::binance::PositionSnapshot {
+            symbol: inst_id,
+            position_side: leg.to_string(),
+            amount,
+            amount_text,
+            entry_text,
+            entry_price,
+            unrealized,
+        });
+    }
+    Ok(out)
+}
+
+/// Read `/api/v5/account/balance` for one settlement currency.
+///
+/// `read_at_ms` is the local clock at the moment of the read, not the
+/// venue's `uTime`: that field says when the account last changed, and a
+/// caller asking how fresh its picture is wants the first.
+///
+/// # Errors
+/// When the envelope is a failure, the currency is not in the response,
+/// or one of the three balances cannot be read. A missing balance is an
+/// error and never a zero — a zero is a number a risk gate acts on.
+pub fn parse_balance(
+    body: &str,
+    ccy: &str,
+    read_at_ms: i64,
+) -> Result<crate::binance::AccountSnapshot, VenueError> {
+    let items = envelope(body, "balance")?;
+    let Some(details) = items.first().and_then(|i| array_field(i, "details")) else {
+        return Err(malformed("balance details", body));
+    };
+    let Some(entry) = objects(&details)
+        .into_iter()
+        .find(|d| field_str(d, "ccy").as_deref() == Some(ccy))
+    else {
+        return Err(malformed("balance for the settlement currency", body));
+    };
+    let read = |key: &'static str| -> Result<f64, VenueError> {
+        field_str(&entry, key)
+            .filter(|v| !v.trim().is_empty())
+            .and_then(|v| v.parse::<f64>().ok())
+            .ok_or_else(|| malformed(key, &entry))
+    };
+    Ok(crate::binance::AccountSnapshot {
+        wallet_balance: read("cashBal")?,
+        unrealized: read("upl")?,
+        margin_balance: read("eq")?,
+        read_at_ms,
+    })
+}
+
+/// Read `/api/v5/trade/orders-pending`.
+///
+/// Sizes arrive in contracts here too, and are converted for the same
+/// reason.
+///
+/// # Errors
+/// When the envelope is a failure, or a field this build needs cannot be
+/// read — including a side or a state this build does not know, which is
+/// refused rather than guessed.
+pub fn parse_open_orders(
+    body: &str,
+    contract_value: i64,
+) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+    let mut out = Vec::new();
+    for item in envelope(body, "open orders")? {
+        let Some(symbol) = field_str(&item, "instId") else {
+            return Err(malformed("order instId", &item));
+        };
+        let Some(order_id) = field_str(&item, "ordId").and_then(|v| v.parse::<i64>().ok()) else {
+            return Err(malformed("order ordId", &item));
+        };
+        let client_order_id = field_str(&item, "clOrdId").unwrap_or_default();
+        let Some(side) = field_str(&item, "side").and_then(|v| side_of(&v)) else {
+            return Err(malformed("order side", &item));
+        };
+        let Some(position_side) = field_str(&item, "posSide").and_then(|v| leg_of(&v)) else {
+            return Err(malformed("order posSide", &item));
+        };
+        let Some(status) = field_str(&item, "state").and_then(|v| status_of(&v)) else {
+            return Err(malformed("order state", &item));
+        };
+        // A market order rests at no price, and the venue writes that as
+        // an empty string. Zero is the honest reading of "no price"
+        // here, and it is what the field means to a caller listing what
+        // is resting.
+        let price = field_str(&item, "px")
+            .filter(|v| !v.trim().is_empty())
+            .map_or(Ok(0.0), |v| {
+                v.parse::<f64>().map_err(|_| malformed("order px", &item))
+            })?;
+        let qty = |key: &'static str| -> Result<f64, VenueError> {
+            let raw = field_str(&item, key).unwrap_or_default();
+            if raw.trim().is_empty() {
+                return Ok(0.0);
+            }
+            qty_text_from_contracts(&raw, contract_value)
+                .and_then(|t| t.parse::<f64>().ok())
+                .ok_or_else(|| malformed(key, &item))
+        };
+        out.push(crate::binance::OpenOrder {
+            symbol,
+            order_id,
+            client_order_id,
+            side: side.to_string(),
+            position_side: position_side.to_string(),
+            price,
+            orig_qty: qty("sz")?,
+            executed_qty: qty("accFillSz")?,
+            status: status.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Whether the account is in hedge mode, from `/api/v5/account/config`.
+///
+/// # Errors
+/// When the envelope is a failure, or `posMode` is missing or is a value
+/// this build does not know. Not defaulted: starting a hedged strategy
+/// against a netting account is the kind of mistake that is only visible
+/// after it has closed a position it meant to open.
+pub fn parse_position_mode(body: &str) -> Result<bool, VenueError> {
+    let items = envelope(body, "account config")?;
+    let Some(mode) = items.first().and_then(|i| field_str(i, "posMode")) else {
+        return Err(malformed("posMode", body));
+    };
+    match mode.as_str() {
+        "long_short_mode" => Ok(true),
+        "net_mode" => Ok(false),
+        _ => Err(malformed("posMode", body)),
+    }
+}
+
+/// The venue's clock, from `/api/v5/public/time`.
+///
+/// # Errors
+/// When the envelope is a failure or `ts` cannot be read.
+pub fn parse_server_time(body: &str) -> Result<i64, VenueError> {
+    let items = envelope(body, "server time")?;
+    items
+        .first()
+        .and_then(|i| field_str(i, "ts"))
+        .and_then(|v| v.parse::<i64>().ok())
+        .ok_or_else(|| malformed("server time", body))
+}
+
+/// One contract of BTC-USDT-SWAP is 0.01 BTC, at `CONTRACT_SCALE`.
+#[cfg(test)]
+const BTC_CT_VAL: i64 = 1_000_000;
+
+#[cfg(test)]
+mod account_reads {
+    use super::*;
+
+    #[test]
+    fn a_failure_arrives_as_http_200_and_is_not_an_empty_account() {
+        // The trap this venue sets. An adapter that read `data` without
+        // reading `code` would report a flat account here, and a flat
+        // account is an instruction to open a position.
+        let body = r#"{"code":"50011","msg":"Too many requests","data":[]}"#;
+        let e = parse_positions(body, BTC_CT_VAL).expect_err("a refusal is not a flat account");
+        assert!(
+            matches!(e, VenueError::Venue { status: 200, .. }),
+            "a non-zero code must surface as the venue refusing: {e:?}"
+        );
+    }
+
+    #[test]
+    fn contracts_become_the_underlying_exactly() {
+        // Five contracts of 0.01 BTC is 0.05 BTC, and the text says so
+        // to the last digit. This is the hundredfold error the module
+        // header names, in the direction a read makes it.
+        assert_eq!(
+            qty_text_from_contracts("5", BTC_CT_VAL).as_deref(),
+            Some("0.05000000")
+        );
+        // The venue's own lot size is 0.01 contracts, so a fractional
+        // count is a legal size and not a malformed one.
+        assert_eq!(
+            qty_text_from_contracts("0.5", BTC_CT_VAL).as_deref(),
+            Some("0.005000000")
+        );
+        // A listing that does not say what a contract is worth cannot be
+        // converted, and guessing one is how a position is off by a
+        // factor nobody sees.
+        assert_eq!(qty_text_from_contracts("5", 0), None);
+    }
+
+    #[test]
+    fn a_legs_direction_comes_from_its_name_not_from_the_sign() {
+        // The same short leg, reported both ways round. This adapter
+        // reads both identically, so a venue that changes which one it
+        // sends does not silently invert a position.
+        for pos in ["5", "-5"] {
+            let body = format!(
+                r#"{{"code":"0","msg":"","data":[{{"instType":"SWAP","instId":"BTC-USDT-SWAP","posSide":"short","pos":"{pos}","avgPx":"76880.6","upl":"-21.5"}}]}}"#
+            );
+            let legs = parse_positions(&body, BTC_CT_VAL).expect("a readable position");
+            assert_eq!(legs.len(), 1);
+            assert_eq!(legs[0].position_side, "SHORT");
+            assert_eq!(legs[0].amount_text, "-0.05000000", "pos was {pos:?}");
+            assert!((legs[0].amount - -0.05).abs() < 1e-12, "pos was {pos:?}");
+            assert!((legs[0].entry_price - 76_880.6).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_flat_leg_is_kept_and_an_unreported_one_is_not_invented() {
+        // A leg at zero is a fact about the account. Dropping it once
+        // told a model that a position it had just closed was absent,
+        // which is the failure `account.rs` records.
+        let body = r#"{"code":"0","msg":"","data":[
+            {"instId":"BTC-USDT-SWAP","posSide":"long","pos":"0","avgPx":"","upl":""},
+            {"instId":"BTC-USDT-SWAP","posSide":"short","pos":"","avgPx":"","upl":""}
+        ]}"#;
+        let legs = parse_positions(body, BTC_CT_VAL).expect("a readable position");
+        assert_eq!(legs.len(), 1, "the empty leg is silence, not a zero");
+        assert_eq!(legs[0].position_side, "LONG");
+        assert_eq!(legs[0].amount, 0.0);
+        // No average price on a flat leg is an absence, not a bad number.
+        assert_eq!(legs[0].entry_price, 0.0);
+        assert_eq!(legs[0].entry_text, "");
+    }
+
+    #[test]
+    fn a_position_mode_this_build_does_not_know_is_refused() {
+        let body = r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","posSide":"sideways","pos":"1"}]}"#;
+        assert!(
+            parse_positions(body, BTC_CT_VAL).is_err(),
+            "an unrecognised leg must not become BOTH"
+        );
+    }
+
+    #[test]
+    fn a_balance_that_cannot_be_read_is_an_error_and_never_a_zero() {
+        // `upl` absent. Zero is a number a risk gate acts on, so the
+        // read fails instead of inventing one.
+        let body = r#"{"code":"0","msg":"","data":[{"totalEq":"5218","details":[
+            {"ccy":"USDT","eq":"5196.35","cashBal":"5218.03","availBal":"3225.6"}]}]}"#;
+        assert!(parse_balance(body, "USDT", 1).is_err());
+    }
+
+    #[test]
+    fn a_balance_is_read_for_the_currency_that_was_asked_for() {
+        let body = r#"{"code":"0","msg":"","data":[{"details":[
+            {"ccy":"BTC","eq":"1","cashBal":"1","upl":"0"},
+            {"ccy":"USDT","eq":"5196.35","cashBal":"5218.03","upl":"-21.68"}]}]}"#;
+        let snap = parse_balance(body, "USDT", 42).expect("a readable balance");
+        assert!((snap.wallet_balance - 5218.03).abs() < 1e-9);
+        assert!((snap.unrealized - -21.68).abs() < 1e-9);
+        assert!((snap.margin_balance - 5196.35).abs() < 1e-9);
+        // The local read time, not the venue's account-update time.
+        assert_eq!(snap.read_at_ms, 42);
+        // A currency the account does not hold is not a zero balance.
+        assert!(parse_balance(body, "ETH", 1).is_err());
+    }
+
+    #[test]
+    fn an_orders_vocabulary_is_translated_rather_than_passed_through() {
+        // `oq-live` matches on FILLED and CANCELED. An adapter that sent
+        // `live` through would produce a caller that never sees an order
+        // end.
+        let body = r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP",
+            "ordId":"312269865356374016","clOrdId":"oq0001","px":"78000","sz":"5",
+            "accFillSz":"1","side":"buy","posSide":"long","state":"partially_filled"}]}"#;
+        let orders = parse_open_orders(body, BTC_CT_VAL).expect("a readable order");
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].side, "BUY");
+        assert_eq!(orders[0].position_side, "LONG");
+        assert_eq!(orders[0].status, "PARTIALLY_FILLED");
+        assert_eq!(orders[0].order_id, 312_269_865_356_374_016);
+        // Sizes are contracts here too.
+        assert!((orders[0].orig_qty - 0.05).abs() < 1e-12);
+        assert!((orders[0].executed_qty - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_order_state_this_build_does_not_know_is_refused() {
+        let body = r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","ordId":"1",
+            "clOrdId":"a","px":"1","sz":"1","accFillSz":"0","side":"buy","posSide":"long",
+            "state":"something_new"}]}"#;
+        assert!(
+            parse_open_orders(body, BTC_CT_VAL).is_err(),
+            "an unknown state must not be reported as resting"
+        );
+    }
+
+    #[test]
+    fn hedge_mode_is_read_and_an_unknown_mode_is_refused() {
+        let hedged = r#"{"code":"0","msg":"","data":[{"posMode":"long_short_mode","uid":"1"}]}"#;
+        let netting = r#"{"code":"0","msg":"","data":[{"posMode":"net_mode","uid":"1"}]}"#;
+        assert!(parse_position_mode(hedged).expect("a readable mode"));
+        assert!(!parse_position_mode(netting).expect("a readable mode"));
+        let unknown = r#"{"code":"0","msg":"","data":[{"posMode":"whatever","uid":"1"}]}"#;
+        assert!(parse_position_mode(unknown).is_err());
+    }
+
+    #[test]
+    fn the_venue_clock_is_read_from_its_own_envelope() {
+        let body = r#"{"code":"0","msg":"","data":[{"ts":"1597026383085"}]}"#;
+        assert_eq!(
+            parse_server_time(body).expect("a readable time"),
+            1_597_026_383_085
+        );
     }
 }
 

@@ -115,6 +115,46 @@ pub(crate) fn raw_field(body: &str, key: &str) -> Option<String> {
     Some(rest[..end].trim().to_string())
 }
 
+/// The contents of the array following `"key":`, bracket-matched to its
+/// close.
+///
+/// [`raw_field`] cannot do this. It stops at the first `,`, `}` or `]`,
+/// which for an array value is the end of its first element — so an
+/// envelope read with it returns one truncated object and the caller
+/// sees an account holding one position because the venue listed it
+/// first.
+///
+/// Strings are honoured while matching, because a venue's error message
+/// is free to contain a bracket and has.
+pub(crate) fn array_field(body: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let at = body.find(&needle)? + needle.len();
+    let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '[' if !in_string => depth += 1,
+            ']' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(rest[1..i].to_string());
+                }
+            }
+            _ if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Read a JSON string body up to its closing quote, resolving the escapes
 /// a venue actually emits.
 ///
@@ -209,6 +249,34 @@ pub(crate) fn field_bool(body: &str, key: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_array_field_is_read_whole_rather_than_to_its_first_comma() {
+        // The envelope every OKX response arrives in. `raw_field` stops
+        // at the first `,`, which here is inside the first object.
+        let body = r#"{"code":"0","msg":"","data":[{"a":"1","b":"2"},{"a":"3"}]}"#;
+        let data = array_field(body, "data").expect("an array");
+        assert_eq!(objects(&data).len(), 2);
+        assert_eq!(raw_field(body, "data").as_deref(), Some("[{\"a\":\"1\""));
+    }
+
+    #[test]
+    fn a_bracket_inside_a_message_does_not_end_the_array() {
+        // A venue's error text is free to contain a bracket, and has.
+        let body = r#"{"code":"0","data":[{"msg":"limit [1,2] exceeded"}],"x":1}"#;
+        let data = array_field(body, "data").expect("an array");
+        assert_eq!(objects(&data).len(), 1);
+        assert!(data.contains("limit [1,2] exceeded"));
+    }
+
+    #[test]
+    fn a_field_that_is_not_an_array_is_not_read_as_one() {
+        // `code` is a string. Returning its contents here would make a
+        // caller's `objects` call quietly empty.
+        let body = r#"{"code":"0","data":[]}"#;
+        assert_eq!(array_field(body, "code"), None);
+        assert_eq!(array_field(body, "data").as_deref(), Some(""));
+    }
 
     const POSITIONS: &str = r#"[
       {"symbol":"BTCUSDT","positionAmt":"0.256","entryPrice":"71444.87","positionSide":"LONG","unRealizedProfit":"-2197.75"},
