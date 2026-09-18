@@ -60,7 +60,9 @@ pub mod watch;
 
 pub use account::Account;
 pub use binance::parse_user_event;
-pub use binance::{AccountSnapshot, Binance, OpenOrder, PositionSnapshot, Trade, VenueError};
+pub use binance::{
+    AccountSnapshot, Binance, Dialect, OpenOrder, PositionSnapshot, Trade, VenueError,
+};
 pub use creds::Credentials;
 pub use exec::{
     Endpoint, Events, Execution, Handshake, NewOrder, Opening, OrderAck, OrderUpdate, Placed,

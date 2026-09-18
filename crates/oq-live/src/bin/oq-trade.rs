@@ -54,9 +54,11 @@ USAGE:
     OQ_VENUE_KEY=<key> OQ_VENUE_SECRET=<secret> oq-trade [OPTIONS]
 
 OPTIONS:
-    --venue <NAME>         binance | okx [default: binance]
+    --venue <NAME>         binance | aster | okx [default: binance]
                            The symbol is the venue's own spelling:
-                           BTCUSDT on one, BTC-USDT-SWAP on the other.
+                           BTCUSDT on the first two, BTC-USDT-SWAP on the
+                           third. Aster ships Binance's API under
+                           /fapi/v3, so it is the same adapter.
     --symbol <SYMBOL>      Contract [default: BTCUSDT]
     --strategy <NAME>      observe | probe [default: observe]
     --window-ms <MS>       Tick width [default: 1000]
@@ -327,11 +329,12 @@ fn main() -> ExitCode {
     let venue_name = value("--venue").unwrap_or_else(|| "binance".to_string());
     let venue: Box<dyn Account> = match venue_name.as_str() {
         "binance" => Box::new(Binance::at(endpoint, creds)),
+        "aster" => Box::new(Binance::aster(endpoint, creds)),
         "okx" => Box::new(Okx::at(endpoint, creds)),
         other => {
             eprintln!(
                 "venue            {other:?} is not a venue this build speaks; \
-                 try binance or okx"
+                 try binance, aster or okx"
             );
             return ExitCode::FAILURE;
         }
