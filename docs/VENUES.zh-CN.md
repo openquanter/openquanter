@@ -114,6 +114,24 @@ Aster 的文档写的是对"query string 拼接 request body"做 `HMAC SHA256`,�
 拒绝同样藏在 HTTP 200 里,表现为 `sendStatus.status` 加一个 `REJECT` 事件——四个
 家族里第三个这么干的,这也是下面 V8 说"body 才是规则"的由来。
 
+### Kraken 停在哪里,以及为什么停在那里
+
+它的 `Execution` 侧已经建成并通过了 conformance 套件。`Account` 侧没有,而理由值得
+写出来,而不是留成一处空白。
+
+flex 账户的 `/accounts` 响应带的是 `availableMargin`、`balanceValue` 和
+`collateralValue`。而 `AccountSnapshot` 要的是钱包余额、未实现盈亏、保证金余额。
+**哪个对哪个,从文档给出的形状里定不下来**——这些名字近到可以猜,又不同到猜一定会
+在某处猜错。
+
+一个错的余额比一个缺失的余额更糟。这个 crate 自己记过原因:一个读不出来的余额
+曾经变成 `0.0`,"而零是风控会拿去算的数",于是修法是让它失败而不是让它编造。编造
+一个*映射*是同一个错误换了身好衣服——它产出一个看着合理、这里任何测试都反驳不了、
+而仓位大小会从它算出来的数字。
+
+所以账户侧等一个来自交易所的真实响应。有 demo key 的话这是五分钟的答案,没有的话
+是个无界的问题。
+
 ### 别人为此付过什么代价
 
 NautilusTrader 有一个用 Rust 写的 Hyperliquid 适配器,它的集成文档是这次调研

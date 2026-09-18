@@ -147,6 +147,29 @@ Rejections arrive inside HTTP 200, as `sendStatus.status` plus a
 `REJECT` event — the third of four families to do it that way, and the
 reason V8 below says the body is the rule.
 
+### Where Kraken stops, and why it stops there
+
+Its `Execution` side is built and passes the conformance suite. Its
+`Account` side is not, and the reason is worth stating rather than
+leaving as an absence.
+
+The `/accounts` response for a flex account carries `availableMargin`,
+`balanceValue` and `collateralValue`. `AccountSnapshot` carries a wallet
+balance, an unrealized P&L and a margin balance. **Which maps to which
+cannot be settled from the documented shapes** — the names are close
+enough to guess at and different enough that a guess would be wrong
+somewhere.
+
+A wrong balance is worse than a missing one. This crate already records
+why: a balance that could not be read was becoming `0.0`, "which is a
+number a risk gate acts on", and the fix was to fail rather than to
+invent. Inventing a *mapping* is the same mistake wearing better
+clothes — it produces a number that is plausible, that no test here can
+contradict, and that a position size is computed from.
+
+So the account side waits for one real response from the venue. That is
+a five-minute answer with a demo key and an unbounded one without.
+
 ### What other implementations paid for
 
 NautilusTrader ships a Hyperliquid adapter written in Rust, and its
