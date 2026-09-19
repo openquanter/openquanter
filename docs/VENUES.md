@@ -382,12 +382,21 @@ two were redirected before a line was written for them.
 | **OKX** | built | built | HMAC, base64 |
 | **Aster** | built | built | Binance's, at `/fapi/v3` |
 | **Kraken** | built | built | SHA-256 → HMAC-SHA-512 |
+| **Deribit** | built | built | JSON-RPC, Basic |
+| **Hyperliquid** | built | built | secp256k1, **vector-verified** |
+| **Backpack** | built | positions and orders | Ed25519 |
 | **Bitget** | built | — | OKX's, at UTA v3 |
-| **Backpack** | built | — | Ed25519 |
-| **Hyperliquid** | built | — | secp256k1, **vector-verified** |
-| **Deribit** | built | — | JSON-RPC, Basic |
 | ~~Coinbase~~ | — | — | moved to Deribit |
 | ~~Lighter~~ | — | — | declined; see above |
+
+Two account reads stop short, and both stop for the same reason rather
+than for lack of work. **Backpack** has documented field names for
+positions and orders and none for collateral — the public endpoint
+returns risk-model parameters, not an account's equity. **Bitget**'s
+UTA assets and positions responses are not quotable from its
+documentation either. `AccountSnapshot` needs three specific numbers,
+and picking three out of an undocumented response is the mistake
+`kraken::parse_accounts` spends an identity check avoiding.
 
 **What the survey saved.** Two of the seven were mid-migration when
 this was written — Coinbase's perpetuals had moved to Deribit nine days
@@ -421,19 +430,31 @@ shape of the problem:
 the venue's own published vectors — a known key, a known action, a known
 `r`, `s` and `v`, plus the `connectionId` that pins the MessagePack
 encoding. It is the only signing here with that standing, and it exists
-because that venue ships a test. Kraken's balance mapping is the other
-one: it could not be settled from the field names, so it is written as
-an identity (`portfolioValue = balanceValue + totalUnrealized`) and
-enforced at runtime, which makes a wrong reading fail rather than
-report three plausible numbers.
+because that venue ships a test.
+
+Two balance mappings are the other case. Kraken's could not be settled
+from the field names, so it is written as an identity
+(`portfolioValue = balanceValue + totalUnrealized`) and enforced at
+runtime. Hyperliquid's does the same with
+`accountValue = totalRawUsd + totalNtlPos`. Deribit's needs neither:
+the venue names the field `margin_balance`, so the name *is* the
+mapping and a cross-check would be ceremony.
+
+**And an identity has a limit worth recording.** Hyperliquid's did not
+catch the bug its tests did: the reader was finding
+`crossMarginSummary` instead of `marginSummary`, because both carry the
+same field names and both are internally consistent. An identity
+verifies what the fields *mean*; it cannot verify *which object* was
+read. That took `json::object_field` and a test that reads the value.
 
 ## What is left
 
 Three things, and none of them is a venue.
 
-1. **Account reads for Bitget, Backpack, Hyperliquid and Deribit.** The
-   same work Kraken's took, once real response shapes are in hand.
-2. **`Account` for Kraken and Bitget**, which needs one thing:
+1. **Collateral for Backpack, and assets and positions for Bitget.**
+   One real response each; everything around them is written.
+2. **`Account` for the five venues that only read**, which needs one
+   thing:
    Kraken's WebSocket authenticates by challenge-response — connect,
    ask, sign the answer — and `UserStream`'s `Opening` is a list of
    frames fixed before the socket opens. That abstraction cannot say
