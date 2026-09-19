@@ -208,8 +208,15 @@ Pre-alpha, and specific about it. **Built and tested today:**
 - **Parity** — trade-by-trade diffing with difference attribution, over
   baselines identified by code, data and configuration together.
 
-- **The order path** — a venue-independent execution contract with one
-  venue behind it. Placement returns three outcomes, not two: accepted,
+- **The order path** — a venue-independent execution contract with five
+  venues behind it, three of them complete and two stopping at
+  placement. Two earned their keep by contradicting the contract rather
+  than fitting it: Aster ships Binance's API under different paths, so
+  it landed as a sixteen-entry table instead of a second adapter; and
+  Kraken names its orders rather than numbering them, which turned a
+  venue id from a number into text. A shared signature turned out to
+  imply nothing about a shared unit — OKX counts contracts where Bitget
+  counts coins, and getting that backwards cost a commit. Placement returns three outcomes, not two: accepted,
   rejected, and *unknown*, because a timeout does not mean the order
   failed, it means nobody knows, and folding that into an error is what
   produces duplicate positions. Every order carries an id the caller
