@@ -140,17 +140,6 @@ pub fn authent(secret: &[u8], post_data: &str, nonce: &str, path: &str) -> Strin
     crate::b64::encode(&hmac_sha512(secret, &hashed))
 }
 
-/// Whether Kraken will accept this as a `cliOrdId`.
-///
-/// Up to 100 characters, and unique across the account's history rather
-/// than among open orders. The length is far more generous than the
-/// other two venues here — 36 and 32 — so an id built for them fits,
-/// and one built for this venue may not fit them.
-#[must_use]
-pub fn valid_client_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 100 && id.is_ascii()
-}
-
 /// The form parameters for a new order.
 ///
 /// A market order is `mkt` and carries no price; a limit order is `lmt`
@@ -566,11 +555,12 @@ impl Kraken {
 
 impl Execution for Kraken {
     fn place(&self, order: &NewOrder, instrument: &Instrument) -> Placed {
-        if !valid_client_id(&order.client_id) {
+        if !crate::broker::IdRules::KRAKEN.accepts(&order.client_id) {
             return Placed::Rejected(Reject {
                 code: None,
                 message: format!(
-                    "client id {:?} is not usable here: up to 100 ASCII characters",
+                    "client id {:?} is not usable here: up to 100 characters of \
+                     letters, digits and punctuation",
                     order.client_id
                 ),
             });
@@ -820,13 +810,13 @@ mod tests {
     }
 
     #[test]
-    fn a_client_id_may_be_long_here_and_must_still_be_ascii() {
-        assert!(valid_client_id("oq1"));
-        assert!(valid_client_id(&"a".repeat(100)));
-        assert!(!valid_client_id(&"a".repeat(101)));
-        assert!(!valid_client_id(""));
-        // Longer than either of the other two venues allows, which is
+    fn a_client_id_may_be_long_here() {
+        use crate::broker::IdRules;
+        assert!(IdRules::KRAKEN.accepts("oq1"));
+        assert!(IdRules::KRAKEN.accepts(&"a".repeat(100)));
+        assert!(!IdRules::KRAKEN.accepts(&"a".repeat(101)));
+        // Longer than either of the first two venues allows, which is
         // the direction that matters: an id built for them fits here.
-        assert!(valid_client_id(&"a".repeat(36)));
+        assert!(IdRules::KRAKEN.accepts(&"a".repeat(36)));
     }
 }
