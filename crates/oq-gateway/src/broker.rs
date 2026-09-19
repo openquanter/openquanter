@@ -34,78 +34,128 @@
 use core::fmt;
 
 /// A venue's rules for what a client order id may contain.
+/// What a venue will accept as a client order id.
+///
+/// Four shapes across six venues, which is why this is an enum rather
+/// than a struct of flags. It was two booleans until the fourth shape
+/// arrived; a third boolean would have made `digits_only` and
+/// `punctuation_allowed` both meaningful at once, which they cannot be.
+///
+/// The shape matters beyond validation. `L4` wants a client order id
+/// the caller chooses and can reconstruct, and [`IdScheme`] does that
+/// by composing an ownership prefix — which only works where an id is
+/// text. A venue whose id is a number has no room for `oq`, and
+/// pretending otherwise produces an id the venue refuses at the first
+/// order rather than at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IdRules {
-    /// Longest id the venue accepts.
-    pub max_len: usize,
-    /// Whether anything beyond letters and digits is allowed.
-    ///
-    /// Named as a flag rather than a character set because that is the
-    /// distinction the two shipped venues actually differ on, and a
-    /// character set nobody varies is a knob that only ever gets set
-    /// wrong.
-    pub punctuation_allowed: bool,
-    /// Whether the id must be digits, and nothing else.
-    ///
-    /// One venue's client order id is a `uint32` rather than a string.
-    /// Named as a flag for the same reason `punctuation_allowed` is: it
-    /// is a distinction the shipped venues actually differ on, and a
-    /// prefix that works everywhere else composes an id this one
-    /// refuses — which would otherwise be discovered at the first order
-    /// rather than at startup.
-    pub digits_only: bool,
+pub enum IdRules {
+    /// Alphanumeric text, with optional punctuation.
+    Text {
+        /// Longest id the venue accepts.
+        max_len: usize,
+        /// Whether `.`, `_`, `:`, `/` and `-` are allowed.
+        punctuation_allowed: bool,
+    },
+    /// An unsigned integer, no larger than `max`.
+    Number {
+        /// The largest value the venue's field can hold.
+        max: u64,
+    },
+    /// `0x` followed by exactly `bytes * 2` hex digits.
+    Hex {
+        /// How many bytes the id encodes.
+        bytes: usize,
+    },
 }
 
 impl IdRules {
-    /// Binance USDT-M futures: 36 characters of `[A-Za-z0-9._:/-]`.
-    pub const BINANCE: Self = Self {
+    /// Binance USDT-M futures, and Aster: 36 characters of
+    /// `[A-Za-z0-9._:/-]`.
+    pub const BINANCE: Self = Self::Text {
         max_len: 36,
         punctuation_allowed: true,
-        digits_only: false,
     };
     /// OKX: 32 alphanumeric characters.
-    pub const OKX: Self = Self {
+    pub const OKX: Self = Self::Text {
         max_len: 32,
         punctuation_allowed: false,
-        digits_only: false,
     };
     /// Kraken Futures: 100 characters, and unique across the account's
     /// history rather than only among open orders — so it is the one
     /// client id here that is an idempotency token.
-    pub const KRAKEN: Self = Self {
+    pub const KRAKEN: Self = Self::Text {
         max_len: 100,
         punctuation_allowed: true,
-        digits_only: false,
     };
-    /// Backpack: a `uint32`, not a string. Ten digits is `4294967295`,
-    /// and `accepts` checks the value rather than only the length.
-    pub const BACKPACK: Self = Self {
-        max_len: 10,
-        punctuation_allowed: false,
-        digits_only: true,
+    /// Deribit: a `label`, up to 64 characters, which the venue also
+    /// indexes on.
+    pub const DERIBIT: Self = Self::Text {
+        max_len: 64,
+        punctuation_allowed: true,
     };
+    /// Backpack: a `uint32`. Checked by value, because `9999999999` is
+    /// ten digits and is not one.
+    pub const BACKPACK: Self = Self::Number {
+        max: u32::MAX as u64,
+    };
+    /// Hyperliquid: a `cloid`, 128 bits as hex.
+    pub const HYPERLIQUID: Self = Self::Hex { bytes: 16 };
 
     /// Whether `id` is usable as it stands.
     #[must_use]
     pub fn accepts(&self, id: &str) -> bool {
-        if id.is_empty() || id.len() > self.max_len {
-            return false;
+        match *self {
+            Self::Text {
+                max_len,
+                punctuation_allowed,
+            } => {
+                !id.is_empty()
+                    && id.len() <= max_len
+                    && id.chars().all(|c| {
+                        c.is_ascii_alphanumeric()
+                            || (punctuation_allowed && matches!(c, '.' | '_' | ':' | '/' | '-'))
+                    })
+            }
+            // By value, not by length: the field is an integer and the
+            // venue rejects what will not fit in it.
+            Self::Number { max } => id.parse::<u64>().is_ok_and(|v| v <= max),
+            Self::Hex { bytes } => {
+                id.len() == 2 + bytes * 2
+                    && id.starts_with("0x")
+                    && id[2..].chars().all(|c| c.is_ascii_hexdigit())
+            }
         }
-        if self.digits_only {
-            // The value, not just the shape: ten digits is within
-            // `max_len`, and `9999999999` is still not a `uint32`.
-            return id.parse::<u32>().is_ok();
+    }
+
+    /// Whether an ownership prefix can be composed into an id here.
+    ///
+    /// Only where the id is text. `L4`'s reconstructible id and
+    /// [`IdScheme`]'s `oq7` are the same mechanism, and a venue that
+    /// numbers its client ids has nowhere to put the `oq` — so this is
+    /// asked at construction rather than discovered when the venue
+    /// refuses the first order.
+    #[must_use]
+    pub const fn takes_a_prefix(&self) -> bool {
+        matches!(*self, Self::Text { .. })
+    }
+
+    /// The longest id this venue accepts, for the shapes that have one.
+    #[must_use]
+    pub const fn max_len(&self) -> Option<usize> {
+        match *self {
+            Self::Text { max_len, .. } => Some(max_len),
+            Self::Number { .. } | Self::Hex { .. } => None,
         }
-        id.chars().all(|c| {
-            c.is_ascii_alphanumeric()
-                || (self.punctuation_allowed && matches!(c, '.' | '_' | ':' | '/' | '-'))
-        })
     }
 }
 
-/// Why an id could not be composed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdError {
+    /// The venue's id format has no room for a prefix at all.
+    Shape {
+        /// What about the shape refuses it.
+        what: &'static str,
+    },
     /// The finished id is longer than the venue accepts.
     ///
     /// Reported with both lengths, because the fix is to shorten
@@ -139,6 +189,7 @@ impl fmt::Display for IdError {
                 "the composed client id is {len} characters and this venue accepts {max}; \
                  shorten the broker code or the sequence, not the venue"
             ),
+            Self::Shape { what } => write!(f, "{what}"),
             Self::Character { found, part } => write!(
                 f,
                 "the {part} contains {found:?}, which this venue does not accept in a \
@@ -212,6 +263,18 @@ impl IdScheme {
                 part: "ownership prefix",
             });
         }
+        // A venue whose client id is a number or a fixed-width hex
+        // string has nowhere to put `oq`. Refused here rather than at
+        // the first order: the scheme would compose `oq7`, the venue
+        // would reject it, and the message would be about an id format
+        // rather than about a strategy that cannot mark its own orders
+        // on this venue.
+        if !rules.takes_a_prefix() {
+            return Err(IdError::Shape {
+                what: "this venue's client order id is not text, so an \
+                       ownership prefix cannot be composed into it",
+            });
+        }
         if let Some(c) = owner.chars().find(|c| !rules.accepts(&c.to_string())) {
             return Err(IdError::Character {
                 found: c,
@@ -251,11 +314,13 @@ impl IdScheme {
     /// When the finished id does not fit the venue's rules.
     pub fn compose(&self, sequence: u64) -> Result<String, IdError> {
         let id = format!("{}{sequence}", self.owned_prefix());
-        if id.len() > self.rules.max_len {
-            return Err(IdError::TooLong {
-                len: id.len(),
-                max: self.rules.max_len,
-            });
+        // Only the text shapes have a length limit; the others are
+        // refused at construction, because a prefix cannot go into
+        // them at all.
+        if let Some(max) = self.rules.max_len()
+            && id.len() > max
+        {
+            return Err(IdError::TooLong { len: id.len(), max });
         }
         if let Some(c) = id.chars().find(|c| !self.rules.accepts(&c.to_string())) {
             return Err(IdError::Character {
@@ -344,6 +409,45 @@ mod tests {
     /// The venues disagree, and an id legal on one and not the other
     /// fails at the venue with a message about the id — a long way from
     /// the code that composed it.
+    #[test]
+    fn six_venues_take_four_shapes() {
+        // The reason this is an enum. Two booleans described the first
+        // two venues and then stopped describing the problem.
+        assert!(IdRules::BINANCE.accepts("oq-7"));
+        assert!(!IdRules::OKX.accepts("oq-7"), "no punctuation");
+        assert!(IdRules::KRAKEN.accepts(&"a".repeat(100)));
+        assert!(IdRules::DERIBIT.accepts(&"a".repeat(64)));
+        assert!(IdRules::BACKPACK.accepts("4294967295"));
+        assert!(IdRules::HYPERLIQUID.accepts("0x1234567890abcdef1234567890abcdef"));
+
+        // And the shapes disagree about the id every other venue takes.
+        assert!(!IdRules::BACKPACK.accepts("oq7"));
+        assert!(!IdRules::HYPERLIQUID.accepts("oq7"));
+    }
+
+    #[test]
+    fn a_number_is_checked_by_value_and_not_by_length() {
+        // Ten digits, and not a uint32. A length check would pass it
+        // and the venue would not.
+        assert!(!IdRules::BACKPACK.accepts("9999999999"));
+        assert!(IdRules::BACKPACK.accepts("999999999"));
+    }
+
+    #[test]
+    fn a_venue_that_cannot_hold_a_prefix_says_so_at_construction() {
+        // `L4`'s reconstructible id and this scheme's `oq7` are the
+        // same mechanism, and two venues have nowhere to put the `oq`.
+        // Refusing here means a run fails at startup with a sentence
+        // about ownership, rather than at its first order with one
+        // about an id format.
+        assert!(IdScheme::new("oq", IdRules::BINANCE).is_ok());
+        assert!(IdScheme::new("oq", IdRules::KRAKEN).is_ok());
+        let e =
+            IdScheme::new("oq", IdRules::BACKPACK).expect_err("a uint32 has no room for a prefix");
+        assert!(format!("{e}").contains("not text"), "{e}");
+        assert!(IdScheme::new("oq", IdRules::HYPERLIQUID).is_err());
+    }
+
     #[test]
     fn an_id_that_the_venue_will_not_take_is_refused_here() {
         // OKX takes no punctuation. Binance does.
