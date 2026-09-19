@@ -94,10 +94,8 @@ pub enum Value {
     Str(String),
     Bool(bool),
     Uint(u64),
-    Int(i64),
     Map(Vec<(String, Value)>),
     Array(Vec<Value>),
-    Nil,
 }
 
 impl Value {
@@ -119,35 +117,17 @@ impl Value {
 /// Only the shapes an action uses, and each one in its shortest form,
 /// because that is what the reference implementation emits and the
 /// bytes are hashed.
+///
+/// Narrower than MessagePack: no signed integers and no nil. An action
+/// has neither — every number in one is a positive integer, and an
+/// absent field is omitted rather than nulled. The variants were
+/// written anyway and the reachability check refused them, correctly:
+/// an encoding nothing produces is an encoding nothing has tested.
 pub fn pack(value: &Value, out: &mut Vec<u8>) {
     match value {
-        Value::Nil => out.push(0xc0),
         Value::Bool(false) => out.push(0xc2),
         Value::Bool(true) => out.push(0xc3),
         Value::Uint(n) => pack_uint(*n, out),
-        Value::Int(n) => {
-            if *n >= 0 {
-                pack_uint(u64::try_from(*n).unwrap_or(0), out);
-            } else if *n >= -32 {
-                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                out.push((*n as i8) as u8);
-            } else if *n >= i64::from(i8::MIN) {
-                out.push(0xd0);
-                #[allow(clippy::cast_possible_truncation)]
-                out.push((*n as i8) as u8);
-            } else if *n >= i64::from(i16::MIN) {
-                out.push(0xd1);
-                #[allow(clippy::cast_possible_truncation)]
-                out.extend_from_slice(&(*n as i16).to_be_bytes());
-            } else if *n >= i64::from(i32::MIN) {
-                out.push(0xd2);
-                #[allow(clippy::cast_possible_truncation)]
-                out.extend_from_slice(&(*n as i32).to_be_bytes());
-            } else {
-                out.push(0xd3);
-                out.extend_from_slice(&n.to_be_bytes());
-            }
-        }
         Value::Str(s) => {
             let bytes = s.as_bytes();
             let len = bytes.len();
@@ -498,10 +478,8 @@ impl Hyperliquid {
 #[must_use]
 pub fn to_json(value: &Value) -> String {
     match value {
-        Value::Nil => "null".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Uint(n) => n.to_string(),
-        Value::Int(n) => n.to_string(),
         Value::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Value::Array(items) => {
             let inner: Vec<String> = items.iter().map(to_json).collect();

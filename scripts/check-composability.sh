@@ -114,7 +114,12 @@ BUDGETS=(
   # Set to the exact count rather than to a round number with headroom.
   # A patch release that pulls in one more crate should turn this red
   # and make somebody look, which is the whole point of the table.
-  "oq-gateway:66"
+  #
+  # The count is the one CI sees, which is Linux. It is 66 on macOS —
+  # the tree is platform-dependent — and a budget set from a developer
+  # machine is a budget that fails on the runner. Numbers here come
+  # from the runner.
+  "oq-gateway:67"
   # The process assembly. Inherits the gateway's tree because it has to
   # talk to a venue; carries nothing of its own. Everything it decides
   # is in oq-risk and its own supervisor, both at zero.
@@ -124,8 +129,8 @@ BUDGETS=(
   # stating, because a number that moves without the crate changing is
   # the kind of thing that gets bumped without being read — this one
   # measures what a *consumer* of `oq-live` inherits, and what they now
-  # inherit is a curve implementation.
-  "oq-live:68"
+  # inherit is a curve implementation. Linux count, as above.
+  "oq-live:69"
 )
 
 third_party_count() {
