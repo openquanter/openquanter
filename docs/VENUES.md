@@ -371,49 +371,79 @@ else, with a conformance case for exactly this.
 Lighter was stated as low deliberately, and reading it turned that into
 a decision rather than a confidence level — see the section above.
 
-## Order, and where it got to
+## Where this got to
 
-**Done, and on `main`:**
+Six venues were on the list. Five have adapters, one was declined, and
+two were redirected before a line was written for them.
 
-1. **OKX, complete** — `Execution`, `Account` and `Events`, conformance
-   passed, selectable as `--venue okx`. Writing the layer above it found
-   the first of its predicted defects: sizes had been converted to
-   coins where this venue and `Instrument` both count contracts.
-2. **Aster, complete** — the family test, and it passed. The whole venue
-   is a sixteen-entry path table, because its API *is* Binance's. A test
-   asserts every Aster path is the Binance path with the version
-   changed, so the day that stops being true, the table says so.
-3. **`oq-hash` gains SHA-512** — checked against the NIST digests and
-   RFC 4231, and the commit that added it states where hand-writing a
-   primitive stops.
-4. **Kraken Futures, execution side** — signing, placement, cancel,
-   status, conformance passed. It found two defects in code that was
-   already shipping: `raw_field` stopped at the first occurrence of a
-   key, so `{"result":"error","error":"..."}` turned a named refusal
-   into an unexplained one; and the conformance suite caught this
-   adapter reporting a captive portal as a *rejection*, which invites a
-   resend into an order that may be resting.
-5. **Bitget on UTA v3, execution side** — conformance passed, with two
-   of its three paths marked as guesses in the module header.
+| Venue | Order path | Account reads | Signing |
+|---|---|---|---|
+| Binance | built | built | HMAC |
+| **OKX** | built | built | HMAC, base64 |
+| **Aster** | built | built | Binance's, at `/fapi/v3` |
+| **Kraken** | built | built | SHA-256 → HMAC-SHA-512 |
+| **Bitget** | built | — | OKX's, at UTA v3 |
+| **Backpack** | built | — | Ed25519 |
+| **Hyperliquid** | built | — | secp256k1, **vector-verified** |
+| **Deribit** | built | — | JSON-RPC, Basic |
+| ~~Coinbase~~ | — | — | moved to Deribit |
+| ~~Lighter~~ | — | — | declined; see above |
 
-**Blocked, each on something a person has to supply:**
+**What the survey saved.** Two of the seven were mid-migration when
+this was written — Coinbase's perpetuals had moved to Deribit nine days
+earlier, Bitget's classic API was being replaced three days earlier —
+and both were found by reading the venue's own documentation rather
+than by an adapter that stopped working.
 
-6. **Kraken and Bitget account sides** — one real response each. The
-   flex `/accounts` shape cannot be mapped onto `AccountSnapshot` from
-   the documentation, and a wrong balance is worse than a missing one.
-7. **The dependency decision** — Backpack (Ed25519), Hyperliquid
-   (secp256k1 and Keccak) and Lighter all need asymmetric signing, and
-   the composability budget's note is explicit about what a dependency
-   in this crate costs. Nothing past here moves until that is decided
-   and the budget table edited with the reason.
-8. **Backpack**, then **Hyperliquid**, then **Lighter** — in that order,
-   simplest scheme first, so the decision in (7) is proved by the
-   cheapest of the three. Lighter still needs a survey of its own; it is
-   the one venue here whose signing this document has not read properly.
-9. **Deribit**, or Coinbase leaves the list.
+**What the venues found in code that was already shipping.** Each new
+one contradicted an assumption the first two had made look like the
+shape of the problem:
 
-Each step is a pull request, and steps 2 through 7 each begin by writing
-the conformance payloads and end with the adapter passing them.
+- OKX: quantities are contracts, and the adapter had converted them to
+  coins. A hundredfold, in the direction where the account looks
+  smaller than it is.
+- Kraken: `venue_id` was an `i64` and this venue names its orders. The
+  type carried a constraint no caller needed — nothing joins on it.
+- Kraken again, in `json`: `raw_field` stopped at the first occurrence
+  of a key, so `{"result":"error","error":"..."}` turned a named
+  refusal into an unexplained one. Every venue had that bug.
+- Bitget: a shared *signature* with OKX implies nothing about a shared
+  *unit*, a shared success code, or a shared envelope.
+- Backpack: a client order id can be a `uint32`, which no prefix
+  scheme composes.
+- Hyperliquid: and it can be 0x plus 32 hex digits, which is the fourth
+  shape. `IdRules`' two flags cannot express four, and adding one
+  boolean per venue is not the fix — **that type needs rethinking**,
+  and this is the note saying so rather than the commit that accretes
+  another flag.
+
+**What is verified rather than written.** Hyperliquid's signing, against
+the venue's own published vectors — a known key, a known action, a known
+`r`, `s` and `v`, plus the `connectionId` that pins the MessagePack
+encoding. It is the only signing here with that standing, and it exists
+because that venue ships a test. Kraken's balance mapping is the other
+one: it could not be settled from the field names, so it is written as
+an identity (`portfolioValue = balanceValue + totalUnrealized`) and
+enforced at runtime, which makes a wrong reading fail rather than
+report three plausible numbers.
+
+## What is left
+
+Three things, and none of them is a venue.
+
+1. **Account reads for Bitget, Backpack, Hyperliquid and Deribit.** The
+   same work Kraken's took, once real response shapes are in hand.
+2. **`Account` for Kraken and Bitget**, which needs one thing:
+   Kraken's WebSocket authenticates by challenge-response — connect,
+   ask, sign the answer — and `UserStream`'s `Opening` is a list of
+   frames fixed before the socket opens. That abstraction cannot say
+   "sign the reply to the previous frame", and widening it belongs in
+   the commit that needs it.
+3. **A first real run, for any of the five.** Every adapter carries the
+   same disclosure, and it is the honest one: payloads come from
+   documentation and specifications, and that is not the same as having
+   placed an order. The Binance adapter was written to this standard
+   and its first real run found five defects no unit test reached.
 
 ## What this does not cover
 
