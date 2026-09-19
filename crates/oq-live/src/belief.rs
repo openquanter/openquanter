@@ -44,7 +44,7 @@
 //! adopted legs show both directions, and a caller that sees it should
 //! not trust the netted position.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use oq_journal::Reader;
@@ -97,6 +97,7 @@ impl Belief {
         let mut submitted: HashMap<String, (Side, bool)> = HashMap::new();
         let mut accepted: Vec<String> = Vec::new();
         let mut filled: HashMap<String, i64> = HashMap::new();
+        let mut withdrawn: HashSet<String> = HashSet::new();
         let mut ordered: Vec<i64> = Vec::new();
 
         for frame in replay.since(0) {
@@ -134,6 +135,9 @@ impl Belief {
                     ..
                 }) => {
                     submitted.insert(client_id, (side, reduce_only));
+                }
+                Some(Record::Cancelled { client_id, .. }) => {
+                    withdrawn.insert(client_id);
                 }
                 Some(Record::Outcome { client_id, tag, .. }) => match tag {
                     OutcomeTag::Accepted => {
@@ -179,13 +183,24 @@ impl Belief {
             }
         }
 
-        // Resting: accepted, and not fully consumed by fills. A partial
-        // fill leaves the order resting, which is why this compares
-        // against the submission's quantity rather than testing for the
-        // presence of any fill at all.
+        // Resting: accepted, not consumed by fills, and not withdrawn.
+        //
+        // The third clause was missing until a journal claimed 175
+        // resting orders against an account holding nine. Every one of
+        // the 166 extra had been cancelled — and the journal had no
+        // record of a cancellation to read, so this could not have
+        // known. Both halves were fixed together: `Record::Cancelled`
+        // exists now, and this subtracts it.
+        //
+        // Any fill at all takes an order off this list, so a partially
+        // filled order is not reported as resting even though the
+        // remainder is. Understating is the safe direction here — the
+        // venue's own open orders are what a cutover cancels against —
+        // and correcting it needs the submitted quantity compared
+        // against the filled one, which is a separate change.
         b.resting = accepted
             .into_iter()
-            .filter(|id| filled.get(id).copied().unwrap_or(0) == 0)
+            .filter(|id| filled.get(id).copied().unwrap_or(0) == 0 && !withdrawn.contains(id))
             .collect();
         b.resting.sort();
         Ok(b)

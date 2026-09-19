@@ -125,6 +125,24 @@ writing it down and better than leaving it out.
 - **`RunResult::margin_usage` replaces nothing and adds a field**;
   `RunConfig::track_margin` defaults to off, so no existing run changes
   or pays for it.
+- **`Record::Cancelled` (live journal kind 9) added, and
+  `Belief::from_journal` subtracts it.** *Changes what a reconstruction
+  reports, not what a run does.* The live journal recorded a
+  submission, its outcome and its fills, and nothing at all when the
+  venue withdrew an order. A reconstruction could therefore only read
+  an accepted, unfilled, never-ending order as resting: on a testnet
+  deployment that came out as **175 resting orders against an account
+  holding nine**, the 166 difference being cancellations the journal
+  never held. `oq-belief` is what step 5 of [the cutover
+  playbook](docs/CUTOVER.md) compares against, so the error was
+  load-bearing. **Behavioural delta:** none for any run — the record is
+  written where the venue confirms the withdrawal and nothing reads it
+  back inside the loop. A journal replayed by `oq-belief` or
+  `oq-replay` now reports resting orders that a venue would recognise.
+  Additive on disk: journals written before it contain no such record
+  and replay unchanged, and a journal written *with* it is skipped
+  frame-by-frame by an earlier build rather than misread, which is what
+  the explicit kind numbering is for.
 
 ### Documentation
 

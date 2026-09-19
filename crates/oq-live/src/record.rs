@@ -54,6 +54,14 @@ pub mod kind {
     pub const RECONCILED: u16 = 7;
     /// What the strategy was waiting for, sampled on a timer.
     pub const WAITING: u16 = 8;
+    /// An order the venue confirmed it had withdrawn.
+    ///
+    /// Added after a journal was read back and claimed 175 resting
+    /// orders against an account holding nine. Every one of the
+    /// missing 166 had been cancelled, and nothing here said so: a
+    /// reader could see an order submitted and accepted, and could see
+    /// no fill, and had no way to learn it was gone.
+    pub const CANCELLED: u16 = 9;
 }
 
 /// How a submitted order turned out.
@@ -124,6 +132,20 @@ pub enum Record {
         tag: OutcomeTag,
         detail: String,
     },
+    /// An order withdrawn, as the venue confirmed it.
+    ///
+    /// Written when the cancellation is *seen on the account stream*,
+    /// not when it is requested — the same ordering `Outcome` uses, and
+    /// for the same reason: a request that was never answered is not a
+    /// cancelled order, and recording it as one would leave a live
+    /// order that the journal believes is gone. That is the failure
+    /// this module's "Before, not after" exists to avoid, and it is
+    /// the unrecoverable direction of the two: an order nobody is
+    /// tracking keeps trading.
+    Cancelled {
+        at: Nanos,
+        client_id: String,
+    },
     Fill {
         at: Nanos,
         client_id: String,
@@ -186,6 +208,7 @@ impl Record {
             Self::Outcome { .. } => kind::OUTCOME,
             Self::Fill { .. } => kind::FILL,
             Self::Refused { .. } => kind::REFUSED,
+            Self::Cancelled { .. } => kind::CANCELLED,
             Self::Reconciled { .. } => kind::RECONCILED,
             Self::Waiting { .. } => kind::WAITING,
         }
@@ -281,6 +304,10 @@ impl Record {
                 put_i64(&mut out, at.0);
                 put_str(&mut out, breach);
             }
+            Self::Cancelled { at, client_id } => {
+                put_i64(&mut out, at.0);
+                put_str(&mut out, client_id);
+            }
             Self::Waiting { at, entries } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(entries.len()).unwrap_or(0));
@@ -351,6 +378,10 @@ impl Record {
                 price: take_str(&mut p)?,
                 order: take_i64(&mut p)?.unsigned_abs(),
                 side: take_str(&mut p)?,
+            },
+            kind::CANCELLED => Self::Cancelled {
+                at: Nanos(take_i64(&mut p)?),
+                client_id: take_str(&mut p)?,
             },
             kind::REFUSED => Self::Refused {
                 at: Nanos(take_i64(&mut p)?),
@@ -488,6 +519,10 @@ mod tests {
                 ("ETHUSDT".into(), "SHORT".into(), -40, 251_500),
             ],
         });
+        roundtrip(&Record::Cancelled {
+            at: Nanos(13),
+            client_id: "oq123-1".into(),
+        });
     }
 
     #[test]
@@ -560,9 +595,15 @@ mod tests {
             kind::FILL,
             kind::REFUSED,
             kind::RECONCILED,
+            kind::WAITING,
+            kind::CANCELLED,
         ];
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
-        assert_eq!(all, [1, 2, 3, 4, 5, 6, 7], "numbers are part of the format");
+        assert_eq!(
+            all,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "numbers are part of the format"
+        );
     }
 }

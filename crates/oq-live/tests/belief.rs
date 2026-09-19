@@ -238,3 +238,87 @@ fn a_correct_belief_agrees_with_the_record_the_venue_produced() {
     };
     assert!(!wrong.differences(&belief).is_empty());
 }
+
+/// An order the venue withdrew is not resting.
+///
+/// This is the defect in miniature. On a testnet deployment a journal
+/// reconstructed as 175 resting orders against an account holding
+/// nine: 166 had been cancelled, and the journal had no record of a
+/// cancellation for this to read. Both halves were fixed together —
+/// `Record::Cancelled` exists now, and the reconstruction subtracts
+/// it. A cutover checked against that belief would have been told to
+/// account for 166 orders that no venue has.
+#[test]
+fn an_order_the_venue_withdrew_is_not_resting() {
+    let p = tmp("cancelled");
+    write(
+        &p,
+        &[
+            start(),
+            Record::Submitted {
+                at: Nanos(1),
+                client_id: "oq-1".into(),
+                side: Side::Buy,
+                limit_price: PriceTicks(9_000),
+                qty: QtyLots(1_000),
+                reduce_only: false,
+            },
+            Record::Outcome {
+                at: Nanos(2),
+                client_id: "oq-1".into(),
+                tag: OutcomeTag::Accepted,
+                detail: String::new(),
+            },
+            Record::Cancelled {
+                at: Nanos(3),
+                client_id: "oq-1".into(),
+            },
+        ],
+    );
+    let b = Belief::from_journal(&p).expect("readable");
+    assert!(
+        b.resting.is_empty(),
+        "a withdrawn order is not resting: {:?}",
+        b.resting
+    );
+    assert_eq!(b.undecodable, 0, "the new kind decodes");
+}
+
+/// A cancellation is only ever read from a record of one.
+///
+/// The other half of the same property: silence is not a withdrawal.
+/// An accepted order the journal never resolves may well be live on
+/// the venue, and a reconstruction that dropped it would understate
+/// exactly the orders a cutover has to cancel by hand.
+#[test]
+fn an_unresolved_order_is_still_resting() {
+    let p = tmp("not-cancelled");
+    write(
+        &p,
+        &[
+            start(),
+            Record::Submitted {
+                at: Nanos(1),
+                client_id: "oq-1".into(),
+                side: Side::Buy,
+                limit_price: PriceTicks(9_000),
+                qty: QtyLots(1_000),
+                reduce_only: false,
+            },
+            Record::Outcome {
+                at: Nanos(2),
+                client_id: "oq-1".into(),
+                tag: OutcomeTag::Accepted,
+                detail: String::new(),
+            },
+            // A different order's cancellation must not be read as
+            // this one's.
+            Record::Cancelled {
+                at: Nanos(3),
+                client_id: "oq-2".into(),
+            },
+        ],
+    );
+    let b = Belief::from_journal(&p).expect("readable");
+    assert_eq!(b.resting, vec!["oq-1".to_string()]);
+}
