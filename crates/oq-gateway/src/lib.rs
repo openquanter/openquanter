@@ -53,6 +53,7 @@ pub mod conformance;
 pub mod creds;
 pub mod deribit;
 pub mod exec;
+pub mod hyperliquid;
 pub(crate) mod json;
 pub mod klines;
 pub mod kraken;
