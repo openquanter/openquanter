@@ -254,6 +254,221 @@ fn truncate(body: &str) -> String {
     body.chars().take(200).collect()
 }
 
+// ---------------------------------------------------------------------
+// Account reads.
+// ---------------------------------------------------------------------
+
+/// Read `private/get_account_summary`.
+///
+/// This venue names the field `margin_balance`, which is the whole of
+/// the mapping. Kraken's had to be written as an identity and checked
+/// at runtime because its names could not settle it; here the names
+/// do, and inventing a cross-check would be ceremony rather than
+/// evidence.
+///
+/// `session_upl` and not `futures_session_upl`: the first is the whole
+/// account, the second only its futures. An account holding options
+/// would under-report its unrealized P&L by the difference, and
+/// nothing downstream would say so.
+///
+/// # Errors
+/// When the envelope carries an error, or a field is missing. A
+/// balance that cannot be read is an error and never a zero.
+pub fn parse_account_summary(
+    body: &str,
+    read_at_ms: i64,
+) -> Result<crate::binance::AccountSnapshot, VenueError> {
+    if body.contains("\"error\"") {
+        return Err(VenueError::Malformed {
+            what: "account summary",
+            body: truncate(body),
+        });
+    }
+    let read = |key: &'static str| -> Result<f64, VenueError> {
+        raw_field(body, key)
+            .and_then(|v| v.parse::<f64>().ok())
+            .ok_or(VenueError::Malformed {
+                what: key,
+                body: truncate(body),
+            })
+    };
+    Ok(crate::binance::AccountSnapshot {
+        wallet_balance: read("balance")?,
+        unrealized: read("session_upl")?,
+        margin_balance: read("margin_balance")?,
+        read_at_ms,
+    })
+}
+
+/// Read `private/get_positions`.
+///
+/// One net position per instrument — this venue has no hedged legs —
+/// so the leg is `BOTH` and the direction lives in the sign. Which is
+/// taken from `direction` rather than from `size`, the same rule the
+/// other adapters use: a venue that changes which one carries it is
+/// then one this still reads.
+///
+/// # Errors
+/// When the envelope carries an error or a direction this build does
+/// not know.
+pub fn parse_positions(body: &str) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+    if body.contains("\"error\"") {
+        return Err(VenueError::Malformed {
+            what: "positions",
+            body: truncate(body),
+        });
+    }
+    let Some(list) = crate::json::array_field(body, "result") else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for item in crate::json::objects(&list) {
+        let Some(direction) = field_str(&item, "direction") else {
+            return Err(VenueError::Malformed {
+                what: "position direction",
+                body: truncate(&item),
+            });
+        };
+        let Some(side) = side_of(&direction) else {
+            return Err(VenueError::Malformed {
+                what: "position direction",
+                body: truncate(&item),
+            });
+        };
+        let Some(size) = raw_field(&item, "size") else {
+            return Err(VenueError::Malformed {
+                what: "position size",
+                body: truncate(&item),
+            });
+        };
+        let magnitude = size.trim_start_matches('-').to_string();
+        let amount_text = if side == "SELL" {
+            format!("-{magnitude}")
+        } else {
+            magnitude
+        };
+        let entry_text = raw_field(&item, "average_price").unwrap_or_default();
+        out.push(crate::binance::PositionSnapshot {
+            symbol: field_str(&item, "instrument_name").unwrap_or_default(),
+            // No hedged legs here: one net position per instrument.
+            position_side: "BOTH".to_string(),
+            amount: amount_text.parse::<f64>().unwrap_or_default(),
+            amount_text,
+            entry_price: entry_text.parse::<f64>().unwrap_or_default(),
+            entry_text,
+            unrealized: raw_field(&item, "floating_profit_loss")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read `private/get_open_orders_by_instrument`.
+///
+/// # Errors
+/// When the envelope carries an error, or an order carries a state
+/// this build does not know.
+pub fn parse_open_orders(body: &str) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+    if body.contains("\"error\"") {
+        return Err(VenueError::Malformed {
+            what: "open orders",
+            body: truncate(body),
+        });
+    }
+    let Some(list) = crate::json::array_field(body, "result") else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for item in crate::json::objects(&list) {
+        let Some(state) = field_str(&item, "order_state") else {
+            return Err(VenueError::Malformed {
+                what: "order state",
+                body: truncate(&item),
+            });
+        };
+        let Some(status) = status_of(&state) else {
+            return Err(VenueError::Malformed {
+                what: "order state",
+                body: truncate(&item),
+            });
+        };
+        let Some(side) = field_str(&item, "direction").and_then(|d| side_of(&d)) else {
+            return Err(VenueError::Malformed {
+                what: "order direction",
+                body: truncate(&item),
+            });
+        };
+        let number = |key: &str| -> f64 {
+            raw_field(&item, key)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_default()
+        };
+        out.push(crate::binance::OpenOrder {
+            symbol: field_str(&item, "instrument_name").unwrap_or_default(),
+            order_id: field_str(&item, "order_id").unwrap_or_default(),
+            client_order_id: field_str(&item, "label").unwrap_or_default(),
+            side: side.to_string(),
+            position_side: "BOTH".to_string(),
+            price: number("price"),
+            orig_qty: number("amount"),
+            executed_qty: number("filled_amount"),
+            status: status.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+impl Deribit {
+    /// The account's balances, in one settlement currency.
+    ///
+    /// The currency is a parameter because this venue settles per
+    /// currency rather than in one margin asset: a `BTC-PERPETUAL` is
+    /// margined in BTC and asking for USDC would answer about a
+    /// different account.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports.
+    pub fn balances(&self, currency: &str) -> Result<crate::binance::AccountSnapshot, VenueError> {
+        let read_at = crate::binance::now_ms();
+        let body = self.call(
+            "private/get_account_summary",
+            &format!("currency={currency}"),
+        )?;
+        parse_account_summary(&body, read_at)
+    }
+
+    /// Open positions in one currency.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports.
+    pub fn positions(
+        &self,
+        currency: &str,
+    ) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+        let body = self.call(
+            "private/get_positions",
+            &format!("currency={currency}&kind=future"),
+        )?;
+        parse_positions(&body)
+    }
+
+    /// Everything resting on one instrument.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports.
+    pub fn open_orders(
+        &self,
+        instrument: &str,
+    ) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+        let body = self.call(
+            "private/get_open_orders_by_instrument",
+            &format!("instrument_name={instrument}"),
+        )?;
+        parse_open_orders(&body)
+    }
+}
+
 impl Deribit {
     /// Call a method. Over HTTP the method is the path.
     fn call(&self, method: &str, query: &str) -> Result<String, VenueError> {
@@ -326,6 +541,73 @@ impl Execution for Deribit {
             &format!("label={client_id}"),
         )?;
         Ok(order_from_query(&body, client_id))
+    }
+}
+
+#[cfg(test)]
+mod account_reads {
+    use super::*;
+
+    #[test]
+    fn the_venue_names_the_margin_balance_itself() {
+        // Kraken's had to be written as an identity because its field
+        // names could not settle the mapping. This one says
+        // `margin_balance`, so the mapping is the name.
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"balance":5.0,"margin_balance":4.9,
+            "session_upl":-0.1,"session_rpl":0.0,"equity":4.9,"available_funds":4.5,
+            "futures_session_upl":-0.1,"currency":"BTC","initial_margin":0.4}}"#;
+        let snap = parse_account_summary(body, 7).expect("a readable summary");
+        assert!((snap.wallet_balance - 5.0).abs() < 1e-9);
+        assert!((snap.unrealized - -0.1).abs() < 1e-9);
+        assert!((snap.margin_balance - 4.9).abs() < 1e-9);
+        assert_eq!(snap.read_at_ms, 7);
+    }
+
+    #[test]
+    fn a_balance_that_cannot_be_read_is_an_error_and_never_a_zero() {
+        // `margin_balance` absent. Zero is a number a risk gate acts
+        // on, so the read fails rather than inventing one.
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"balance":5.0,"session_upl":0.0}}"#;
+        assert!(parse_account_summary(body, 1).is_err());
+    }
+
+    #[test]
+    fn a_short_position_is_negative_because_the_direction_says_so() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":[
+            {"instrument_name":"BTC-PERPETUAL","direction":"sell","size":-10.0,
+             "average_price":78000.5,"floating_profit_loss":1.25,"kind":"future"},
+            {"instrument_name":"ETH-PERPETUAL","direction":"buy","size":20.0,
+             "average_price":3000.0,"floating_profit_loss":-2.5,"kind":"future"}]}"#;
+        let legs = parse_positions(body).expect("readable positions");
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].amount_text, "-10.0");
+        // One net position per instrument: no hedged legs here.
+        assert_eq!(legs[0].position_side, "BOTH");
+        assert_eq!(legs[0].entry_text, "78000.5");
+        assert_eq!(legs[1].amount_text, "20.0");
+    }
+
+    #[test]
+    fn an_error_envelope_is_not_an_empty_account() {
+        // The JSON-RPC trap again: a 200 carrying an error member.
+        // Reading it as no positions would report a flat account.
+        let body = r#"{"jsonrpc":"2.0","id":1,"error":{"code":13009,"message":"unauthorized"}}"#;
+        assert!(parse_positions(body).is_err());
+        assert!(parse_account_summary(body, 1).is_err());
+        assert!(parse_open_orders(body).is_err());
+    }
+
+    #[test]
+    fn a_resting_order_carries_its_label_as_the_client_id() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":[{"order_id":"ETH-100234",
+            "instrument_name":"BTC-PERPETUAL","direction":"buy","price":78000.0,
+            "amount":10.0,"filled_amount":2.0,"order_state":"open","label":"oq1"}]}"#;
+        let orders = parse_open_orders(body).expect("readable orders");
+        assert_eq!(orders[0].client_order_id, "oq1");
+        assert_eq!(orders[0].order_id, "ETH-100234");
+        assert_eq!(orders[0].status, "NEW");
+        assert_eq!(orders[0].side, "BUY");
+        assert!((orders[0].executed_qty - 2.0).abs() < 1e-9);
     }
 }
 
