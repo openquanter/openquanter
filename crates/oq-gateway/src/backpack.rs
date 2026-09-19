@@ -40,6 +40,18 @@
 //! them. Flagged rather than resolved: a first real run against a
 //! parameter like that is what settles it.
 //!
+//! # What is missing, and why
+//!
+//! No balance read. `/api/v1/positions` and `/api/v1/orders` have
+//! documented field names; the collateral endpoints do not — the
+//! public one returns risk-model parameters rather than an account's
+//! equity, and the account query's response shape is not written down
+//! anywhere this survey found. `AccountSnapshot` needs a wallet
+//! balance, an unrealized P&L and a margin balance, and guessing which
+//! of an undocumented response's fields are those three is the mistake
+//! `kraken::parse_accounts` exists to avoid. One real response settles
+//! it.
+//!
 //! # What this has not done
 //!
 //! **It has not been run against Backpack.** The signing scheme is read
@@ -233,6 +245,131 @@ fn truncate(body: &str) -> String {
     body.chars().take(200).collect()
 }
 
+// ---------------------------------------------------------------------
+// Account reads.
+// ---------------------------------------------------------------------
+
+/// Read `/api/v1/positions`.
+///
+/// `netQuantity` is signed and there is one net position per market —
+/// no hedged legs — so unlike every other adapter here the sign is
+/// taken from the number, because there is no leg name to take it
+/// from. Stated rather than left implicit: the rule elsewhere is
+/// "direction from the name", and this is the exception the venue
+/// forces.
+///
+/// # Errors
+/// When a field this build needs cannot be read.
+pub fn parse_positions(body: &str) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+    let mut out = Vec::new();
+    for item in crate::json::objects(body) {
+        let Some(symbol) = field_str(&item, "symbol") else {
+            continue;
+        };
+        let Some(quantity) =
+            field_str(&item, "netQuantity").or_else(|| raw_field(&item, "netQuantity"))
+        else {
+            return Err(VenueError::Malformed {
+                what: "netQuantity",
+                body: item.chars().take(200).collect(),
+            });
+        };
+        let Ok(amount) = quantity.parse::<f64>() else {
+            return Err(VenueError::Malformed {
+                what: "netQuantity",
+                body: item.chars().take(200).collect(),
+            });
+        };
+        let entry_text = field_str(&item, "entryPrice")
+            .or_else(|| raw_field(&item, "entryPrice"))
+            .unwrap_or_default();
+        out.push(crate::binance::PositionSnapshot {
+            symbol,
+            // One net position per market.
+            position_side: "BOTH".to_string(),
+            amount,
+            amount_text: quantity,
+            entry_price: entry_text.parse::<f64>().unwrap_or_default(),
+            entry_text,
+            unrealized: field_str(&item, "pnlUnrealized")
+                .or_else(|| raw_field(&item, "pnlUnrealized"))
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read `/api/v1/orders`.
+///
+/// # Errors
+/// When an order carries a state this build does not know.
+pub fn parse_open_orders(body: &str) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+    let mut out = Vec::new();
+    for item in crate::json::objects(body) {
+        let Some(id) = field_str(&item, "id") else {
+            continue;
+        };
+        let Some(status) = field_str(&item, "status").and_then(|s| status_of(&s)) else {
+            return Err(VenueError::Malformed {
+                what: "order status",
+                body: item.chars().take(200).collect(),
+            });
+        };
+        let Some(side) = field_str(&item, "side").and_then(|s| side_of(&s)) else {
+            return Err(VenueError::Malformed {
+                what: "order side",
+                body: item.chars().take(200).collect(),
+            });
+        };
+        let number = |key: &str| -> f64 {
+            field_str(&item, key)
+                .or_else(|| raw_field(&item, key))
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_default()
+        };
+        out.push(crate::binance::OpenOrder {
+            symbol: field_str(&item, "symbol").unwrap_or_default(),
+            order_id: id,
+            // A number on the wire, carried as the text it arrived as.
+            client_order_id: raw_field(&item, "clientId")
+                .filter(|v| v != "null")
+                .unwrap_or_default(),
+            side: side.to_string(),
+            position_side: "BOTH".to_string(),
+            price: number("price"),
+            orig_qty: number("quantity"),
+            executed_qty: number("executedQuantity"),
+            status: status.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+impl Backpack {
+    /// Open positions.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports.
+    pub fn positions(&self) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+        let body = self.send("GET", "/api/v1/positions", "positionQuery", &[])?;
+        parse_positions(&body)
+    }
+
+    /// Everything resting, across markets or on one.
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports.
+    pub fn open_orders(
+        &self,
+        symbol: Option<&str>,
+    ) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+        let params = symbol.map_or_else(Vec::new, |s| sorted(vec![("symbol", s.to_string())]));
+        let body = self.send("GET", "/api/v1/orders", "orderQueryAll", &params)?;
+        parse_open_orders(&body)
+    }
+}
+
 impl Backpack {
     /// Send a signed request.
     fn send(
@@ -383,6 +520,56 @@ impl Execution for Backpack {
         let params = sorted(vec![("symbol", symbol.to_string())]);
         let body = self.send("GET", "/api/v1/orders", "orderQueryAll", &params)?;
         Ok(order_from_query(&body, client_id))
+    }
+}
+
+#[cfg(test)]
+mod account_reads {
+    use super::*;
+
+    #[test]
+    fn the_sign_comes_from_the_number_here_and_that_is_the_exception() {
+        // Every other adapter takes direction from a leg name and
+        // magnitude from the number. This venue reports one net
+        // position per market with no leg name at all, so the number
+        // is all there is.
+        let body = r#"[{"symbol":"SOL_USDC_PERP","netQuantity":"-12.5","entryPrice":"98.4",
+            "pnlUnrealized":"3.25","markPrice":"98.1"},
+            {"symbol":"BTC_USDC_PERP","netQuantity":"0.05","entryPrice":"78000",
+            "pnlUnrealized":"-1.5","markPrice":"77950"}]"#;
+        let legs = parse_positions(body).expect("readable positions");
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].amount_text, "-12.5");
+        assert!((legs[0].amount - -12.5).abs() < 1e-9);
+        assert_eq!(legs[0].position_side, "BOTH");
+        assert_eq!(legs[1].amount_text, "0.05");
+        assert!((legs[1].unrealized - -1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_resting_order_keeps_its_numeric_client_id_as_text() {
+        let body = r#"[{"id":"114905014","clientId":7,"symbol":"SOL_USDC_PERP","side":"Bid",
+            "quantity":"1","executedQuantity":"0.25","price":"100","status":"PartiallyFilled",
+            "createdAt":1614550000000}]"#;
+        let orders = parse_open_orders(body).expect("readable orders");
+        assert_eq!(orders[0].order_id, "114905014");
+        assert_eq!(orders[0].client_order_id, "7", "a number, carried as text");
+        assert_eq!(orders[0].status, "PARTIALLY_FILLED");
+        assert_eq!(orders[0].side, "BUY");
+        assert!((orders[0].executed_qty - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_order_state_this_build_does_not_know_is_refused() {
+        let body = r#"[{"id":"1","clientId":1,"symbol":"X","side":"Bid","quantity":"1",
+            "executedQuantity":"0","price":"1","status":"Teleported"}]"#;
+        assert!(parse_open_orders(body).is_err());
+    }
+
+    #[test]
+    fn an_empty_account_reads_as_empty_rather_than_failing() {
+        assert!(parse_positions("[]").expect("a flat account").is_empty());
+        assert!(parse_open_orders("[]").expect("nothing resting").is_empty());
     }
 }
 
