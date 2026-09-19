@@ -327,6 +327,21 @@ impl<E: Execution> Session<E> {
         });
     }
 
+    /// Write down that an order was withdrawn.
+    ///
+    /// Called when the venue confirms it on the account stream, not
+    /// when the cancel is sent. A request whose answer never arrived
+    /// has not cancelled anything, and writing it down as if it had
+    /// would leave a live order the journal believes is gone, which is
+    /// the unrecoverable direction of [`crate::record`]'s "Before, not
+    /// after": an order nobody is tracking keeps trading.
+    pub fn record_cancelled(&mut self, at: oq_types::Nanos, client_id: &str) {
+        self.write(&Record::Cancelled {
+            at,
+            client_id: client_id.to_string(),
+        });
+    }
+
     /// A tick the strategy is about to see.
     pub fn record_tick(&mut self, tick: &oq_engine::Tick) {
         self.write(&Record::Tick {

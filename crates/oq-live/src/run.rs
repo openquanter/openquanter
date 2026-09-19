@@ -957,6 +957,13 @@ where
                     }
                 } else if matches!(u.status.as_str(), "CANCELED" | "EXPIRED") {
                     books.on_closed();
+                    // Written here because here is where the venue
+                    // confirmed it. Without this the journal shows an
+                    // order accepted, never filled, and never ending —
+                    // which a reader can only take as still resting.
+                    trader
+                        .session_mut()
+                        .record_cancelled(Nanos(now_ns()), &u.client_id);
                 }
                 // The end of the order, which is not the same event as
                 // its last fill and must not be inferred from one. A

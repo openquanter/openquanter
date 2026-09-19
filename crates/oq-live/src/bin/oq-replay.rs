@@ -66,6 +66,7 @@ fn main() -> ExitCode {
     let mut skew_max = i64::MIN;
     let mut submitted = 0u64;
     let mut refused = 0u64;
+    let mut cancelled = 0u64;
     let mut fills = 0u64;
     let mut undecodable = 0u64;
     let mut outcomes: HashMap<String, OutcomeTag> = HashMap::new();
@@ -98,6 +99,7 @@ fn main() -> ExitCode {
             }
             Record::Fill { .. } => fills += 1,
             Record::Refused { .. } => refused += 1,
+            Record::Cancelled { .. } => cancelled += 1,
             _ => {}
         }
         if orders_only && matches!(record, Record::Tick { .. }) {
@@ -121,6 +123,7 @@ fn main() -> ExitCode {
     }
     println!("orders sent      {submitted}");
     println!("refused by gate  {refused}");
+    println!("withdrawn        {cancelled}");
     println!("fills            {fills}");
     if undecodable > 0 {
         println!("unreadable       {undecodable} record(s) this build could not decode");
@@ -203,6 +206,9 @@ fn render(record: &Record) -> String {
             tag,
             detail,
         } => format!("  \u{2192} {} {client_id} {tag:?} {detail}", at.0),
+        Record::Cancelled { at, client_id } => {
+            format!("  \u{2717} {} {client_id} withdrawn", at.0)
+        }
         Record::Fill {
             at,
             client_id,
