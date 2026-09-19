@@ -242,7 +242,7 @@ mod tests {
                     .iter()
                     .map(|id| OpenOrder {
                         symbol: "BTCUSDT".to_string(),
-                        order_id: 1,
+                        order_id: "1".to_string(),
                         client_order_id: (*id).to_string(),
                         side: "BUY".to_string(),
                         position_side: "BOTH".to_string(),

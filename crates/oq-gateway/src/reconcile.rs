@@ -85,7 +85,7 @@ pub enum Divergence {
     /// The venue reports an order we did not place, or no longer track.
     OrderUnknownLocally {
         client_order_id: String,
-        venue_order_id: i64,
+        venue_order_id: String,
     },
     /// A venue figure that does not land on the instrument's grid.
     ///
@@ -328,7 +328,7 @@ pub fn reconcile(expected: &Expectation, venue: &Snapshot, tol: Tolerance) -> Re
         if !expected.working_orders.contains(&theirs.client_order_id) {
             divergences.push(Divergence::OrderUnknownLocally {
                 client_order_id: theirs.client_order_id.clone(),
-                venue_order_id: theirs.order_id,
+                venue_order_id: theirs.order_id.clone(),
             });
         }
     }
@@ -360,7 +360,7 @@ mod tests {
     fn order(cid: &str, id: i64) -> OpenOrder {
         OpenOrder {
             symbol: "BTCUSDT".into(),
-            order_id: id,
+            order_id: id.to_string(),
             client_order_id: cid.into(),
             side: "BUY".into(),
             position_side: "LONG".into(),
