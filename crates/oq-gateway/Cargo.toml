@@ -12,6 +12,13 @@ oq-hash.workspace = true
 oq-types.workspace = true
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = "3.4"
+# Ed25519, for the one venue that signs with a keypair rather than a
+# shared secret. Taken rather than written: a hash is deterministic bit
+# arithmetic with published vectors, and curve arithmetic is
+# constant-time field math where a mistake leaks the key. See
+# docs/VENUES.md for the decision and scripts/check-composability.sh for
+# what it cost.
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
 
 [lints]
 workspace = true

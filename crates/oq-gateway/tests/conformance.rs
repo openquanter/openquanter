@@ -127,6 +127,41 @@ fn the_bitget_adapter_conforms() {
     assert!(r.conforms(), "{}", r.summary_line("bitget-uta"));
 }
 
+/// Payloads from Backpack's published OpenAPI specification.
+///
+/// Better evidence than the other adapters started with — a schema
+/// rather than a prose example — and still not a placed order. The
+/// client id is a number in every one of them, which is the constraint
+/// `IdRules::BACKPACK` exists for.
+fn backpack() -> Responses {
+    Responses {
+        venue: "backpack",
+        client_id: "7",
+        accepted: r#"{"id":"114905014","clientId":7,"symbol":"SOL_USDC","side":"Bid","quantity":"1","executedQuantity":"0","price":"100","status":"New","createdAt":1614550000000}"#,
+        accepted_venue_id: "114905014",
+        rejected: (
+            400,
+            r#"{"code":"INVALID_ORDER","message":"Order quantity is below the minimum"}"#,
+        ),
+        // Its codes are words rather than numbers.
+        rejected_code: None,
+        unavailable: (502, "<html>bad gateway</html>"),
+        absent: "[]",
+        present: r#"[{"id":"114905014","clientId":7,"symbol":"SOL_USDC","side":"Bid","quantity":"1","executedQuantity":"0","price":"100","status":"New","createdAt":1614550000000}]"#,
+        foreign: "<html>captive portal</html>",
+    }
+}
+
+#[test]
+fn the_backpack_adapter_conforms() {
+    let r = check(
+        &backpack(),
+        oq_gateway::backpack::classify,
+        oq_gateway::backpack::order_from_query,
+    );
+    assert!(r.conforms(), "{}", r.summary_line("backpack"));
+}
+
 #[test]
 fn the_binance_adapter_conforms() {
     let r = check(
