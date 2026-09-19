@@ -2019,8 +2019,11 @@ mod account_trait {
         assert_eq!(okx.id(), "okx-swap");
         // Narrower than the first venue's, so an id that works there is
         // not guaranteed here.
-        assert_eq!(okx.id_rules().max_len, 32);
-        assert!(!okx.id_rules().punctuation_allowed);
+        assert_eq!(okx.id_rules(), crate::broker::IdRules::OKX);
+        assert_eq!(okx.id_rules().max_len(), Some(32));
+        // Narrower than the first venue's: no punctuation.
+        assert!(!okx.id_rules().accepts("oq-1"));
+        assert!(okx.id_rules().accepts("oq1"));
     }
 
     #[test]

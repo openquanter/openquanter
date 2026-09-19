@@ -130,12 +130,6 @@ pub fn side_of(direction: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether Deribit will accept this as a `label`.
-#[must_use]
-pub fn valid_client_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().count() <= 64
-}
-
 /// The query string for a new order.
 ///
 /// `buy` and `sell` are different methods here rather than a `side`
@@ -283,7 +277,7 @@ impl Deribit {
 
 impl Execution for Deribit {
     fn place(&self, order: &NewOrder, instrument: &Instrument) -> Placed {
-        if !valid_client_id(&order.client_id) {
+        if !crate::broker::IdRules::DERIBIT.accepts(&order.client_id) {
             return Placed::Rejected(Reject {
                 code: None,
                 message: format!(
@@ -426,9 +420,10 @@ mod tests {
 
     #[test]
     fn a_label_is_sixty_four_characters() {
-        assert!(valid_client_id("oq1"));
-        assert!(valid_client_id(&"a".repeat(64)));
-        assert!(!valid_client_id(&"a".repeat(65)));
-        assert!(!valid_client_id(""));
+        use crate::broker::IdRules;
+        assert!(IdRules::DERIBIT.accepts("oq1"));
+        assert!(IdRules::DERIBIT.accepts(&"a".repeat(64)));
+        assert!(!IdRules::DERIBIT.accepts(&"a".repeat(65)));
+        assert!(!IdRules::DERIBIT.accepts(""));
     }
 }

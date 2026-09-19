@@ -580,18 +580,6 @@ pub fn parse_universe(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether this is usable as a `cloid`.
-///
-/// A 128-bit hex string: `0x` and exactly 32 hex digits. The fourth
-/// shape a client order id takes across the venues here, after 36
-/// characters of punctuation, 100 characters, and a `uint32` — which
-/// is more shapes than `IdRules`' two flags can express, and is noted
-/// in docs/VENUES.md rather than papered over with a third flag.
-#[must_use]
-pub fn valid_cloid(id: &str) -> bool {
-    id.len() == 34 && id.starts_with("0x") && id[2..].chars().all(|c| c.is_ascii_hexdigit())
-}
-
 /// The Ethereum address a wallet key signs as.
 ///
 /// Keccak-256 of the uncompressed public key without its `0x04` tag,
@@ -702,7 +690,7 @@ impl crate::exec::Execution for Hyperliquid {
                 ),
             });
         };
-        if !valid_cloid(&order.client_id) {
+        if !crate::broker::IdRules::HYPERLIQUID.accepts(&order.client_id) {
             return Placed::Rejected(Reject {
                 code: None,
                 message: format!(
@@ -838,17 +826,23 @@ mod tests {
     fn a_cloid_is_the_fourth_shape_a_client_id_takes() {
         // 36 characters with punctuation, 100 characters, a uint32 —
         // and now 0x and exactly 32 hex digits.
-        assert!(valid_cloid("0x1234567890abcdef1234567890abcdef"));
-        assert!(!valid_cloid("0x1234"), "too short");
+        assert!(crate::broker::IdRules::HYPERLIQUID.accepts("0x1234567890abcdef1234567890abcdef"));
         assert!(
-            !valid_cloid("1234567890abcdef1234567890abcdef"),
+            !crate::broker::IdRules::HYPERLIQUID.accepts("0x1234"),
+            "too short"
+        );
+        assert!(
+            !crate::broker::IdRules::HYPERLIQUID.accepts("1234567890abcdef1234567890abcdef"),
             "no prefix"
         );
         assert!(
-            !valid_cloid("0xghijklmnopqrstuvwxyz1234567890ab"),
+            !crate::broker::IdRules::HYPERLIQUID.accepts("0xghijklmnopqrstuvwxyz1234567890ab"),
             "not hex"
         );
-        assert!(!valid_cloid("oq1"), "what every other venue would take");
+        assert!(
+            !crate::broker::IdRules::HYPERLIQUID.accepts("oq1"),
+            "what every other venue would take"
+        );
     }
 
     #[test]
