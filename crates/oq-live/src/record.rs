@@ -56,11 +56,11 @@ pub mod kind {
     pub const WAITING: u16 = 8;
     /// An order the venue confirmed it had withdrawn.
     ///
-    /// Added after a journal was read back and claimed 175 resting
-    /// orders against an account holding nine. Every one of the
-    /// missing 166 had been cancelled, and nothing here said so: a
-    /// reader could see an order submitted and accepted, and could see
-    /// no fill, and had no way to learn it was gone.
+    /// Added after a journal was read back and claimed an order count
+    /// many times what the account actually held. Every extra one had
+    /// been cancelled, and nothing here said so: a reader could see an
+    /// order submitted and accepted, and could see no fill, and had no
+    /// way to learn it was gone.
     pub const CANCELLED: u16 = 9;
 }
 
