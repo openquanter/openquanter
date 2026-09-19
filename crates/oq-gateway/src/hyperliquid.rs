@@ -677,6 +677,144 @@ impl Hyperliquid {
     }
 }
 
+// ---------------------------------------------------------------------
+// Account reads.
+// ---------------------------------------------------------------------
+
+/// Read a `clearinghouseState` response.
+///
+/// # What is checked, and what is defined
+///
+/// Two different things, and the difference matters. The venue's own
+/// numbers satisfy `accountValue = totalRawUsd + totalNtlPos`, so that
+/// is *checked* — it is what confirms this build reads `marginSummary`
+/// the way the venue writes it, and a response that fails it means the
+/// fields are not what they are taken to be.
+///
+/// The wallet balance is then *defined*: `AccountSnapshot` means
+/// wallet plus unrealized to equal the margin balance, so it is
+/// `accountValue` minus the summed unrealized P&L. That is arithmetic
+/// rather than evidence, and is not dressed up as a second check.
+///
+/// # Errors
+/// When a field is missing, or the identity does not hold.
+pub fn parse_clearinghouse(
+    body: &str,
+    read_at_ms: i64,
+) -> Result<crate::binance::AccountSnapshot, VenueError> {
+    // By name, not by field. `crossMarginSummary` carries the same
+    // fields and is serialised first, so searching for `totalRawUsd`
+    // finds it — and it satisfies the identity below too, which is
+    // why this was invisible until a test read the value.
+    let Some(summary) = crate::json::object_field(body, "marginSummary") else {
+        return Err(VenueError::Malformed {
+            what: "marginSummary",
+            body: body.chars().take(200).collect(),
+        });
+    };
+    let read = |key: &'static str| -> Result<f64, VenueError> {
+        crate::json::field_str(&summary, key)
+            .and_then(|v| v.parse::<f64>().ok())
+            .ok_or(VenueError::Malformed {
+                what: key,
+                body: summary.chars().take(200).collect(),
+            })
+    };
+    let account_value = read("accountValue")?;
+    let raw_usd = read("totalRawUsd")?;
+    let notional = read("totalNtlPos")?;
+    let tolerance = 1e-6_f64.mul_add(account_value.abs().max(1.0), 1e-8);
+    if (account_value - (raw_usd + notional)).abs() > tolerance {
+        return Err(VenueError::Malformed {
+            what: "the margin summary does not mean what this build reads it to mean",
+            body: format!(
+                "accountValue {account_value} is not totalRawUsd {raw_usd} plus \
+                 totalNtlPos {notional}"
+            ),
+        });
+    }
+    // Summed from the legs: the summary carries no unrealized total.
+    let unrealized: f64 = parse_asset_positions(body)
+        .iter()
+        .map(|p| p.unrealized)
+        .sum();
+    Ok(crate::binance::AccountSnapshot {
+        wallet_balance: account_value - unrealized,
+        unrealized,
+        margin_balance: account_value,
+        read_at_ms,
+    })
+}
+
+/// Read the `assetPositions` of a `clearinghouseState` response.
+///
+/// `szi` is signed and there is no leg name — `type` is `oneWay` —
+/// so the sign comes from the number, as it does on Backpack and for
+/// the same reason.
+#[must_use]
+pub fn parse_asset_positions(body: &str) -> Vec<crate::binance::PositionSnapshot> {
+    let Some(list) = crate::json::array_field(body, "assetPositions") else {
+        return Vec::new();
+    };
+    crate::json::objects(&list)
+        .iter()
+        .filter_map(|entry| {
+            let coin = crate::json::field_str(entry, "coin")?;
+            let szi = crate::json::field_str(entry, "szi")?;
+            let entry_text = crate::json::field_str(entry, "entryPx").unwrap_or_default();
+            Some(crate::binance::PositionSnapshot {
+                symbol: coin,
+                position_side: "BOTH".to_string(),
+                amount: szi.parse::<f64>().ok()?,
+                amount_text: szi,
+                entry_price: entry_text.parse::<f64>().unwrap_or_default(),
+                entry_text,
+                unrealized: crate::json::field_str(entry, "unrealizedPnl")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+impl Hyperliquid {
+    /// The account's balances.
+    ///
+    /// # Errors
+    /// Whatever the transport reports, or a summary this build cannot
+    /// confirm.
+    pub fn balances(&self) -> Result<crate::binance::AccountSnapshot, VenueError> {
+        let read_at = crate::binance::now_ms();
+        let body = self.clearinghouse_state()?;
+        parse_clearinghouse(&body, read_at)
+    }
+
+    /// Open positions.
+    ///
+    /// # Errors
+    /// Whatever the transport reports.
+    pub fn positions(&self) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+        let body = self.clearinghouse_state()?;
+        Ok(parse_asset_positions(&body))
+    }
+
+    /// The account's state, named by address.
+    ///
+    /// The address is derived from the key rather than configured, for
+    /// the reason `address_of` gives: an agent wallet's own address
+    /// holds nothing, and a client that asked about it would see an
+    /// empty account while trading a full one.
+    ///
+    /// # Errors
+    /// Whatever the transport reports.
+    pub fn clearinghouse_state(&self) -> Result<String, VenueError> {
+        self.info(&format!(
+            r#"{{"type":"clearinghouseState","user":"{}"}}"#,
+            self.address()
+        ))
+    }
+}
+
 impl crate::exec::Execution for Hyperliquid {
     fn place(&self, order: &crate::exec::NewOrder, instrument: &Instrument) -> Placed {
         let Some(asset) = self.asset_of(&order.symbol) else {
@@ -794,6 +932,79 @@ fn unreadable(order: &crate::exec::NewOrder, _value: Value) -> Placed {
         code: None,
         message: format!("could not build a wire for {}", order.client_id),
     })
+}
+
+#[cfg(test)]
+mod account_reads {
+    use super::*;
+
+    /// The venue's own documented response, numbers included.
+    const STATE: &str = r#"{"assetPositions":[{"position":{"coin":"ETH",
+        "entryPx":"2986.3","leverage":{"rawUsd":"-95.059824","type":"isolated","value":20},
+        "liquidationPx":"2866.26936529","marginUsed":"4.967826","maxLeverage":50,
+        "positionValue":"100.02765","returnOnEquity":"-0.0026789","szi":"0.0335",
+        "unrealizedPnl":"-0.0134"},"type":"oneWay"}],
+        "crossMaintenanceMarginUsed":"0.0",
+        "crossMarginSummary":{"accountValue":"13104.514502","totalMarginUsed":"0.0",
+        "totalNtlPos":"0.0","totalRawUsd":"13104.514502"},
+        "marginSummary":{"accountValue":"13109.482328","totalMarginUsed":"4.967826",
+        "totalNtlPos":"100.02765","totalRawUsd":"13009.454678"},
+        "time":1708622398623,"withdrawable":"13104.514502"}"#;
+
+    #[test]
+    fn the_margin_summary_satisfies_the_identity_this_build_reads_it_by() {
+        // 13009.454678 + 100.02765 = 13109.482328, in the venue's own
+        // published example. That is what confirms the fields are what
+        // they are taken to be.
+        let snap = parse_clearinghouse(STATE, 9).expect("a readable state");
+        assert!((snap.margin_balance - 13_109.482_328).abs() < 1e-6);
+        // Summed from the legs, because the summary carries no total.
+        assert!((snap.unrealized - -0.0134).abs() < 1e-9);
+        // Defined, not measured: wallet plus unrealized is the margin
+        // balance, by what `AccountSnapshot` means.
+        assert!((snap.wallet_balance - (13_109.482_328 + 0.0134)).abs() < 1e-6);
+        assert_eq!(snap.read_at_ms, 9);
+    }
+
+    #[test]
+    fn a_summary_that_fails_the_identity_is_refused() {
+        // If `accountValue` is not `totalRawUsd` plus `totalNtlPos`,
+        // these are not the fields this build thinks they are, and
+        // three numbers derived from that reading would all be wrong
+        // together.
+        let wrong = STATE.replace(
+            r#""accountValue":"13109.482328","totalMarginUsed":"4.967826""#,
+            r#""accountValue":"99999.0","totalMarginUsed":"4.967826""#,
+        );
+        let e = parse_clearinghouse(&wrong, 1).expect_err("the identity must hold");
+        assert!(
+            format!("{e}").contains("does not mean what this build reads it to mean"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_position_takes_its_sign_from_the_number() {
+        // `type` is `oneWay` and there is no leg name, as on Backpack.
+        let legs = parse_asset_positions(STATE);
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].symbol, "ETH");
+        assert_eq!(legs[0].amount_text, "0.0335");
+        assert_eq!(legs[0].position_side, "BOTH");
+        assert!((legs[0].entry_price - 2986.3).abs() < 1e-9);
+        assert!((legs[0].unrealized - -0.0134).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_account_holding_nothing_reads_as_flat() {
+        let body = r#"{"assetPositions":[],"marginSummary":{"accountValue":"100.0",
+            "totalMarginUsed":"0.0","totalNtlPos":"0.0","totalRawUsd":"100.0"},
+            "withdrawable":"100.0","time":1}"#;
+        assert!(parse_asset_positions(body).is_empty());
+        let snap = parse_clearinghouse(body, 1).expect("a flat account is readable");
+        assert!((snap.unrealized).abs() < 1e-12);
+        assert!((snap.wallet_balance - 100.0).abs() < 1e-9);
+    }
 }
 
 #[cfg(test)]
