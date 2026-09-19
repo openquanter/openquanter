@@ -297,12 +297,18 @@ Lighter 的把握当初是刻意写成「低」的,而读完之后它从一个�
 | **OKX** | 已建 | 已建 | HMAC,base64 |
 | **Aster** | 已建 | 已建 | 就是 Binance 的,在 `/fapi/v3` |
 | **Kraken** | 已建 | 已建 | SHA-256 → HMAC-SHA-512 |
+| **Deribit** | 已建 | 已建 | JSON-RPC,Basic |
+| **Hyperliquid** | 已建 | 已建 | secp256k1,**已用向量验证** |
+| **Backpack** | 已建 | 持仓和挂单 | Ed25519 |
 | **Bitget** | 已建 | —— | OKX 的,走 UTA v3 |
-| **Backpack** | 已建 | —— | Ed25519 |
-| **Hyperliquid** | 已建 | —— | secp256k1,**已用向量验证** |
-| **Deribit** | 已建 | —— | JSON-RPC,Basic |
 | ~~Coinbase~~ | —— | —— | 搬去了 Deribit |
 | ~~Lighter~~ | —— | —— | 否决;见上文 |
+
+有两家的账户读取没做完,而且卡的是同一件事,不是工作量。**Backpack** 的持仓和挂单
+有成文的字段名,抵押品没有——公开端点返回的是风险模型参数,不是账户权益。
+**Bitget** 的 UTA 资产和持仓响应同样没法从它的文档里引下来。`AccountSnapshot`
+要的是三个具体的数字,而从一份没有文档的响应里挑三个字段出来,正是
+`kraken::parse_accounts` 花一条恒等式检查在避免的那个错误。
 
 **调研省下了什么。** 七家里有两家在写这份文档时正处于迁移中——Coinbase 的永续
 九天前搬去了 Deribit,Bitget 的 classic API 三天前开始被替换——而两家都是靠读
@@ -327,17 +333,25 @@ Lighter 的把握当初是刻意写成「低」的,而读完之后它从一个�
 **哪些是验证过的而不是写出来的。** Hyperliquid 的签名,对着交易所自己发布的向量
 ——已知私钥、已知 action、已知的 `r`/`s`/`v`,外加钉住 MessagePack 编码的
 `connectionId`。它是这里唯一有这个资格的签名,而它之所以能有,是因为那家交易所
-提供了测试。另一个是 Kraken 的余额映射:它没法从字段名定下来,所以被写成一条恒等式
-(`portfolioValue = balanceValue + totalUnrealized`)并在运行时强制执行——这让一个
-错误的读法直接失败,而不是报告三个看似合理的数字。
+提供了测试。
+
+另外两处是余额映射。Kraken 的没法从字段名定下来,所以写成一条恒等式
+(`portfolioValue = balanceValue + totalUnrealized`)并在运行时强制。Hyperliquid
+的同样,用 `accountValue = totalRawUsd + totalNtlPos`。Deribit 两者都不需要:
+那家交易所把字段直接叫 `margin_balance`,名字**就是**映射,再加一道检查只是仪式。
+
+**而恒等式有一个值得记下来的限度。** Hyperliquid 那条没能抓到它的测试抓到的
+bug:读取器找到的是 `crossMarginSummary` 而不是 `marginSummary`,因为两者字段名
+相同、而且各自都自洽。恒等式验证的是字段*是什么意思*,它验证不了*读的是哪个对象*。
+那个 bug 是靠 `json::object_field` 和一个真去读值的测试才修掉的。
 
 ## 还剩什么
 
 三件事,而且没有一件是"一家交易所"。
 
-1. **Bitget、Backpack、Hyperliquid、Deribit 的账户读取。** 和 Kraken 那份一样的
-   活,只要手上有真实的响应形状。
-2. **Kraken 和 Bitget 的 `Account`**,它卡在一件事上:Kraken 的 WebSocket 用
+1. **Backpack 的抵押品,以及 Bitget 的资产和持仓。** 各需要一个真实响应;它们
+   周围的东西都已经写好了。
+2. **那五家只读的 venue 的 `Account`**,它卡在一件事上:Kraken 的 WebSocket 用
    challenge-response 认证——连上、要一个挑战、给答案签名——而 `UserStream` 的
    `Opening` 是一串在 socket 打开之前就定死的帧。那个抽象说不出「给上一帧的回复
    签名」,而拓宽它应该发生在需要它的那个提交里。
