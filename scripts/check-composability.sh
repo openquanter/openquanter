@@ -95,20 +95,42 @@ BUDGETS=(
   # is no way to hear them over HTTPS. Isolated here for the same
   # reason as the capture crate — the engine must not inherit it.
   #
-  # It now also carries `ed25519-dalek`, and the budget did not move for
-  # it: the count came out at 52 because that tree overlaps the TLS
-  # stack already present. The decision was still deliberate, and the
-  # reasoning is the note above — this crate holds the API secret. What
-  # it buys is the venues that sign with a keypair instead of a shared
-  # secret, which cannot be reached any other way: a hash is
-  # deterministic arithmetic against published vectors, and curve
-  # arithmetic is constant-time field math where a mistake leaks the key
-  # rather than failing a test. See docs/VENUES.md.
-  "oq-gateway:60"
+  # It now also carries three cryptography crates, and this is the
+  # budget being raised deliberately rather than absorbed.
+  #
+  # `ed25519-dalek` was free — 52 against the old 60, because its tree
+  # overlaps the TLS stack already here. `k256` and `sha3` are not: they
+  # take it to 66.
+  #
+  # What that buys is every venue that signs with a keypair instead of a
+  # shared secret. Backpack signs with Ed25519; Hyperliquid signs EIP-712
+  # typed data with a secp256k1 wallet key over a Keccak-256 hash. There
+  # is no version of this crate that reaches those venues and writes its
+  # own curve arithmetic: a hash is deterministic bit arithmetic against
+  # published vectors, and curve arithmetic is constant-time field math
+  # and nonce generation where a bias leaks the key rather than failing
+  # a test. A wallet key moves funds; an API key places orders.
+  #
+  # Set to the exact count rather than to a round number with headroom.
+  # A patch release that pulls in one more crate should turn this red
+  # and make somebody look, which is the whole point of the table.
+  #
+  # The count is the one CI sees, which is Linux. It is 66 on macOS —
+  # the tree is platform-dependent — and a budget set from a developer
+  # machine is a budget that fails on the runner. Numbers here come
+  # from the runner.
+  "oq-gateway:67"
   # The process assembly. Inherits the gateway's tree because it has to
   # talk to a venue; carries nothing of its own. Everything it decides
   # is in oq-risk and its own supervisor, both at zero.
-  "oq-live:60"
+  #
+  # Raised with the gateway's, and for none of its own reasons: it went
+  # to 68 the moment the signing crates landed one level down. Worth
+  # stating, because a number that moves without the crate changing is
+  # the kind of thing that gets bumped without being read — this one
+  # measures what a *consumer* of `oq-live` inherits, and what they now
+  # inherit is a curve implementation. Linux count, as above.
+  "oq-live:69"
 )
 
 third_party_count() {
