@@ -45,6 +45,7 @@
 
 pub mod account;
 pub(crate) mod b64;
+pub mod backpack;
 pub mod binance;
 pub mod bitget;
 pub mod broker;
