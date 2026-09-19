@@ -45,6 +45,15 @@ pub struct IdRules {
     /// character set nobody varies is a knob that only ever gets set
     /// wrong.
     pub punctuation_allowed: bool,
+    /// Whether the id must be digits, and nothing else.
+    ///
+    /// One venue's client order id is a `uint32` rather than a string.
+    /// Named as a flag for the same reason `punctuation_allowed` is: it
+    /// is a distinction the shipped venues actually differ on, and a
+    /// prefix that works everywhere else composes an id this one
+    /// refuses — which would otherwise be discovered at the first order
+    /// rather than at startup.
+    pub digits_only: bool,
 }
 
 impl IdRules {
@@ -52,22 +61,45 @@ impl IdRules {
     pub const BINANCE: Self = Self {
         max_len: 36,
         punctuation_allowed: true,
+        digits_only: false,
     };
     /// OKX: 32 alphanumeric characters.
     pub const OKX: Self = Self {
         max_len: 32,
         punctuation_allowed: false,
+        digits_only: false,
+    };
+    /// Kraken Futures: 100 characters, and unique across the account's
+    /// history rather than only among open orders — so it is the one
+    /// client id here that is an idempotency token.
+    pub const KRAKEN: Self = Self {
+        max_len: 100,
+        punctuation_allowed: true,
+        digits_only: false,
+    };
+    /// Backpack: a `uint32`, not a string. Ten digits is `4294967295`,
+    /// and `accepts` checks the value rather than only the length.
+    pub const BACKPACK: Self = Self {
+        max_len: 10,
+        punctuation_allowed: false,
+        digits_only: true,
     };
 
     /// Whether `id` is usable as it stands.
     #[must_use]
     pub fn accepts(&self, id: &str) -> bool {
-        !id.is_empty()
-            && id.len() <= self.max_len
-            && id.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || (self.punctuation_allowed && matches!(c, '.' | '_' | ':' | '/' | '-'))
-            })
+        if id.is_empty() || id.len() > self.max_len {
+            return false;
+        }
+        if self.digits_only {
+            // The value, not just the shape: ten digits is within
+            // `max_len`, and `9999999999` is still not a `uint32`.
+            return id.parse::<u32>().is_ok();
+        }
+        id.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || (self.punctuation_allowed && matches!(c, '.' | '_' | ':' | '/' | '-'))
+        })
     }
 }
 

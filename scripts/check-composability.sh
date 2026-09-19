@@ -94,6 +94,16 @@ BUDGETS=(
   # when the user data stream landed: the venue pushes fills and there
   # is no way to hear them over HTTPS. Isolated here for the same
   # reason as the capture crate — the engine must not inherit it.
+  #
+  # It now also carries `ed25519-dalek`, and the budget did not move for
+  # it: the count came out at 52 because that tree overlaps the TLS
+  # stack already present. The decision was still deliberate, and the
+  # reasoning is the note above — this crate holds the API secret. What
+  # it buys is the venues that sign with a keypair instead of a shared
+  # secret, which cannot be reached any other way: a hash is
+  # deterministic arithmetic against published vectors, and curve
+  # arithmetic is constant-time field math where a mistake leaks the key
+  # rather than failing a test. See docs/VENUES.md.
   "oq-gateway:60"
   # The process assembly. Inherits the gateway's tree because it has to
   # talk to a venue; carries nothing of its own. Everything it decides
