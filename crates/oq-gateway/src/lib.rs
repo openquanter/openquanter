@@ -51,6 +51,7 @@ pub mod bitget;
 pub mod broker;
 pub mod conformance;
 pub mod creds;
+pub mod deribit;
 pub mod exec;
 pub(crate) mod json;
 pub mod klines;

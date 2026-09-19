@@ -162,6 +162,39 @@ fn the_backpack_adapter_conforms() {
     assert!(r.conforms(), "{}", r.summary_line("backpack"));
 }
 
+/// Payloads from Deribit's published OpenAPI specification.
+///
+/// The envelope is JSON-RPC rather than REST, so "the status line is
+/// not the answer" is structural here rather than a venue's quirk: the
+/// refusal is an `error` member and some of them arrive with a 200.
+fn deribit() -> Responses {
+    Responses {
+        venue: "deribit",
+        client_id: "oq0001",
+        accepted: r#"{"jsonrpc":"2.0","id":5275,"result":{"trades":[],"order":{"order_id":"ETH-100234","order_state":"open","label":"oq0001","instrument_name":"BTC-PERPETUAL","direction":"buy","price":78313.5,"amount":10,"filled_amount":0}}}"#,
+        accepted_venue_id: "ETH-100234",
+        rejected: (
+            200,
+            r#"{"jsonrpc":"2.0","id":8163,"error":{"message":"not_enough_funds","code":10009}}"#,
+        ),
+        rejected_code: Some(10_009),
+        unavailable: (502, "<html>bad gateway</html>"),
+        absent: r#"{"jsonrpc":"2.0","id":1,"result":[]}"#,
+        present: r#"{"jsonrpc":"2.0","id":1,"result":[{"order_id":"ETH-100234","order_state":"open","label":"oq0001","instrument_name":"BTC-PERPETUAL","direction":"buy","price":78313.5,"amount":10,"filled_amount":0}]}"#,
+        foreign: "<html>captive portal</html>",
+    }
+}
+
+#[test]
+fn the_deribit_adapter_conforms() {
+    let r = check(
+        &deribit(),
+        oq_gateway::deribit::classify,
+        oq_gateway::deribit::order_from_query,
+    );
+    assert!(r.conforms(), "{}", r.summary_line("deribit"));
+}
+
 #[test]
 fn the_binance_adapter_conforms() {
     let r = check(
