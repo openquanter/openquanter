@@ -132,6 +132,45 @@ pub(crate) fn raw_field(body: &str, key: &str) -> Option<String> {
     }
 }
 
+/// The object that is the value of `"key"`.
+///
+/// Brace-matched from the `{` that follows the key, so it is *that*
+/// object and not merely one containing a field of the same name.
+/// [`object_containing`] searches outward from a match and will find
+/// the first object anywhere that has the field — which on a response
+/// carrying both `marginSummary` and `crossMarginSummary` is whichever
+/// the venue happened to serialise first.
+pub(crate) fn object_field(body: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let at = body.find(&needle)? + needle.len();
+    let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
+    if !rest.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(rest[..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The contents of the array following `"key":`, bracket-matched to its
 /// close.
 ///
@@ -278,6 +317,24 @@ mod tests {
         assert_eq!(raw_field(body, "result").as_deref(), Some("error"));
         // And a key that genuinely is not there is still absent.
         assert_eq!(raw_field(body, "reason"), None);
+    }
+
+    #[test]
+    fn an_object_field_is_the_one_named_and_not_the_first_that_matches() {
+        // Found by a test on Hyperliquid's `clearinghouseState`, which
+        // carries `marginSummary` and `crossMarginSummary` with the
+        // same field names. Searching outward from a field found
+        // whichever came first in the bytes — and both satisfied the
+        // identity the reader checks, so the mistake was invisible to
+        // everything except reading the value.
+        let body = r#"{"crossMarginSummary":{"accountValue":"1.0","totalRawUsd":"1.0"},
+            "marginSummary":{"accountValue":"2.0","totalRawUsd":"2.0"}}"#;
+        let margin = object_field(body, "marginSummary").expect("the named object");
+        assert_eq!(field_str(&margin, "accountValue").as_deref(), Some("2.0"));
+        let cross = object_field(body, "crossMarginSummary").expect("the named object");
+        assert_eq!(field_str(&cross, "accountValue").as_deref(), Some("1.0"));
+        // A key whose value is not an object is not one.
+        assert_eq!(object_field(body, "accountValue"), None);
     }
 
     #[test]
