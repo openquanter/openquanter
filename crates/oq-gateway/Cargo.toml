@@ -19,6 +19,12 @@ ureq = "3.4"
 # docs/VENUES.md for the decision and scripts/check-composability.sh for
 # what it cost.
 ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
+# secp256k1 and Keccak-256, for the venue that signs EIP-712 typed data
+# with a wallet key. Same reasoning as above, and the same line: the
+# signature is verifiable against the venue's own published vectors, the
+# curve arithmetic under it is not something to hand-write.
+k256 = { version = "0.13", default-features = false, features = ["std", "ecdsa"] }
+sha3 = { version = "0.10", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
