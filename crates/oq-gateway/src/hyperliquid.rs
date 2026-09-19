@@ -65,6 +65,8 @@ use sha3::{Digest, Keccak256};
 
 use crate::VenueError;
 use crate::creds::Credentials;
+use oq_types::Instrument;
+
 use crate::exec::{Endpoint, Placed, Reject, Unresolved};
 
 /// Keccak-256, which is Ethereum's hash and not SHA3-256.
@@ -405,6 +407,8 @@ pub struct Hyperliquid {
     key: SigningKey,
     mainnet: bool,
     agent: ureq::Agent,
+    /// Asset names in index order. Empty until `load_universe`.
+    universe: Vec<String>,
 }
 
 impl Hyperliquid {
@@ -432,6 +436,7 @@ impl Hyperliquid {
                 .http_status_as_error(false)
                 .build()
                 .into(),
+            universe: Vec::new(),
         })
     }
 
@@ -553,6 +558,256 @@ fn truncate(body: &str) -> String {
     body.chars().take(200).collect()
 }
 
+// ---------------------------------------------------------------------
+// Assets, identity and orders.
+// ---------------------------------------------------------------------
+
+/// Asset names in index order, from `/info` with `{"type":"meta"}`.
+///
+/// The index *is* the position in this list — orders reference assets
+/// by number, not by name — so the order of the response is load-
+/// bearing and a reordering on the venue's side silently repoints every
+/// symbol. It is read fresh at startup rather than cached to disk for
+/// that reason.
+#[must_use]
+pub fn parse_universe(body: &str) -> Vec<String> {
+    let Some(list) = crate::json::array_field(body, "universe") else {
+        return Vec::new();
+    };
+    crate::json::objects(&list)
+        .iter()
+        .filter_map(|o| crate::json::field_str(o, "name"))
+        .collect()
+}
+
+/// Whether this is usable as a `cloid`.
+///
+/// A 128-bit hex string: `0x` and exactly 32 hex digits. The fourth
+/// shape a client order id takes across the venues here, after 36
+/// characters of punctuation, 100 characters, and a `uint32` — which
+/// is more shapes than `IdRules`' two flags can express, and is noted
+/// in docs/VENUES.md rather than papered over with a third flag.
+#[must_use]
+pub fn valid_cloid(id: &str) -> bool {
+    id.len() == 34 && id.starts_with("0x") && id[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The Ethereum address a wallet key signs as.
+///
+/// Keccak-256 of the uncompressed public key without its `0x04` tag,
+/// last twenty bytes. The venue recovers this from the signature, so a
+/// client that computed it differently would query one account and
+/// trade another — which is the shape of the agent-wallet trap
+/// NautilusTrader documents.
+#[must_use]
+pub fn address_of(key: &SigningKey) -> [u8; 20] {
+    let point = key.verifying_key().to_encoded_point(false);
+    let hash = keccak256(&point.as_bytes()[1..]);
+    let mut address = [0u8; 20];
+    address.copy_from_slice(&hash[12..]);
+    address
+}
+
+/// That address as the venue writes it.
+#[must_use]
+pub fn address_hex(address: &[u8; 20]) -> String {
+    let body: String = address.iter().map(|b| format!("{b:02x}")).collect();
+    format!("0x{body}")
+}
+
+/// The action that cancels by the caller's own id.
+#[must_use]
+pub fn cancel_by_cloid_action(asset: u32, cloid: &str) -> Value {
+    Value::map(vec![
+        ("type", Value::str("cancelByCloid")),
+        (
+            "cancels",
+            Value::Array(vec![Value::map(vec![
+                ("asset", Value::Uint(u64::from(asset))),
+                ("cloid", Value::str(cloid)),
+            ])]),
+        ),
+    ])
+}
+
+impl Hyperliquid {
+    /// Load the asset universe, which every order needs.
+    ///
+    /// # Errors
+    /// Whatever the transport reports, or a meta response with no
+    /// universe in it.
+    pub fn load_universe(&mut self) -> Result<usize, VenueError> {
+        let body = self.info(r#"{"type":"meta"}"#)?;
+        let names = parse_universe(&body);
+        if names.is_empty() {
+            return Err(VenueError::Malformed {
+                what: "the asset universe",
+                body: body.chars().take(200).collect(),
+            });
+        }
+        let count = names.len();
+        self.universe = names;
+        Ok(count)
+    }
+
+    /// This client's own address, as the venue sees it.
+    #[must_use]
+    pub fn address(&self) -> String {
+        address_hex(&address_of(&self.key))
+    }
+
+    /// The index an order must reference for this symbol.
+    #[must_use]
+    pub fn asset_of(&self, symbol: &str) -> Option<u32> {
+        self.universe
+            .iter()
+            .position(|n| n == symbol)
+            .and_then(|i| u32::try_from(i).ok())
+    }
+
+    /// Post to `/info`, which takes no signature.
+    ///
+    /// # Errors
+    /// Whatever the transport reports.
+    pub fn info(&self, body: &str) -> Result<String, VenueError> {
+        let mut response = self
+            .agent
+            .post(format!("{}/info", self.base))
+            .header("Content-Type", "application/json")
+            .send(body)
+            .map_err(|e| VenueError::Transport(e.to_string()))?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| VenueError::Transport(e.to_string()))?;
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err(VenueError::Venue { status, body: text })
+        }
+    }
+}
+
+impl crate::exec::Execution for Hyperliquid {
+    fn place(&self, order: &crate::exec::NewOrder, instrument: &Instrument) -> Placed {
+        let Some(asset) = self.asset_of(&order.symbol) else {
+            return Placed::Rejected(Reject {
+                code: None,
+                message: format!(
+                    "{} is not in this venue's universe; load it before trading, \
+                     because an order references an asset by index and a missing \
+                     one would otherwise be sent as index zero",
+                    order.symbol
+                ),
+            });
+        };
+        if !valid_cloid(&order.client_id) {
+            return Placed::Rejected(Reject {
+                code: None,
+                message: format!(
+                    "client id {:?} is not usable here: a cloid is 0x and 32 hex digits",
+                    order.client_id
+                ),
+            });
+        }
+        let Some(limit) = order.limit_price else {
+            return Placed::Rejected(Reject {
+                code: None,
+                message: "this venue has no market order; send an IOC limit at a \
+                          slippage-adjusted price, which needs a quote this adapter \
+                          does not carry"
+                    .to_string(),
+            });
+        };
+        let price = crate::exec::decimal(limit.0, instrument.price_scale);
+        if !within_five_significant_figures(&price) {
+            return Placed::Rejected(Reject {
+                code: None,
+                message: format!(
+                    "price {price} has more than five significant figures; this venue \
+                     answers that with `user or API wallet does not exist`, because it \
+                     breaks signature verification"
+                ),
+            });
+        }
+        let size = crate::exec::decimal(order.qty.0, instrument.qty_scale);
+        let mut wire = match order_wire(
+            asset,
+            matches!(order.side, oq_types::Side::Buy),
+            &price,
+            &size,
+            order.reduce_only,
+            "Gtc",
+        ) {
+            Value::Map(pairs) => pairs,
+            other => return unreadable(order, other),
+        };
+        wire.push(("c".to_string(), Value::str(&order.client_id)));
+        let action = order_action(vec![Value::Map(wire)]);
+        let nonce = u64::try_from(crate::binance::now_ms()).unwrap_or_default();
+        match self.post_action(&action, nonce) {
+            Ok(text) => classify(200, &text, &order.client_id),
+            Err(VenueError::Venue { status, body }) => classify(status, &body, &order.client_id),
+            Err(e) => Placed::Unknown(Unresolved {
+                client_id: order.client_id.clone(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    fn cancel(&self, symbol: &str, client_id: &str) -> Placed {
+        let Some(asset) = self.asset_of(symbol) else {
+            return Placed::Rejected(Reject {
+                code: None,
+                message: format!("{symbol} is not in this venue's universe"),
+            });
+        };
+        let action = cancel_by_cloid_action(asset, client_id);
+        let nonce = u64::try_from(crate::binance::now_ms()).unwrap_or_default();
+        match self.post_action(&action, nonce) {
+            Ok(text) => classify(200, &text, client_id),
+            Err(VenueError::Venue { status, body }) => classify(status, &body, client_id),
+            Err(e) => Placed::Unknown(Unresolved {
+                client_id: client_id.to_string(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    fn order_status(
+        &self,
+        _symbol: &str,
+        client_id: &str,
+    ) -> Result<Option<crate::exec::OrderAck>, VenueError> {
+        // The query names the account, because the venue indexes orders
+        // by address and an agent wallet's own address holds nothing —
+        // the trap NautilusTrader reports as "everything connects and
+        // nothing matches".
+        let body = self.info(&format!(
+            r#"{{"type":"orderStatus","user":"{}","oid":"{client_id}"}}"#,
+            self.address()
+        ))?;
+        if !body.contains("\"order\"") {
+            return Ok(None);
+        }
+        let status = crate::json::field_str(&body, "status").unwrap_or_default();
+        Ok(Some(crate::exec::OrderAck {
+            venue_id: crate::json::raw_field(&body, "oid").unwrap_or_default(),
+            client_id: client_id.to_string(),
+            status,
+            executed_qty: crate::json::field_str(&body, "sz").unwrap_or_else(|| "0".to_string()),
+        }))
+    }
+}
+
+fn unreadable(order: &crate::exec::NewOrder, _value: Value) -> Placed {
+    Placed::Rejected(Reject {
+        code: None,
+        message: format!("could not build a wire for {}", order.client_id),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +818,50 @@ mod tests {
     fn key() -> SigningKey {
         let creds = Credentials::new("k", TEST_KEY);
         signing_key(&creds).expect("a valid wallet key")
+    }
+
+    #[test]
+    fn an_asset_is_a_position_in_the_universe() {
+        // Orders reference assets by number. The order of this list is
+        // load-bearing: a venue that reordered it would silently
+        // repoint every symbol, which is why it is read at startup
+        // rather than cached.
+        let body = r#"{"universe":[{"name":"BTC","szDecimals":5,"maxLeverage":50},
+            {"name":"ETH","szDecimals":4,"maxLeverage":50},
+            {"name":"SOL","szDecimals":2,"maxLeverage":20}]}"#;
+        let names = parse_universe(body);
+        assert_eq!(names, vec!["BTC", "ETH", "SOL"]);
+        assert_eq!(names.iter().position(|n| n == "ETH"), Some(1));
+    }
+
+    #[test]
+    fn a_cloid_is_the_fourth_shape_a_client_id_takes() {
+        // 36 characters with punctuation, 100 characters, a uint32 —
+        // and now 0x and exactly 32 hex digits.
+        assert!(valid_cloid("0x1234567890abcdef1234567890abcdef"));
+        assert!(!valid_cloid("0x1234"), "too short");
+        assert!(
+            !valid_cloid("1234567890abcdef1234567890abcdef"),
+            "no prefix"
+        );
+        assert!(
+            !valid_cloid("0xghijklmnopqrstuvwxyz1234567890ab"),
+            "not hex"
+        );
+        assert!(!valid_cloid("oq1"), "what every other venue would take");
+    }
+
+    #[test]
+    fn an_address_is_derived_the_way_the_venue_recovers_it() {
+        // The venue recovers this from the signature. A client that
+        // computed it differently would query one account and trade
+        // another, which is the agent-wallet trap in a different form.
+        let address = address_hex(&address_of(&key()));
+        assert!(address.starts_with("0x"), "{address}");
+        assert_eq!(address.len(), 42, "twenty bytes as hex");
+        // Deterministic from the key, so the same key is the same
+        // account every run.
+        assert_eq!(address, address_hex(&address_of(&key())));
     }
 
     #[test]
