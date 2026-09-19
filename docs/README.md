@@ -19,6 +19,7 @@ document links to its counterpart at the top.
 | [Margin Fidelity](MARGIN-FIDELITY.md) · [中文](MARGIN-FIDELITY.zh-CN.md) | **How wrong a backtest with no margin model is**, why the answer is a cross-window tail rather than a mean, and which of its numbers survive a change of window mix |
 | [Execution](EXECUTION.md) · [中文](EXECUTION.zh-CN.md) | The venue-independent order contract: the three-state outcome, client order ids, and what a lost answer costs |
 | [Live Path](LIVE-PATH.md) · [中文](LIVE-PATH.zh-CN.md) | Journal-before-send, recovery from a killed process, and what the supervisor is allowed to decide |
+| [More Venues](VENUES.md) · [中文](VENUES.zh-CN.md) | **What adding seven more exchanges costs**: four signing families rather than seven problems, the three structural differences, and the cryptography question that has to be answered before any decentralised venue starts |
 | [Capture Format](CAPTURE-FORMAT.md) · [中文](CAPTURE-FORMAT.zh-CN.md) | Record framing, control records, daily sealing, archival verification, volume planning |
 | [Changelog](../CHANGELOG.md) · [中文](../CHANGELOG.zh-CN.md) | What changed; where a semantics or event-schema change must be recorded |
 
