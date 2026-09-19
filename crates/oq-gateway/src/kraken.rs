@@ -58,7 +58,7 @@ use oq_types::Instrument;
 use crate::VenueError;
 use crate::creds::Credentials;
 use crate::exec::{Endpoint, Execution, NewOrder, OrderAck, Placed, Reject, Unresolved, decimal};
-use crate::json::{field_str, object_containing, raw_field};
+use crate::json::{array_field, field_str, object_containing, objects, raw_field};
 
 /// A client for one Kraken Futures deployment.
 pub struct Kraken {
@@ -273,6 +273,260 @@ fn truncate(body: &str) -> String {
     body.chars().take(200).collect()
 }
 
+// ---------------------------------------------------------------------
+// Account reads.
+// ---------------------------------------------------------------------
+
+/// Kraken's order state in the shared vocabulary.
+#[must_use]
+pub fn status_of(state: &str) -> Option<&'static str> {
+    match state {
+        "untouched" => Some("NEW"),
+        "partiallyFilled" => Some("PARTIALLY_FILLED"),
+        _ => None,
+    }
+}
+
+/// Read `/accounts`, for the multi-collateral (`flex`) account.
+///
+/// # The mapping is checked rather than assumed
+///
+/// The response carries `balanceValue`, `portfolioValue`,
+/// `collateralValue`, `marginEquity`, `totalUnrealized` and more;
+/// `AccountSnapshot` carries a wallet balance, an unrealized P&L and a
+/// margin balance. Which name means which cannot be settled by reading
+/// the names, and a wrong balance is worse than a missing one — this
+/// crate already learned that when an unreadable balance was becoming
+/// `0.0`, "which is a number a risk gate acts on".
+///
+/// So the reading is stated as an identity and then enforced:
+/// `portfolioValue` must equal `balanceValue + totalUnrealized`. If the
+/// venue's own numbers do not satisfy it, this interpretation is wrong
+/// and the read fails instead of returning three plausible figures. A
+/// guess that can be contradicted by the data is not a guess for long.
+///
+/// # Errors
+/// When the envelope failed, a field is missing, or the identity above
+/// does not hold.
+pub fn parse_accounts(
+    body: &str,
+    read_at_ms: i64,
+) -> Result<crate::binance::AccountSnapshot, VenueError> {
+    if field_str(body, "result").as_deref() != Some("success") {
+        return Err(crate::json::malformed("accounts", body));
+    }
+    let Some(flex) = object_containing(body, "\"marginEquity\"") else {
+        return Err(crate::json::malformed("the flex account", body));
+    };
+    let read = |key: &'static str| -> Result<f64, VenueError> {
+        raw_field(&flex, key)
+            .and_then(|v| v.parse::<f64>().ok())
+            .ok_or_else(|| crate::json::malformed(key, &flex))
+    };
+    let wallet = read("balanceValue")?;
+    let unrealized = read("totalUnrealized")?;
+    let portfolio = read("portfolioValue")?;
+    // Scaled, because these are account-sized numbers and an absolute
+    // epsilon would reject a large account for its own rounding.
+    let tolerance = 1e-6_f64.mul_add(portfolio.abs().max(wallet.abs()), 1e-8);
+    if (portfolio - (wallet + unrealized)).abs() > tolerance {
+        return Err(VenueError::Malformed {
+            what: "the balance fields do not mean what this build reads them to mean",
+            body: format!(
+                "portfolioValue {portfolio} is not balanceValue {wallet} plus \
+                 totalUnrealized {unrealized}; refusing rather than reporting a \
+                 balance a risk gate would act on"
+            ),
+        });
+    }
+    Ok(crate::binance::AccountSnapshot {
+        wallet_balance: wallet,
+        unrealized,
+        margin_balance: portfolio,
+        read_at_ms,
+    })
+}
+
+/// Read `/openpositions`.
+///
+/// Sizes and prices are JSON numbers here rather than decimal strings,
+/// so the raw text is what gets kept — the digits the venue sent.
+/// Direction comes from `side` and the magnitude from `size`, the same
+/// rule the OKX adapter uses and for the same reason: a venue that
+/// changes which one carries the sign is then one this still reads.
+///
+/// # Errors
+/// When the envelope failed or a field cannot be read.
+pub fn parse_positions(body: &str) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+    if field_str(body, "result").as_deref() != Some("success") {
+        return Err(crate::json::malformed("positions", body));
+    }
+    let Some(list) = array_field(body, "openPositions") else {
+        // No `openPositions` member at all is a flat account, not a
+        // failed read: the venue omits it rather than sending [].
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for item in objects(&list) {
+        let Some(side) = field_str(&item, "side") else {
+            return Err(crate::json::malformed("position side", &item));
+        };
+        let leg = match side.as_str() {
+            "long" => "LONG",
+            "short" => "SHORT",
+            _ => return Err(crate::json::malformed("position side", &item)),
+        };
+        let Some(size) = raw_field(&item, "size") else {
+            return Err(crate::json::malformed("position size", &item));
+        };
+        let magnitude = size.trim_start_matches('-').to_string();
+        let amount_text = if leg == "SHORT" {
+            format!("-{magnitude}")
+        } else {
+            magnitude
+        };
+        let Ok(amount) = amount_text.parse::<f64>() else {
+            return Err(crate::json::malformed("position size", &item));
+        };
+        let entry_text = raw_field(&item, "price").unwrap_or_default();
+        out.push(crate::binance::PositionSnapshot {
+            symbol: field_str(&item, "symbol").unwrap_or_default(),
+            position_side: leg.to_string(),
+            amount,
+            amount_text,
+            entry_price: entry_text.parse::<f64>().unwrap_or_default(),
+            entry_text,
+            unrealized: raw_field(&item, "unrealizedPnl")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read `/openorders`.
+///
+/// # Errors
+/// When the envelope failed, or an order carries a state this build
+/// does not know — refused rather than guessed, because an unknown
+/// state reported as resting is an order the book waits on forever.
+pub fn parse_open_orders(body: &str) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+    if field_str(body, "result").as_deref() != Some("success") {
+        return Err(crate::json::malformed("open orders", body));
+    }
+    let Some(list) = array_field(body, "openOrders") else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for item in objects(&list) {
+        let Some(status) = field_str(&item, "status").and_then(|s| status_of(&s)) else {
+            return Err(crate::json::malformed("order status", &item));
+        };
+        let Some(side) = field_str(&item, "side") else {
+            return Err(crate::json::malformed("order side", &item));
+        };
+        let side = match side.as_str() {
+            "buy" => "BUY",
+            "sell" => "SELL",
+            _ => return Err(crate::json::malformed("order side", &item)),
+        };
+        let number = |key: &str| -> f64 {
+            raw_field(&item, key)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_default()
+        };
+        let filled = number("filledSize");
+        out.push(crate::binance::OpenOrder {
+            symbol: field_str(&item, "symbol").unwrap_or_default(),
+            order_id: field_str(&item, "order_id").unwrap_or_default(),
+            client_order_id: field_str(&item, "cliOrdId").unwrap_or_default(),
+            side: side.to_string(),
+            // One leg per contract here; the venue reports no hedged
+            // legs, so every order is on the only position there is.
+            position_side: "BOTH".to_string(),
+            price: number("limitPrice"),
+            // `unfilledSize` is what is left, not what was asked for.
+            orig_qty: number("unfilledSize") + filled,
+            executed_qty: filled,
+            status: status.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read one contract out of `/instruments`.
+///
+/// # Errors
+/// When the instrument is absent or a field this build needs cannot be
+/// read.
+pub fn parse_instrument(body: &str, symbol: &str) -> Result<Instrument, String> {
+    let Some(entry) = object_containing(body, &format!("\"{symbol}\"")) else {
+        return Err(format!("no instrument {symbol} in this listing"));
+    };
+    let tick_text = raw_field(&entry, "tickSize").ok_or("no tickSize")?;
+    let (tick, price_scale) = decimal_and_scale(&tick_text).ok_or("unreadable tickSize")?;
+    let contract_text = raw_field(&entry, "contractSize").ok_or("no contractSize")?;
+    let contract: i64 = contract_text
+        .parse::<f64>()
+        .map(|v| (v * 1e8) as i64)
+        .map_err(|_| "unreadable contractSize")?;
+    // Sizes here are whole contracts, so the quantity scale is zero and
+    // the step is one. `contract_size` is what one of them is worth,
+    // which on an inverse contract is a number of dollars.
+    Ok(Instrument::sized(price_scale, 0, contract).with_grid(tick, 1))
+}
+
+/// A decimal like `0.5` as an integer at the scale it implies.
+fn decimal_and_scale(text: &str) -> Option<(i64, u8)> {
+    let text = text.trim();
+    let (int_part, frac) = text.split_once('.').unwrap_or((text, ""));
+    let scale = u8::try_from(frac.len()).ok()?;
+    let digits = format!("{int_part}{frac}");
+    digits.parse::<i64>().ok().map(|v| (v, scale))
+}
+
+impl Kraken {
+    /// The account's balances.
+    ///
+    /// # Errors
+    /// Whatever the venue reports, or a balance reading this build
+    /// cannot confirm.
+    pub fn balances(&self) -> Result<crate::binance::AccountSnapshot, VenueError> {
+        let read_at = crate::binance::now_ms();
+        let body = self.send("/api/v3/accounts", "")?;
+        parse_accounts(&body, read_at)
+    }
+
+    /// Open positions.
+    ///
+    /// # Errors
+    /// Whatever the venue reports.
+    pub fn positions(&self) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+        let body = self.send("/api/v3/openpositions", "")?;
+        parse_positions(&body)
+    }
+
+    /// Everything resting.
+    ///
+    /// # Errors
+    /// Whatever the venue reports.
+    pub fn open_orders(&self) -> Result<Vec<crate::binance::OpenOrder>, VenueError> {
+        let body = self.send("/api/v3/openorders", "")?;
+        parse_open_orders(&body)
+    }
+
+    /// One contract's precision and size.
+    ///
+    /// # Errors
+    /// Whatever the venue reports, or a listing this build cannot read.
+    pub fn instrument(&self, symbol: &str) -> Result<Instrument, String> {
+        let body = self
+            .send("/api/v3/instruments", "")
+            .map_err(|e| e.to_string())?;
+        parse_instrument(&body, symbol)
+    }
+}
+
 impl Kraken {
     /// Send a signed request and return its body.
     ///
@@ -364,6 +618,109 @@ impl Execution for Kraken {
     fn order_status(&self, _symbol: &str, client_id: &str) -> Result<Option<OrderAck>, VenueError> {
         let body = self.send("/api/v3/orders/status", &format!("cliOrdIds={client_id}"))?;
         Ok(order_from_query(&body, client_id))
+    }
+}
+
+#[cfg(test)]
+mod account_reads {
+    use super::*;
+
+    /// The shape the venue's own SDK documents, with the zeroes
+    /// replaced by numbers that make the identity testable.
+    const ACCOUNTS: &str = r#"{"result":"success","accounts":{"cash":{"type":"cashAccount"},
+        "flex":{"currencies":{},"initialMargin":100.0,"maintenanceMargin":50.0,
+        "balanceValue":5000.0,"portfolioValue":4950.0,"collateralValue":5000.0,"pnl":0.0,
+        "unrealizedFunding":0.0,"totalUnrealized":-50.0,"totalUnrealizedAsMargin":-50.0,
+        "availableMargin":4850.0,"marginEquity":4950.0,"type":"multiCollateralMarginAccount"}},
+        "serverTime":"2023-04-04T17:56:49.027Z"}"#;
+
+    #[test]
+    fn the_balance_mapping_is_checked_against_the_venues_own_numbers() {
+        let snap = parse_accounts(ACCOUNTS, 42).expect("a readable account");
+        assert!((snap.wallet_balance - 5000.0).abs() < 1e-9);
+        assert!((snap.unrealized - -50.0).abs() < 1e-9);
+        assert!((snap.margin_balance - 4950.0).abs() < 1e-9);
+        assert_eq!(snap.read_at_ms, 42);
+    }
+
+    #[test]
+    fn a_mapping_the_numbers_contradict_is_refused_rather_than_reported() {
+        // The whole point. If `portfolioValue` is not `balanceValue`
+        // plus `totalUnrealized`, this build has the fields wrong — and
+        // three plausible numbers from a wrong reading is exactly the
+        // failure that made an unreadable balance an error rather than
+        // a zero.
+        let wrong = ACCOUNTS.replace("\"portfolioValue\":4950.0", "\"portfolioValue\":9999.0");
+        let e = parse_accounts(&wrong, 1).expect_err("the identity must hold");
+        assert!(
+            format!("{e}").contains("do not mean what this build reads them to mean"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_legs_direction_comes_from_its_name() {
+        let body = r#"{"result":"success","openPositions":[
+            {"side":"short","symbol":"PI_XBTUSD","price":9392.749993345933,"size":10000,
+             "unrealizedPnl":-607250.006654067},
+            {"side":"long","symbol":"PF_XBTUSD","price":9399.75,"size":20000,
+             "unrealizedPnl":1199500.66}],"serverTime":"2020-07-22T14:39:12.376Z"}"#;
+        let legs = parse_positions(body).expect("readable positions");
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].position_side, "SHORT");
+        assert_eq!(legs[0].amount_text, "-10000");
+        // A JSON number, kept as the digits the venue sent rather than
+        // reformatted through a float.
+        assert_eq!(legs[0].entry_text, "9392.749993345933");
+        assert_eq!(legs[1].position_side, "LONG");
+        assert_eq!(legs[1].amount_text, "20000");
+    }
+
+    #[test]
+    fn an_account_with_no_positions_is_flat_and_not_unreadable() {
+        // The venue omits the member rather than sending an empty list.
+        let body = r#"{"result":"success","serverTime":"2020-07-22T14:39:12.376Z"}"#;
+        assert!(parse_positions(body).expect("a flat account").is_empty());
+    }
+
+    #[test]
+    fn a_resting_orders_original_size_is_what_is_left_plus_what_filled() {
+        // `unfilledSize` is the remainder, not the original: reporting
+        // it as `orig_qty` would make a partially filled order look
+        // smaller than it was placed.
+        let body = r#"{"result":"success","openOrders":[{"order_id":"2ce038ae-c144-4de7-a0f1-82f7f4fca864",
+            "symbol":"pi_ethusd","side":"buy","orderType":"lmt","limitPrice":1200,
+            "unfilledSize":70,"status":"untouched","filledSize":30,"reduceOnly":false}],
+            "serverTime":"2023-04-07T15:18:04.699Z"}"#;
+        let orders = parse_open_orders(body).expect("readable orders");
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].order_id, "2ce038ae-c144-4de7-a0f1-82f7f4fca864");
+        assert_eq!(orders[0].side, "BUY");
+        assert_eq!(orders[0].status, "NEW");
+        assert!((orders[0].executed_qty - 30.0).abs() < 1e-9);
+        assert!((orders[0].orig_qty - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_order_state_this_build_does_not_know_is_refused() {
+        let body = r#"{"result":"success","openOrders":[{"order_id":"a","symbol":"pi_ethusd",
+            "side":"buy","limitPrice":1,"unfilledSize":1,"status":"teleported","filledSize":0}]}"#;
+        assert!(parse_open_orders(body).is_err());
+    }
+
+    #[test]
+    fn an_instrument_carries_its_tick_and_what_a_contract_is_worth() {
+        let body = r#"{"result":"success","instruments":[{"symbol":"pi_xbtusd",
+            "type":"futures_inverse","tickSize":0.5,"contractSize":1,"tradeable":true}]}"#;
+        let i = parse_instrument(body, "pi_xbtusd").expect("a readable instrument");
+        // 0.5 is five at one decimal place.
+        assert_eq!(i.price_scale, 1);
+        assert_eq!(i.price_tick, 5);
+        // Whole contracts.
+        assert_eq!(i.qty_scale, 0);
+        assert_eq!(i.qty_step, 1);
+        // One contract is one dollar on an inverse future.
+        assert_eq!(i.contract_size, 100_000_000);
     }
 }
 

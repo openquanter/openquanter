@@ -112,7 +112,13 @@ pub struct PositionSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenOrder {
     pub symbol: String,
-    pub order_id: i64,
+    /// The venue's own id, as the venue wrote it.
+    ///
+    /// Text for the same reason [`crate::exec::OrderAck::venue_id`] is:
+    /// two venues number their orders and a third names them with a
+    /// UUID. This one was missed when that changed, because no venue
+    /// that named its orders had been read yet.
+    pub order_id: String,
     pub client_order_id: String,
     pub side: String,
     pub position_side: String,
@@ -508,7 +514,7 @@ impl Binance {
             .map(|o| {
                 Ok(OpenOrder {
                     symbol: need_str(&o, "symbol")?,
-                    order_id: need_i64(&o, "orderId")?,
+                    order_id: need_i64(&o, "orderId")?.to_string(),
                     // The key a reconciler matches on. An empty default
                     // here is an id that matches nothing and reads as an
                     // order the venue never mentioned.
