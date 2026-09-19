@@ -251,7 +251,7 @@ mod tests {
 
     /// The failure this exists to prevent, reproduced.
     ///
-    /// Two `oqp-live` processes were once started ninety-two seconds
+    /// Two live trading processes were once started ninety-two seconds
     /// apart by a command that ran twice, and both appended here. The
     /// result is not repairable by a reader: sequence numbers stay
     /// contiguous, every frame decodes, and the history describes a

@@ -130,10 +130,11 @@ writing it down and better than leaving it out.
   reports, not what a run does.* The live journal recorded a
   submission, its outcome and its fills, and nothing at all when the
   venue withdrew an order. A reconstruction could therefore only read
-  an accepted, unfilled, never-ending order as resting: on the huawei
-  testnet that came out as **175 resting orders against an account
-  holding nine**, the 166 difference being cancellations the journal
-  never held. `oq-belief` is what step 5 of [the cutover
+  an accepted, unfilled, never-ending order as resting. On a real
+  deployment that came out as **many times the resting orders the
+  account actually held**, the whole difference being cancellations
+  the journal never had a record type for. `oq-belief` is what step 5
+  of [the cutover
   playbook](docs/CUTOVER.md) compares against, so the error was
   load-bearing. **Behavioural delta:** none for any run — the record is
   written where the venue confirms the withdrawal and nothing reads it
