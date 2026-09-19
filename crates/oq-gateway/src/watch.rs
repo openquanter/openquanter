@@ -336,7 +336,7 @@ mod tests {
     fn order(cid: &str, filled: f64, of: f64) -> OpenOrder {
         OpenOrder {
             symbol: "BTCUSDT".into(),
-            order_id: 1,
+            order_id: "1".to_string(),
             client_order_id: cid.into(),
             side: "BUY".into(),
             position_side: "LONG".into(),

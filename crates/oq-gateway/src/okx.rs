@@ -1172,7 +1172,9 @@ pub fn parse_open_orders(body: &str) -> Result<Vec<crate::binance::OpenOrder>, V
         let Some(symbol) = field_str(&item, "instId") else {
             return Err(malformed("order instId", &item));
         };
-        let Some(order_id) = field_str(&item, "ordId").and_then(|v| v.parse::<i64>().ok()) else {
+        // Read as a number to catch a malformed one, kept as the text
+        // it arrived as.
+        let Some(order_id) = field_str(&item, "ordId").filter(|v| v.parse::<i64>().is_ok()) else {
             return Err(malformed("order ordId", &item));
         };
         let client_order_id = field_str(&item, "clOrdId").unwrap_or_default();
@@ -1373,7 +1375,7 @@ mod account_reads {
         assert_eq!(orders[0].side, "BUY");
         assert_eq!(orders[0].position_side, "LONG");
         assert_eq!(orders[0].status, "PARTIALLY_FILLED");
-        assert_eq!(orders[0].order_id, 312_269_865_356_374_016);
+        assert_eq!(orders[0].order_id, "312269865356374016");
         // Sizes are contracts here too.
         assert!((orders[0].orig_qty - 5.0).abs() < 1e-12);
         assert!((orders[0].executed_qty - 1.0).abs() < 1e-12);
