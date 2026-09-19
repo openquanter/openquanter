@@ -236,6 +236,47 @@ in the commit that adds the dependency, saying what it buys. This is
 that act, when it comes: one entry per curve, named, with the
 alternative recorded as refused rather than unconsidered.
 
+### Lighter: read, and the answer is not to build it
+
+The one venue this document kept flagging as unread. It has been read
+now, and the finding changes the recommendation rather than raising the
+confidence.
+
+Lighter signs with **Schnorr signatures over the ECgFp5 curve, hashed
+with Poseidon2** on the Goldilocks field — zero-knowledge cryptography,
+chosen because the sequencer proves the matching. Not a variation on
+secp256k1 or Ed25519.
+
+Three facts follow, and together they are a verdict.
+
+**The official Python SDK does not implement it either.** It shells out
+to native Go binaries. When a venue's own SDK declines to write its
+signature in the SDK's language, that is information about how hard the
+primitive is to get right.
+
+**There is no official Rust implementation**, and the third-party ones
+depend on `poseidon-hash` and `goldilocks-crypto`. Those are not
+`ed25519-dalek` and `k256`: the budget was raised for two crates that
+are widely deployed and audited, and this would raise it again for two
+that are neither. That decision was about what a dependency in this
+crate is trusted with, and it does not transfer by the mere fact that
+both are called cryptography.
+
+**There are no published vectors.** Hyperliquid's adapter is the only
+signing here that is *verified*, because that venue ships a test with a
+known key and a known `r`, `s` and `v`. Lighter ships none, and the
+requirement is a signature "byte-identical to what the sequencer
+accepts". An implementation subtly wrong here is refused every time,
+with no indication of whether the curve, the hash, the field arithmetic
+or the encoding is at fault.
+
+So: **not built, and not recommended without one of two things** — an
+official Rust signer, or a test vector from the venue. Either would
+make this a day of the kind Hyperliquid turned out to be. Neither
+exists today, and building it anyway produces exactly what this
+document has warned about since its first revision: something that
+compiles, passes its own tests, and is wrong where nobody can see.
+
 ## Decisions
 
 ### V1 — Organise by signing family, not by CEX and DEX
@@ -324,12 +365,11 @@ else, with a conformance case for exactly this.
 | **Kraken Futures** | Kraken | High — algorithm, order and position responses read | SHA-512 is in (`oq-hash`); symbols are `PF_XBTUSD`; sizes are JSON numbers; and its globally-unique client id is worth using rather than ignoring |
 | **Backpack** | Ed25519 | Medium — signing scheme read | Parameters are sorted alphabetically before signing, which is a whole class of bug on its own |
 | **Hyperliquid** | secp256k1 | Medium-high — both the venue's docs and a Rust adapter's notes read | Everything in "What other implementations paid for" |
-| **Lighter** | Own scheme | **Low** | Per-API-key nonces, key indices 0–254 with 0–3 reserved, and a signing scheme this survey has not yet read properly |
+| **Lighter** | Schnorr / Poseidon2 / ECgFp5 | Read, and **declined** | Its own SDK shells out to Go for this; no official Rust signer, no published vectors, and the crates that would be needed are not in the class the budget was raised for |
 | **Coinbase** | — | n/a | It moved. See V3 |
 
-Lighter is stated as low deliberately. Writing it from memory would
-produce something that compiles, passes its own tests, and is wrong in
-ways nobody can see — which is worse than not having it.
+Lighter was stated as low deliberately, and reading it turned that into
+a decision rather than a confidence level — see the section above.
 
 ## Order, and where it got to
 
