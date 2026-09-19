@@ -241,13 +241,13 @@ fn a_correct_belief_agrees_with_the_record_the_venue_produced() {
 
 /// An order the venue withdrew is not resting.
 ///
-/// This is the defect in miniature. On the huawei testnet a journal
-/// reconstructed as 175 resting orders against an account holding
-/// nine: 166 had been cancelled, and the journal had no record of a
-/// cancellation for this to read. Both halves were fixed together —
-/// `Record::Cancelled` exists now, and the reconstruction subtracts
-/// it. A cutover checked against that belief would have been told to
-/// account for 166 orders that no venue has.
+/// This is the defect in miniature. A journal from a real deployment
+/// reconstructed as holding many times the resting orders the account
+/// actually had; every extra one had been cancelled, and the journal
+/// had no record of a cancellation for this to read. Both halves were
+/// fixed together — `Record::Cancelled` exists now, and the
+/// reconstruction subtracts it. A cutover checked against that belief
+/// would have been told to account for orders no venue has.
 #[test]
 fn an_order_the_venue_withdrew_is_not_resting() {
     let p = tmp("cancelled");

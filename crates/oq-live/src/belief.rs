@@ -185,12 +185,12 @@ impl Belief {
 
         // Resting: accepted, not consumed by fills, and not withdrawn.
         //
-        // The third clause was missing until a journal claimed 175
-        // resting orders against an account holding nine. Every one of
-        // the 166 extra had been cancelled — and the journal had no
-        // record of a cancellation to read, so this could not have
-        // known. Both halves were fixed together: `Record::Cancelled`
-        // exists now, and this subtracts it.
+        // The third clause was missing until a journal claimed many
+        // times the resting orders the account actually held. Every
+        // extra one had been cancelled — and the journal had no record
+        // of a cancellation to read, so this could not have known.
+        // Both halves were fixed together: `Record::Cancelled` exists
+        // now, and this subtracts it.
         //
         // Any fill at all takes an order off this list, so a partially
         // filled order is not reported as resting even though the
