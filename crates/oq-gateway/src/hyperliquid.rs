@@ -357,6 +357,9 @@ pub fn signing_key(creds: &Credentials) -> Result<SigningKey, String> {
 /// Written from NautilusTrader's account of its own first run.
 #[must_use]
 pub fn within_five_significant_figures(price: &str) -> bool {
+    if !price.contains('.') {
+        return true;
+    }
     let digits: String = price
         .chars()
         .filter(char::is_ascii_digit)
@@ -364,6 +367,35 @@ pub fn within_five_significant_figures(price: &str) -> bool {
         .trim_start_matches('0')
         .to_string();
     digits.trim_end_matches('0').len() <= 5
+}
+
+/// Validate a perpetual price against both limits published in `meta`.
+#[must_use]
+pub fn valid_perp_price(price: &str, sz_decimals: u8) -> bool {
+    let decimals = price
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.trim_end_matches('0').len());
+    within_five_significant_figures(price)
+        && decimals <= usize::from(6_u8.saturating_sub(sz_decimals))
+}
+
+fn canonical_decimal(value: i64, scale: u8) -> String {
+    let decimal = crate::exec::decimal(value, scale);
+    if !decimal.contains('.') {
+        return decimal;
+    }
+    let trimmed = decimal.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-" {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssetMeta {
+    name: String,
+    sz_decimals: u8,
 }
 
 /// One order, as the wire wants it.
@@ -405,10 +437,12 @@ pub fn order_action(orders: Vec<Value>) -> Value {
 pub struct Hyperliquid {
     base: String,
     key: SigningKey,
+    /// Master or subaccount whose state the signer is authorised to trade.
+    account_address: String,
     mainnet: bool,
     agent: ureq::Agent,
-    /// Asset names in index order. Empty until `load_universe`.
-    universe: Vec<String>,
+    /// Asset metadata in index order. Empty until `load_universe`.
+    universe: Vec<AssetMeta>,
 }
 
 impl Hyperliquid {
@@ -420,9 +454,11 @@ impl Hyperliquid {
     /// Build a client.
     ///
     /// # Errors
-    /// When the secret is not a wallet key.
+    /// When the key is not the master/subaccount address, or the secret
+    /// is not the API wallet's signing key.
     pub fn at(endpoint: Endpoint, creds: &Credentials) -> Result<Self, String> {
         let mainnet = matches!(endpoint, Endpoint::Live);
+        let account_address = normalize_address(creds.key())?;
         Ok(Self {
             base: if mainnet {
                 Self::MAINNET.to_string()
@@ -430,6 +466,7 @@ impl Hyperliquid {
                 Self::TESTNET.to_string()
             },
             key: signing_key(creds)?,
+            account_address,
             mainnet,
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(45)))
@@ -571,13 +608,39 @@ fn truncate(body: &str) -> String {
 /// that reason.
 #[must_use]
 pub fn parse_universe(body: &str) -> Vec<String> {
+    parse_universe_meta(body)
+        .into_iter()
+        .map(|asset| asset.name)
+        .collect()
+}
+
+fn parse_universe_meta(body: &str) -> Vec<AssetMeta> {
     let Some(list) = crate::json::array_field(body, "universe") else {
         return Vec::new();
     };
     crate::json::objects(&list)
         .iter()
-        .filter_map(|o| crate::json::field_str(o, "name"))
+        .filter_map(|o| {
+            Some(AssetMeta {
+                name: crate::json::field_str(o, "name")?,
+                sz_decimals: crate::json::raw_field(o, "szDecimals")?.parse().ok()?,
+            })
+        })
         .collect()
+}
+
+fn normalize_address(address: &str) -> Result<String, String> {
+    let address = address.trim();
+    let Some(hex) = address
+        .strip_prefix("0x")
+        .or_else(|| address.strip_prefix("0X"))
+    else {
+        return Err("OQ_VENUE_KEY must be the master or subaccount 0x address".to_string());
+    };
+    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("OQ_VENUE_KEY must be the master or subaccount 0x address".to_string());
+    }
+    Ok(format!("0x{}", hex.to_ascii_lowercase()))
 }
 
 /// The Ethereum address a wallet key signs as.
@@ -626,22 +689,22 @@ impl Hyperliquid {
     /// universe in it.
     pub fn load_universe(&mut self) -> Result<usize, VenueError> {
         let body = self.info(r#"{"type":"meta"}"#)?;
-        let names = parse_universe(&body);
-        if names.is_empty() {
+        let assets = parse_universe_meta(&body);
+        if assets.is_empty() {
             return Err(VenueError::Malformed {
                 what: "the asset universe",
                 body: body.chars().take(200).collect(),
             });
         }
-        let count = names.len();
-        self.universe = names;
+        let count = assets.len();
+        self.universe = assets;
         Ok(count)
     }
 
-    /// This client's own address, as the venue sees it.
+    /// The master or subaccount whose state this client trades.
     #[must_use]
     pub fn address(&self) -> String {
-        address_hex(&address_of(&self.key))
+        self.account_address.clone()
     }
 
     /// The index an order must reference for this symbol.
@@ -649,8 +712,12 @@ impl Hyperliquid {
     pub fn asset_of(&self, symbol: &str) -> Option<u32> {
         self.universe
             .iter()
-            .position(|n| n == symbol)
+            .position(|asset| asset.name == symbol)
             .and_then(|i| u32::try_from(i).ok())
+    }
+
+    fn asset_meta(&self, symbol: &str) -> Option<&AssetMeta> {
+        self.universe.iter().find(|asset| asset.name == symbol)
     }
 
     /// Post to `/info`, which takes no signature.
@@ -800,10 +867,8 @@ impl Hyperliquid {
 
     /// The account's state, named by address.
     ///
-    /// The address is derived from the key rather than configured, for
-    /// the reason `address_of` gives: an agent wallet's own address
-    /// holds nothing, and a client that asked about it would see an
-    /// empty account while trading a full one.
+    /// The configured address is the master or subaccount. Deriving it
+    /// from an API wallet's signing key would query an empty account.
     ///
     /// # Errors
     /// Whatever the transport reports.
@@ -846,18 +911,20 @@ impl crate::exec::Execution for Hyperliquid {
                     .to_string(),
             });
         };
-        let price = crate::exec::decimal(limit.0, instrument.price_scale);
-        if !within_five_significant_figures(&price) {
+        let price = canonical_decimal(limit.0, instrument.price_scale);
+        let sz_decimals = self
+            .asset_meta(&order.symbol)
+            .map_or(instrument.qty_scale, |asset| asset.sz_decimals);
+        if !valid_perp_price(&price, sz_decimals) {
             return Placed::Rejected(Reject {
                 code: None,
                 message: format!(
-                    "price {price} has more than five significant figures; this venue \
-                     answers that with `user or API wallet does not exist`, because it \
-                     breaks signature verification"
+                    "price {price} exceeds this asset's five-significant-figure or \
+                     decimal-place limit (szDecimals={sz_decimals})"
                 ),
             });
         }
-        let size = crate::exec::decimal(order.qty.0, instrument.qty_scale);
+        let size = canonical_decimal(order.qty.0, instrument.qty_scale);
         let mut wire = match order_wire(
             asset,
             matches!(order.side, oq_types::Side::Buy),
@@ -1031,6 +1098,8 @@ mod tests {
         let names = parse_universe(body);
         assert_eq!(names, vec!["BTC", "ETH", "SOL"]);
         assert_eq!(names.iter().position(|n| n == "ETH"), Some(1));
+        let assets = parse_universe_meta(body);
+        assert_eq!(assets[1].sz_decimals, 4);
     }
 
     #[test]
@@ -1067,6 +1136,24 @@ mod tests {
         // Deterministic from the key, so the same key is the same
         // account every run.
         assert_eq!(address, address_hex(&address_of(&key())));
+    }
+
+    #[test]
+    fn account_queries_use_the_configured_master_not_the_signer() {
+        let master = "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";
+        let creds = Credentials::new(master, TEST_KEY);
+        let client = Hyperliquid::at(Endpoint::Testnet, &creds).expect("valid client");
+        assert_eq!(
+            client.address(),
+            "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        );
+        assert_ne!(client.address(), address_hex(&address_of(&client.key)));
+    }
+
+    #[test]
+    fn an_account_query_address_must_be_an_ethereum_address() {
+        let creds = Credentials::new("agent-name", TEST_KEY);
+        assert!(Hyperliquid::at(Endpoint::Testnet, &creds).is_err());
     }
 
     #[test]
@@ -1169,7 +1256,18 @@ mod tests {
         assert!(within_five_significant_figures("78313"));
         assert!(within_five_significant_figures("0.0147"));
         assert!(!within_five_significant_figures("78313.4"));
-        assert!(!within_five_significant_figures("1234567"));
+        assert!(within_five_significant_figures("1234567"));
+        assert!(valid_perp_price("1234567", 5));
+        assert!(valid_perp_price("0.1", 5));
+        assert!(!valid_perp_price("0.01", 5));
+        assert!(!valid_perp_price("12345.6", 0));
+    }
+
+    #[test]
+    fn hyperliquid_numbers_drop_trailing_zeroes_before_signing() {
+        assert_eq!(canonical_decimal(1_200_000, 1), "120000");
+        assert_eq!(canonical_decimal(1_470, 5), "0.0147");
+        assert_eq!(canonical_decimal(0, 4), "0");
     }
 
     #[test]

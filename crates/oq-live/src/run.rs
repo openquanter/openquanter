@@ -1166,7 +1166,13 @@ where
 
     println!();
     println!("stopping         cancelling anything still resting");
-    trader.cancel_all(&symbol);
+    let shutdown_clean = match trader.cancel_all(&symbol) {
+        Ok(()) => true,
+        Err(why) => {
+            eprintln!("CANCEL FAILED    {why}");
+            false
+        }
+    };
     let _ = reader.close();
     let _ = trader.close_stream();
 
@@ -1309,7 +1315,11 @@ where
         market.trade().connections(),
         market.trade().stalls()
     );
-    ExitCode::SUCCESS
+    if shutdown_clean {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// The pieces of a [`Trader`] this loop uses, so the strategy type does
@@ -1335,7 +1345,9 @@ trait TraderLike {
     /// The same conditions, rendered for the terminal.
     fn waiting_summary(&self) -> String;
     fn latency(&self) -> String;
-    fn cancel_all(&mut self, symbol: &str);
+    /// Withdraw every order owned by this process and verify through the
+    /// venue's open-order view that none remains.
+    fn cancel_all(&mut self, symbol: &str) -> Result<(), String>;
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
     fn reconcile(&mut self, symbol: &str);
     fn renew(&self);
@@ -1392,15 +1404,56 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn latency(&self) -> String {
         self.session().submit_latency().summary()
     }
-    fn cancel_all(&mut self, _symbol: &str) {
-        for id in self
+    fn cancel_all(&mut self, symbol: &str) -> Result<(), String> {
+        let ids = self
             .resting()
             .into_iter()
             .map(str::to_string)
-            .collect::<Vec<_>>()
-        {
-            let _ = self.session().cancel(&id);
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(());
         }
+
+        for id in &ids {
+            match self.session().cancel(id) {
+                crate::Submission::Sent(_) => {}
+                crate::Submission::Rejected(why) => {
+                    eprintln!("cancel           {id} rejected: {why}");
+                }
+                crate::Submission::Unresolved { why, .. } => {
+                    eprintln!("cancel           {id} unresolved: {why}");
+                }
+                crate::Submission::Refused(breach) => {
+                    eprintln!("cancel           {id} refused: {breach:?}");
+                }
+            }
+        }
+
+        let mut last_error = None;
+        for attempt in 0..5 {
+            match self.session().venue().open_orders(symbol) {
+                Ok(open) => {
+                    let still_open = ids
+                        .iter()
+                        .filter(|id| {
+                            open.iter()
+                                .any(|order| order.client_order_id == id.as_str())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if still_open.is_empty() {
+                        return Ok(());
+                    }
+                    last_error = Some(format!("still resting: {}", still_open.join(", ")));
+                }
+                Err(e) => last_error = Some(format!("could not verify open orders: {e}")),
+            }
+            if attempt < 4 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| "withdrawal could not be verified".to_string()))
     }
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError> {
         self.session().venue().close_user_stream()

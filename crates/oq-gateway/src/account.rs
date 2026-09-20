@@ -221,6 +221,9 @@ impl Account for Box<dyn Account> {
     fn open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>, VenueError> {
         (**self).open_orders(symbol)
     }
+    fn fees_charged(&self, symbol: &str, since_ms: i64) -> Result<Option<Cash>, VenueError> {
+        (**self).fees_charged(symbol, since_ms)
+    }
     fn open_user_stream(&self) -> Result<UserStream, VenueError> {
         (**self).open_user_stream()
     }
@@ -250,7 +253,7 @@ mod tests {
     /// implemented the send-an-order half and could not be run, with
     /// nothing to say what it still owed. The list is now this trait,
     /// and this type is the proof the list is complete.
-    struct Nowhere;
+    struct Nowhere(Option<Cash>);
 
     impl Execution for Nowhere {
         fn place(&self, _: &NewOrder, _: &Instrument) -> Placed {
@@ -304,6 +307,9 @@ mod tests {
         fn open_orders(&self, _: &str) -> Result<Vec<OpenOrder>, VenueError> {
             Ok(Vec::new())
         }
+        fn fees_charged(&self, _: &str, _: i64) -> Result<Option<Cash>, VenueError> {
+            Ok(self.0)
+        }
         fn open_user_stream(&self) -> Result<UserStream, VenueError> {
             unimplemented!("no stream is opened from a test")
         }
@@ -328,7 +334,7 @@ mod tests {
     /// stop carrying it.
     #[test]
     fn an_adapter_that_does_not_report_fees_returns_none_rather_than_zero() {
-        let v = Nowhere;
+        let v = Nowhere(None);
         assert!(
             matches!(v.fees_charged("BTCUSDT", 0), Ok(None)),
             "an unimplemented adapter must not answer zero"
@@ -337,7 +343,7 @@ mod tests {
 
     #[test]
     fn an_account_can_be_boxed() {
-        let venue: Box<dyn Account> = Box::new(Nowhere);
+        let venue: Box<dyn Account> = Box::new(Nowhere(None));
         assert_eq!(venue.id(), "nowhere-perp");
     }
 
@@ -349,12 +355,17 @@ mod tests {
     /// after the strategy had already decided to trade.
     #[test]
     fn a_boxed_account_answers_as_the_venue_it_holds() {
-        let venue: Box<dyn Account> = Box::new(Nowhere);
+        let venue: Box<dyn Account> = Box::new(Nowhere(Some(Cash(17))));
         assert_eq!(venue.id_rules(), IdRules::OKX);
         assert_eq!(
             venue.instrument("ANY").expect("resolves").qty_scale,
             4,
             "the instrument comes from the venue, not from a table"
+        );
+        assert_eq!(
+            venue.fees_charged("ANY", 0).expect("forwarded"),
+            Some(Cash(17)),
+            "fee measurement comes from the venue, not the box's default"
         );
         assert!(!venue.is_hedged().expect("answers"));
     }

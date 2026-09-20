@@ -335,6 +335,11 @@ Lighter 的把握当初是刻意写成「低」的,而读完之后它从一个�
 `connectionId`。它是这里唯一有这个资格的签名,而它之所以能有,是因为那家交易所
 提供了测试。
 
+Hyperliquid 凭证包含两个不同的身份。此适配器中，`OQ_VENUE_KEY` 是被查询状态的
+主账户或子账户 `0x` 地址，`OQ_VENUE_SECRET` 是获授权 API wallet 用来签名 action
+的私钥。不能从签名私钥推导查询地址：API wallet 可以代账户交易，但自身没有账户
+状态。
+
 另外两处是余额映射。Kraken 的没法从字段名定下来,所以写成一条恒等式
 (`portfolioValue = balanceValue + totalUnrealized`)并在运行时强制。Hyperliquid
 的同样,用 `accountValue = totalRawUsd + totalNtlPos`。Deribit 两者都不需要:
