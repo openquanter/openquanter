@@ -333,11 +333,12 @@ impl Record {
     /// Decode a payload written under `kind`.
     ///
     /// `None` for a kind this build does not know, or a payload that
-    /// runs out — a truncated record is the normal shape of a process
-    /// that died mid-write, and reading past its end would invent data.
+    /// runs out or has trailing bytes. A truncated record is the normal
+    /// shape of a process that died mid-write, and accepting an extended
+    /// old shape would silently discard fields from a newer schema.
     #[must_use]
     pub fn decode(kind: u16, mut p: &[u8]) -> Option<Self> {
-        Some(match kind {
+        let record = match kind {
             kind::SESSION_START => Self::SessionStart {
                 prefix: take_str(&mut p)?,
                 symbol: take_str(&mut p)?,
@@ -411,7 +412,8 @@ impl Record {
                 Self::Reconciled { at, legs }
             }
             _ => return None,
-        })
+        };
+        if p.is_empty() { Some(record) } else { None }
     }
 }
 
@@ -569,6 +571,17 @@ mod tests {
         // must skip it. Guessing at the payload of an unknown kind is how
         // a format stops being forward compatible.
         assert!(Record::decode(9999, b"anything").is_none());
+    }
+
+    #[test]
+    fn a_record_with_trailing_bytes_is_not_misread_as_an_older_shape() {
+        let record = Record::Cancelled {
+            at: Nanos(13),
+            client_id: "oq123-1".into(),
+        };
+        let mut bytes = record.encode();
+        bytes.extend_from_slice(b"future field");
+        assert!(Record::decode(record.kind(), &bytes).is_none());
     }
 
     #[test]
