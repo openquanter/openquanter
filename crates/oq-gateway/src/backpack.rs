@@ -67,7 +67,7 @@ use oq_types::Instrument;
 use crate::VenueError;
 use crate::creds::Credentials;
 use crate::exec::{Endpoint, Execution, NewOrder, OrderAck, Placed, Reject, Unresolved, decimal};
-use crate::json::{field_str, object_containing, raw_field};
+use crate::json::{field_str, raw_field};
 
 /// A client for Backpack.
 pub struct Backpack {
@@ -88,17 +88,19 @@ impl Backpack {
     /// Build a client.
     ///
     /// # Errors
-    /// When the secret is not a base64 Ed25519 seed. Refused here
+    /// When testnet is requested, because Backpack publishes no test
+    /// deployment, or when the secret is not a base64 Ed25519 seed. Refused here
     /// rather than at the first order: a key that decoded to the wrong
     /// bytes signs everything invalidly, and the venue reports that as
     /// a bad signature, which sends the reader to the algorithm instead
     /// of to the key.
     pub fn at(endpoint: Endpoint, creds: Credentials) -> Result<Self, String> {
-        // There is no separate test host. Recorded rather than ignored:
-        // `Endpoint` cannot protect a caller here the way it does for
-        // the venues that publish a testnet, so a test account is a
-        // separate account with its own keys.
-        let _ = endpoint;
+        if endpoint == Endpoint::Testnet {
+            return Err(
+                "Backpack does not publish a testnet endpoint; refusing to use the live host"
+                    .to_string(),
+            );
+        }
         let seed = core::str::from_utf8(creds.secret_bytes())
             .ok()
             .and_then(crate::b64::decode)
@@ -229,8 +231,9 @@ pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
 /// Read one order out of a query response.
 #[must_use]
 pub fn order_from_query(body: &str, client_id: &str) -> Option<OrderAck> {
-    // The id is a number in the payload, so it is matched unquoted.
-    let entry = object_containing(body, &format!(":{client_id}"))?;
+    let entry = crate::json::objects(body)
+        .into_iter()
+        .find(|entry| raw_field(entry, "clientId").as_deref() == Some(client_id))?;
     let status = field_str(&entry, "status")?;
     status_of(&status)?;
     Some(OrderAck {
@@ -239,6 +242,29 @@ pub fn order_from_query(body: &str, client_id: &str) -> Option<OrderAck> {
         status,
         executed_qty: field_str(&entry, "executedQuantity").unwrap_or_else(|| "0".to_string()),
     })
+}
+
+fn json_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Encode the request schema without turning numeric and boolean fields
+/// into strings. The signing message still uses their textual form.
+fn request_body(params: &[(&str, String)]) -> String {
+    let fields = params
+        .iter()
+        .map(|(key, value)| {
+            let value = match *key {
+                "clientId" => value.clone(),
+                "autoBorrow" | "autoBorrowRepay" | "autoLend" | "autoLendRedeem" | "postOnly"
+                | "reduceOnly" => value.clone(),
+                _ => json_string(value),
+            };
+            format!("{}:{value}", json_string(key))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{fields}}}")
 }
 
 fn truncate(body: &str) -> String {
@@ -398,17 +424,12 @@ impl Backpack {
         ];
         // The body carries the same parameters a GET puts in its query,
         // which is why `sorted` is applied to one list and used by both.
-        let body = if method == "GET" || method == "DELETE" {
+        let body = if method == "GET" {
             String::new()
         } else {
-            let fields = params
-                .iter()
-                .map(|(k, v)| format!(r#""{k}":"{v}""#))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{fields}}}")
+            request_body(params)
         };
-        let url = if query.is_empty() || method == "POST" {
+        let url = if query.is_empty() || method != "GET" {
             format!("{}{path}", self.base)
         } else {
             format!("{}{path}?{query}", self.base)
@@ -430,7 +451,7 @@ impl Backpack {
                 for (k, v) in &headers {
                     r = r.header(*k, *v);
                 }
-                r.call()
+                r.force_send_body().send(&body)
             }
             _ => {
                 let mut r = self.agent.get(&url);
@@ -517,9 +538,15 @@ impl Execution for Backpack {
     }
 
     fn order_status(&self, symbol: &str, client_id: &str) -> Result<Option<OrderAck>, VenueError> {
-        let params = sorted(vec![("symbol", symbol.to_string())]);
-        let body = self.send("GET", "/api/v1/orders", "orderQueryAll", &params)?;
-        Ok(order_from_query(&body, client_id))
+        let params = sorted(vec![
+            ("clientId", client_id.to_string()),
+            ("symbol", symbol.to_string()),
+        ]);
+        match self.send("GET", "/api/v1/order", "orderQuery", &params) {
+            Ok(body) => Ok(order_from_query(&body, client_id)),
+            Err(VenueError::Venue { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -647,6 +674,39 @@ mod tests {
             }
             other => panic!("a placed order is an acceptance: {other:?}"),
         }
+    }
+
+    #[test]
+    fn request_json_preserves_schema_types_and_escapes_strings() {
+        let body = request_body(&[
+            ("clientId", "7".to_string()),
+            ("reduceOnly", "true".to_string()),
+            ("symbol", "SOL_\"USD".to_string()),
+        ]);
+        assert_eq!(
+            body,
+            r#"{"clientId":7,"reduceOnly":true,"symbol":"SOL_\"USD"}"#
+        );
+    }
+
+    #[test]
+    fn an_order_query_matches_the_client_id_field_not_an_unrelated_number() {
+        let body = r#"[{"id":"wrong","clientId":70,"price":"7","status":"New"},
+            {"id":"right","clientId":7,"price":"70","status":"New"}]"#;
+        let order = order_from_query(body, "7").expect("the exact client id");
+        assert_eq!(order.venue_id, "right");
+    }
+
+    #[test]
+    fn testnet_never_falls_through_to_the_live_host() {
+        let result = Backpack::at(Endpoint::Testnet, Credentials::new("key", "secret"));
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .expect("must be refused")
+                .contains("does not publish a testnet")
+        );
     }
 
     #[test]

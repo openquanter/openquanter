@@ -432,6 +432,13 @@ the venue's own published vectors — a known key, a known action, a known
 encoding. It is the only signing here with that standing, and it exists
 because that venue ships a test.
 
+Hyperliquid credentials name two different identities. For this adapter,
+`OQ_VENUE_KEY` is the `0x` address of the master account or subaccount
+whose state is queried, while `OQ_VENUE_SECRET` is the private key of the
+authorised API wallet that signs actions. Deriving the query address from
+the signing key is incorrect for an API wallet: it trades for the account
+but has no account state of its own.
+
 Two balance mappings are the other case. Kraken's could not be settled
 from the field names, so it is written as an identity
 (`portfolioValue = balanceValue + totalUnrealized`) and enforced at
