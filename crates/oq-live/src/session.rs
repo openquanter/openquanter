@@ -176,6 +176,7 @@ pub struct Session<E: Execution> {
     position_side: PositionSide,
     /// Increments per order so client ids do not repeat within a run.
     sequence: u64,
+    sequence_end: u64,
     prefix: String,
 }
 
@@ -250,8 +251,28 @@ impl<E: Execution> Session<E> {
             instrument: config.instrument,
             position_side: config.position_side,
             sequence: 0,
+            sequence_end: u64::MAX,
             prefix: config.id_prefix,
         })
+    }
+
+    /// Use a host-reserved, durable range without changing order ownership.
+    ///
+    /// Must be installed before the first submission. Exhausting the range
+    /// refuses new orders; it never wraps back to previously used ids.
+    ///
+    /// # Errors
+    /// If the range is empty, starts at zero, or submissions have started.
+    pub fn with_order_id_range(
+        mut self,
+        range: std::ops::RangeInclusive<u64>,
+    ) -> Result<Self, &'static str> {
+        if self.sequence != 0 || range.is_empty() || *range.start() == 0 {
+            return Err("invalid or late client order id reservation");
+        }
+        self.sequence = *range.start() - 1;
+        self.sequence_end = *range.end();
+        Ok(self)
     }
 
     /// Write decisions to `journal` from here on.
@@ -436,6 +457,12 @@ impl<E: Execution> Session<E> {
     /// Turn a permit into an order and send it.
     fn send(&mut self, permit: &Permit, now: Nanos) -> Submission {
         let approved = permit.order();
+        if self.sequence >= self.sequence_end {
+            return Submission::Rejected(
+                "reserved client order ids exhausted; restart with a new durable reservation"
+                    .into(),
+            );
+        }
         self.sequence += 1;
         let client_id = format!("{}-{}", self.prefix, self.sequence);
         let order = NewOrder {

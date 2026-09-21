@@ -382,6 +382,45 @@ where
         };
     println!("interlock        held ({})", interlock.path().display());
 
+    // Keep ownership stable, but never recycle a sequence from an earlier
+    // process. A timed-out submit queried under a reused id can otherwise
+    // resolve to an unrelated historical order, leaving an entry pending.
+    let state_root = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+        });
+    let Some(state_root) = state_root else {
+        eprintln!(
+            "order ids        REFUSED: neither XDG_STATE_HOME nor HOME identifies durable state"
+        );
+        return ExitCode::FAILURE;
+    };
+    let id_range = match interlock.reserve_order_ids(
+        &state_root.join("oq-live"),
+        u64::try_from(now_ns()).unwrap_or(0),
+    ) {
+        Ok(range) => range,
+        Err(e) => {
+            eprintln!("order ids        REFUSED: cannot reserve durable client ids: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !venue
+        .id_rules()
+        .accepts(&format!("{id_prefix}-{}", id_range.end()))
+    {
+        eprintln!(
+            "order ids        REFUSED: prefix leaves insufficient room for a durable sequence"
+        );
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "order ids        reserved {}..={} as {id_prefix}",
+        id_range.start(),
+        id_range.end()
+    );
+
     let config = SessionConfig {
         symbol: symbol.clone(),
         instrument,
@@ -430,7 +469,13 @@ where
         &resting,
         &expected,
     ) {
-        Ok(s) => s,
+        Ok(s) => match s.with_order_id_range(id_range) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("order ids        REFUSED: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
         Err(e) => {
             eprintln!("startup          REFUSED: {e}");
             return ExitCode::FAILURE;
