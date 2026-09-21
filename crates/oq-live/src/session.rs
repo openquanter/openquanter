@@ -39,11 +39,25 @@ pub enum StartupRefusal {
     },
     /// The venue holds an order the caller did not declare.
     UndeclaredOrder { client_id: String },
+    /// A named hedge leg cannot be represented by the account model.
+    InvalidPosition {
+        symbol: String,
+        side: String,
+        amount: f64,
+    },
 }
 
 impl core::fmt::Display for StartupRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidPosition {
+                symbol,
+                side,
+                amount,
+            } => write!(
+                f,
+                "invalid venue position {symbol} {side} {amount}; refusing to reinterpret its sign"
+            ),
             Self::UndeclaredPosition {
                 symbol,
                 side,
@@ -65,6 +79,23 @@ impl core::fmt::Display for StartupRefusal {
 }
 
 impl core::error::Error for StartupRefusal {}
+
+/// Reject impossible hedge legs before adoption or any order submission.
+pub(crate) fn validate_positions(positions: &[PositionSnapshot]) -> Result<(), StartupRefusal> {
+    for p in positions {
+        if !p.amount.is_finite()
+            || (p.position_side.eq_ignore_ascii_case("LONG") && p.amount < 0.0)
+            || (p.position_side.eq_ignore_ascii_case("SHORT") && p.amount > 0.0)
+        {
+            return Err(StartupRefusal::InvalidPosition {
+                symbol: p.symbol.clone(),
+                side: p.position_side.clone(),
+                amount: p.amount,
+            });
+        }
+    }
+    Ok(())
+}
 
 /// What happened to a submission.
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +198,7 @@ impl<E: Execution> Session<E> {
         venue_orders: &[String],
         expected: &[Position],
     ) -> Result<Self, StartupRefusal> {
+        validate_positions(venue_positions)?;
         for p in venue_positions {
             // A leg that has been closed reads as a position of zero
             // rather than as an absence, and refusing to start over one
@@ -500,6 +532,11 @@ impl<E: Execution> Session<E> {
 
     /// Adopt the venue's own view after a reconciliation.
     pub fn reconcile(&mut self, venue_positions: &[PositionSnapshot]) {
+        if let Err(why) = validate_positions(venue_positions) {
+            self.gate.kill_switch().trip();
+            eprintln!("HALT             {why}");
+            return;
+        }
         self.book.adopt(
             venue_positions
                 .iter()

@@ -119,6 +119,26 @@ fn buy(qty: i64) -> ProposedOrder {
 }
 
 #[test]
+fn declaring_an_invalid_hedge_leg_does_not_make_it_safe_to_adopt() {
+    for (side, amount) in [("LONG", -0.002), ("SHORT", 0.002)] {
+        let result = session(
+            Recording::accepting(),
+            &[held("BTCUSDT", side, amount)],
+            &[],
+            &[Position {
+                symbol: "BTCUSDT".into(),
+                side: side.into(),
+                amount,
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(StartupRefusal::InvalidPosition { .. })
+        ));
+    }
+}
+
+#[test]
 fn a_position_nobody_declared_stops_the_process() {
     let e = session(
         Recording::accepting(),
