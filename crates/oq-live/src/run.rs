@@ -801,6 +801,14 @@ where
     // is managing has been unmanaged for however long that took.
     let mut last_tick: Option<oq_engine::Tick> = None;
 
+    // Reports the stream should have delivered and did not, rebuilt from
+    // the venue's records by a reconciliation that found the books
+    // behind. Drained ahead of the stream itself, through the same arm,
+    // so a recovered fill is booked, journalled and shown to the strategy
+    // exactly as a streamed one would have been.
+    let mut recovered: std::collections::VecDeque<oq_gateway::OrderUpdate> =
+        std::collections::VecDeque::new();
+
     while deadline.is_none_or(|d| Instant::now() < d) && !shutdown_requested() {
         let now = Nanos(now_ns());
 
@@ -919,8 +927,12 @@ where
             }
         }
 
-        // The account's own stream.
-        match reader.next() {
+        // The account's own stream, after anything recovered for it.
+        let next = match recovered.pop_front() {
+            Some(u) => StreamOutcome::Event(UserEvent::Order(u)),
+            None => reader.next(),
+        };
+        match next {
             StreamOutcome::Event(UserEvent::Order(u)) => {
                 println!(
                     "fill/update      {} {} qty {} @ {}",
@@ -1129,6 +1141,48 @@ where
                             // differ, which is the only thing that could
                             // explain it afterwards.
                             if let Some(m) = books.reconcile(net, Nanos(now_ns())) {
+                                // Ask before judging. A stream that
+                                // dropped does not replay what it missed,
+                                // and the commonest cause of this line is
+                                // a fill said to nobody: a take-profit
+                                // filled during a reconnect, the books
+                                // went on holding the position, and nine
+                                // minutes later the process halted over a
+                                // difference the venue could have
+                                // explained in two requests.
+                                let resting: Vec<String> =
+                                    trader.resting().into_iter().map(str::to_string).collect();
+                                let missed =
+                                    missed_reports(trader.venue(), &symbol, &resting, |t| {
+                                        books.has_booked(t)
+                                    });
+                                if !missed.is_empty() {
+                                    eprintln!(
+                                        "reconcile        MISMATCH ours {} theirs {}, drift {}; \
+                                         {} report(s) the stream never delivered, recovered \
+                                         from the venue; judged again at the next check",
+                                        m.ours.0,
+                                        m.theirs.0,
+                                        m.drift().0,
+                                        missed.len()
+                                    );
+                                    for u in &missed {
+                                        println!(
+                                            "recovered        {} {} qty {} @ {} trade {:?}",
+                                            u.client_id,
+                                            u.status,
+                                            u.last_qty,
+                                            u.last_price,
+                                            u.trade_id
+                                        );
+                                    }
+                                    recovered.extend(missed);
+                                    // Not held against the stream: the
+                                    // books were behind for a reason now
+                                    // known, and the next check compares
+                                    // them after the reports are booked.
+                                    continue;
+                                }
                                 metrics.reconciliation_mismatches += 1;
                                 eprintln!(
                                     "reconcile        MISMATCH ours {} theirs {}, drift {}",
@@ -1563,6 +1617,38 @@ fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
         Action::Reconnect => {}
         Action::Halt(why) => trader.halt(why),
     }
+}
+
+/// Reports about this process's resting orders that the books have not
+/// seen, asked of the venue order by order.
+///
+/// Kept: a fill whose trade is not yet booked, and an ending with no
+/// trade attached — an order that was cancelled or expired while nobody
+/// was listening. Dropped: fills already booked, which the stream did
+/// deliver. Every order asked about is one this process still believes
+/// is resting, so any ending reported for it is news.
+///
+/// A venue that cannot answer, or answers with an error, contributes
+/// nothing, and the caller judges the difference as it did before this
+/// existed. Not knowing is not an explanation.
+fn missed_reports<E: Execution + ?Sized>(
+    venue: &E,
+    symbol: &str,
+    resting: &[String],
+    booked: impl Fn(u64) -> bool,
+) -> Vec<oq_gateway::OrderUpdate> {
+    let mut out = Vec::new();
+    for client_id in resting {
+        match venue.recover_order(symbol, client_id) {
+            Ok(Some(reports)) => out.extend(reports.into_iter().filter(|u| match u.trade_id {
+                Some(t) => !booked(t.unsigned_abs()),
+                None => ending_of(&u.status).is_some(),
+            })),
+            Ok(None) => {}
+            Err(e) => eprintln!("recover          {client_id} FAILED: {e}"),
+        }
+    }
+    out
 }
 
 /// Carry out a verdict that may need the reader itself.
@@ -2491,5 +2577,114 @@ mod adoption_rounding {
             let got = adopted_lots(&[leg(&text, "70097.90")], &i);
             assert_eq!(got[0].1.0, lots, "{text} should be {lots} lots");
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery {
+    use super::missed_reports;
+    use oq_gateway::{Execution, NewOrder, OrderAck, OrderUpdate, Placed, VenueError};
+    use oq_types::Instrument;
+    use std::collections::HashMap;
+
+    /// Answers `recover_order` from a table; everything else is unused.
+    struct Recorded(HashMap<String, Result<Option<Vec<OrderUpdate>>, ()>>);
+
+    impl Execution for Recorded {
+        fn place(&self, _o: &NewOrder, _i: &Instrument) -> Placed {
+            unreachable!("recovery places nothing")
+        }
+        fn cancel(&self, _s: &str, _c: &str) -> Placed {
+            unreachable!("recovery cancels nothing")
+        }
+        fn order_status(&self, _s: &str, _c: &str) -> Result<Option<OrderAck>, VenueError> {
+            unreachable!("recovery asks through recover_order")
+        }
+        fn recover_order(
+            &self,
+            _s: &str,
+            client_id: &str,
+        ) -> Result<Option<Vec<OrderUpdate>>, VenueError> {
+            match self.0.get(client_id) {
+                Some(Ok(r)) => Ok(r.clone()),
+                Some(Err(())) => Err(VenueError::Malformed {
+                    what: "test",
+                    body: String::new(),
+                }),
+                None => Ok(Some(Vec::new())),
+            }
+        }
+    }
+
+    fn report(client_id: &str, status: &str, trade_id: Option<i64>) -> OrderUpdate {
+        OrderUpdate {
+            symbol: "BTCUSDT".into(),
+            client_id: client_id.into(),
+            venue_id: "1".into(),
+            status: status.into(),
+            last_qty: if trade_id.is_some() { "0.002" } else { "0" }.into(),
+            cumulative_qty: "0.002".into(),
+            last_price: "85620.60".into(),
+            side: "SELL".into(),
+            position_side: "LONG".into(),
+            maker: true,
+            trade_id,
+            event_ms: 0,
+        }
+    }
+
+    fn ids(v: &[OrderUpdate]) -> Vec<(&str, &str, Option<i64>)> {
+        v.iter()
+            .map(|u| (u.client_id.as_str(), u.status.as_str(), u.trade_id))
+            .collect()
+    }
+
+    /// The incident: the take-profit filled while the stream was down,
+    /// and the books still held the leg it closed.
+    #[test]
+    fn a_fill_the_stream_never_delivered_is_recovered() {
+        let venue = Recorded(HashMap::from([(
+            "tp".to_string(),
+            Ok(Some(vec![report("tp", "FILLED", Some(7))])),
+        )]));
+        let got = missed_reports(&venue, "BTCUSDT", &["tp".into(), "rung".into()], |_| false);
+        assert_eq!(ids(&got), [("tp", "FILLED", Some(7))]);
+    }
+
+    /// Delivered once already; recovering it again would read as a
+    /// discovery and excuse a difference nothing had explained.
+    #[test]
+    fn a_fill_already_booked_is_not_recovered() {
+        let venue = Recorded(HashMap::from([(
+            "tp".to_string(),
+            Ok(Some(vec![
+                report("tp", "PARTIALLY_FILLED", Some(7)),
+                report("tp", "PARTIALLY_FILLED", Some(8)),
+            ])),
+        )]));
+        let got = missed_reports(&venue, "BTCUSDT", &["tp".into()], |t| t == 7);
+        assert_eq!(ids(&got), [("tp", "PARTIALLY_FILLED", Some(8))]);
+    }
+
+    #[test]
+    fn a_cancellation_nobody_heard_is_recovered() {
+        let venue = Recorded(HashMap::from([(
+            "rung".to_string(),
+            Ok(Some(vec![report("rung", "CANCELED", None)])),
+        )]));
+        let got = missed_reports(&venue, "BTCUSDT", &["rung".into()], |_| false);
+        assert_eq!(ids(&got), [("rung", "CANCELED", None)]);
+    }
+
+    /// Not knowing is not an explanation: a venue that cannot answer, or
+    /// fails to, leaves the difference to be judged as before.
+    #[test]
+    fn an_unanswerable_venue_recovers_nothing() {
+        let venue = Recorded(HashMap::from([
+            ("a".to_string(), Ok(None)),
+            ("b".to_string(), Err(())),
+        ]));
+        let got = missed_reports(&venue, "BTCUSDT", &["a".into(), "b".into()], |_| false);
+        assert!(got.is_empty());
     }
 }
