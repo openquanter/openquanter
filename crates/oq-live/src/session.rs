@@ -39,11 +39,25 @@ pub enum StartupRefusal {
     },
     /// The venue holds an order the caller did not declare.
     UndeclaredOrder { client_id: String },
+    /// A named hedge leg cannot be represented by the account model.
+    InvalidPosition {
+        symbol: String,
+        side: String,
+        amount: f64,
+    },
 }
 
 impl core::fmt::Display for StartupRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidPosition {
+                symbol,
+                side,
+                amount,
+            } => write!(
+                f,
+                "invalid venue position {symbol} {side} {amount}; refusing to reinterpret its sign"
+            ),
             Self::UndeclaredPosition {
                 symbol,
                 side,
@@ -65,6 +79,23 @@ impl core::fmt::Display for StartupRefusal {
 }
 
 impl core::error::Error for StartupRefusal {}
+
+/// Reject impossible hedge legs before adoption or any order submission.
+pub(crate) fn validate_positions(positions: &[PositionSnapshot]) -> Result<(), StartupRefusal> {
+    for p in positions {
+        if !p.amount.is_finite()
+            || (p.position_side.eq_ignore_ascii_case("LONG") && p.amount < 0.0)
+            || (p.position_side.eq_ignore_ascii_case("SHORT") && p.amount > 0.0)
+        {
+            return Err(StartupRefusal::InvalidPosition {
+                symbol: p.symbol.clone(),
+                side: p.position_side.clone(),
+                amount: p.amount,
+            });
+        }
+    }
+    Ok(())
+}
 
 /// What happened to a submission.
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +176,7 @@ pub struct Session<E: Execution> {
     position_side: PositionSide,
     /// Increments per order so client ids do not repeat within a run.
     sequence: u64,
+    sequence_end: u64,
     prefix: String,
 }
 
@@ -167,6 +199,7 @@ impl<E: Execution> Session<E> {
         venue_orders: &[String],
         expected: &[Position],
     ) -> Result<Self, StartupRefusal> {
+        validate_positions(venue_positions)?;
         for p in venue_positions {
             // A leg that has been closed reads as a position of zero
             // rather than as an absence, and refusing to start over one
@@ -218,8 +251,28 @@ impl<E: Execution> Session<E> {
             instrument: config.instrument,
             position_side: config.position_side,
             sequence: 0,
+            sequence_end: u64::MAX,
             prefix: config.id_prefix,
         })
+    }
+
+    /// Use a host-reserved, durable range without changing order ownership.
+    ///
+    /// Must be installed before the first submission. Exhausting the range
+    /// refuses new orders; it never wraps back to previously used ids.
+    ///
+    /// # Errors
+    /// If the range is empty, starts at zero, or submissions have started.
+    pub fn with_order_id_range(
+        mut self,
+        range: std::ops::RangeInclusive<u64>,
+    ) -> Result<Self, &'static str> {
+        if self.sequence != 0 || range.is_empty() || *range.start() == 0 {
+            return Err("invalid or late client order id reservation");
+        }
+        self.sequence = *range.start() - 1;
+        self.sequence_end = *range.end();
+        Ok(self)
     }
 
     /// Write decisions to `journal` from here on.
@@ -404,6 +457,12 @@ impl<E: Execution> Session<E> {
     /// Turn a permit into an order and send it.
     fn send(&mut self, permit: &Permit, now: Nanos) -> Submission {
         let approved = permit.order();
+        if self.sequence >= self.sequence_end {
+            return Submission::Rejected(
+                "reserved client order ids exhausted; restart with a new durable reservation"
+                    .into(),
+            );
+        }
         self.sequence += 1;
         let client_id = format!("{}-{}", self.prefix, self.sequence);
         let order = NewOrder {
@@ -500,6 +559,11 @@ impl<E: Execution> Session<E> {
 
     /// Adopt the venue's own view after a reconciliation.
     pub fn reconcile(&mut self, venue_positions: &[PositionSnapshot]) {
+        if let Err(why) = validate_positions(venue_positions) {
+            self.gate.kill_switch().trip();
+            eprintln!("HALT             {why}");
+            return;
+        }
         self.book.adopt(
             venue_positions
                 .iter()

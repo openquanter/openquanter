@@ -45,6 +45,7 @@ pub mod feed;
 pub mod interlock;
 pub mod latency;
 pub mod metrics;
+mod order_ids;
 pub mod record;
 pub mod recovery;
 pub mod run;

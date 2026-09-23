@@ -39,6 +39,38 @@ fn tick() -> oq_engine::Tick {
 }
 
 #[test]
+fn an_excess_close_is_detected_on_either_leg_before_the_kernel_clamps_it() {
+    for side in [Side::Buy, Side::Sell] {
+        let mut b = books(PositionMode::Hedge);
+        b.adopt(side, QtyLots(10), PriceTicks(7_000_000), Nanos(1));
+        let mut fill = oq_types::Fill {
+            stamp: Stamp::synthetic(2),
+            instrument: InstrumentId(1),
+            order: oq_types::OrderId(1),
+            trade: oq_types::TradeId(1),
+            side: side.opposite(),
+            offset: oq_types::Offset::Close,
+            price: PriceTicks(7_000_000),
+            qty: QtyLots(11),
+            liquidity: oq_types::Liquidity::Maker,
+        };
+        assert!(b.close_exceeds_position(&fill));
+        fill.qty = QtyLots(10);
+        assert!(!b.close_exceeds_position(&fill));
+        b.on_venue_fill(&fill);
+        assert!(
+            !b.close_exceeds_position(&fill),
+            "a duplicate fill is not a new over-close"
+        );
+        fill.trade = oq_types::TradeId(2);
+        assert!(
+            b.close_exceeds_position(&fill),
+            "a new close of a flat leg is invalid"
+        );
+    }
+}
+
+#[test]
 fn a_hedged_accounts_two_legs_do_not_cancel() {
     let mut b = books(PositionMode::Hedge);
     b.adopt(Side::Buy, QtyLots(20), PriceTicks(6_837_492), Nanos(1));
