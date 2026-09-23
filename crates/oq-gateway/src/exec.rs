@@ -201,6 +201,37 @@ pub trait Execution {
         symbol: &str,
         client_id: &str,
     ) -> Result<Option<OrderAck>, crate::VenueError>;
+
+    /// What the account stream would have said about an order, rebuilt
+    /// from the venue's own records.
+    ///
+    /// One report per trade, each carrying the venue's trade id, then a
+    /// final report with the order's status when it has ended — the same
+    /// shape the stream delivers, so a caller books them through the
+    /// same path and the trade id deduplicates whatever the stream did
+    /// deliver. An order still resting and never filled yields nothing.
+    ///
+    /// This exists because a stream that drops and reconnects does not
+    /// replay what it missed. A take-profit filled during such a gap and
+    /// the process went on believing it held the position: the
+    /// reconciler saw the difference and halted, correctly, but nothing
+    /// could have told it *why*, and the strategy never learned its exit
+    /// had happened.
+    ///
+    /// `Ok(None)` means this adapter cannot answer — a third state, as
+    /// with [`crate::account::Account::fees_charged`]: an adapter that
+    /// has not implemented this says so rather than answering "nothing
+    /// happened".
+    ///
+    /// # Errors
+    /// Whatever the venue or the transport reports.
+    fn recover_order(
+        &self,
+        _symbol: &str,
+        _client_id: &str,
+    ) -> Result<Option<Vec<OrderUpdate>>, crate::VenueError> {
+        Ok(None)
+    }
 }
 
 /// A fixed-point integer as the decimal text a venue expects.

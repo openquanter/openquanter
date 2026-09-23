@@ -148,6 +148,17 @@ So: transient order-level differences resolve by re-query, and a
 keep trading. The middle option Nautilus takes — log an error, continue —
 is the one this cannot use.
 
+Re-query means asking the venue for its **own records** of the orders
+this process still believes are resting — each order's status and its
+trades, with the venue's trade ids — and booking whatever the stream
+never delivered through the same path a streamed report takes. That is
+not a repair: nothing is priced, nothing is invented, and the trade id
+deduplicates anything the stream did deliver. It exists because a stream
+that drops does not replay what it missed; a take-profit that fills
+during a reconnect is otherwise a difference nothing can explain, and
+the process halts over a fill two requests would have found. A
+difference the venue's records do not explain still halts.
+
 The reason to halt rather than self-correct at all is that a reconciler
 which silently repairs cannot tell you it has been repairing the same
 discrepancy every ten seconds for a week. The discrepancy is the finding.
