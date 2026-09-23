@@ -276,6 +276,15 @@ where
             return ExitCode::FAILURE;
         }
     };
+    // Before startup recovery can cancel orders or adopt any quantity.
+    if let Err(e) = crate::session::validate_positions(&positions) {
+        eprintln!("positions        REFUSED: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = venue_net_lots(&positions, &instrument) {
+        eprintln!("positions        REFUSED: {e}");
+        return ExitCode::FAILURE;
+    }
     // The venue's own number. Books opened at a configured balance would
     // report an equity curve about a different account.
     let starting_balance = match venue.balances() {
@@ -373,6 +382,45 @@ where
         };
     println!("interlock        held ({})", interlock.path().display());
 
+    // Keep ownership stable, but never recycle a sequence from an earlier
+    // process. A timed-out submit queried under a reused id can otherwise
+    // resolve to an unrelated historical order, leaving an entry pending.
+    let state_root = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+        });
+    let Some(state_root) = state_root else {
+        eprintln!(
+            "order ids        REFUSED: neither XDG_STATE_HOME nor HOME identifies durable state"
+        );
+        return ExitCode::FAILURE;
+    };
+    let id_range = match interlock.reserve_order_ids(
+        &state_root.join("oq-live"),
+        u64::try_from(now_ns()).unwrap_or(0),
+    ) {
+        Ok(range) => range,
+        Err(e) => {
+            eprintln!("order ids        REFUSED: cannot reserve durable client ids: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !venue
+        .id_rules()
+        .accepts(&format!("{id_prefix}-{}", id_range.end()))
+    {
+        eprintln!(
+            "order ids        REFUSED: prefix leaves insufficient room for a durable sequence"
+        );
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "order ids        reserved {}..={} as {id_prefix}",
+        id_range.start(),
+        id_range.end()
+    );
+
     let config = SessionConfig {
         symbol: symbol.clone(),
         instrument,
@@ -421,7 +469,13 @@ where
         &resting,
         &expected,
     ) {
-        Ok(s) => s,
+        Ok(s) => match s.with_order_id_range(id_range) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("order ids        REFUSED: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
         Err(e) => {
             eprintln!("startup          REFUSED: {e}");
             return ExitCode::FAILURE;
@@ -894,6 +948,7 @@ where
                     );
                 }
                 if let Ok(fill) = parsed {
+                    let overclose = books.close_exceeds_position(&fill);
                     shadow.on_venue_fill(
                         fill.order,
                         fill.side,
@@ -903,6 +958,9 @@ where
                     );
                     match books.on_venue_fill(&fill) {
                         crate::books::Booked::Applied(outputs) => {
+                            if overclose {
+                                trader.halt("venue fill closes more than the held hedge leg; books cannot represent the excess; reconcile before recovery");
+                            }
                             for output in outputs {
                                 println!("books            {output:?}");
                             }
@@ -1054,14 +1112,23 @@ where
                     match trader.venue().positions(&symbol) {
                         Ok(venue) => {
                             supervisor.on_read_succeeded();
+                            let net = match venue_net_lots(&venue, &instrument) {
+                                Ok(net) => net,
+                                Err(why) => {
+                                    metrics.incomplete_reads += 1;
+                                    trader.halt(&why);
+                                    continue;
+                                }
+                            };
+                            if let Err(why) = crate::session::validate_positions(&venue) {
+                                trader.halt(&why.to_string());
+                            }
                             // Reported, never quietly corrected: books
                             // that adopted the venue's number here would
                             // destroy the evidence of how they came to
                             // differ, which is the only thing that could
                             // explain it afterwards.
-                            if let Some(m) = books
-                                .reconcile(venue_net_lots(&venue, &instrument), Nanos(now_ns()))
-                            {
+                            if let Some(m) = books.reconcile(net, Nanos(now_ns())) {
                                 metrics.reconciliation_mismatches += 1;
                                 eprintln!(
                                     "reconcile        MISMATCH ours {} theirs {}, drift {}",
@@ -1134,8 +1201,13 @@ where
             } else {
                 String::new()
             };
+            let halted = if trader.session().gate().kill_switch().is_tripped() {
+                ", HALTED"
+            } else {
+                ""
+            };
             println!(
-                "heartbeat        {ticks} ticks, {} resting{pending}{doubt}{waiting}",
+                "heartbeat        {ticks} ticks, {} resting{halted}{pending}{doubt}{waiting}",
                 trader.working()
             );
             // Why the tick count is what it is.
@@ -1539,18 +1611,25 @@ fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) {
 
 /// The venue's legs reduced to one signed net, in this instrument's lots.
 ///
-/// Through [`adopted_lots`], so the arithmetic that decides what this
-/// process holds at startup is the same arithmetic that decides whether
-/// it still holds it — a second conversion here is a second place for a
-/// scale to be wrong, and the two would disagree only under the very
-/// conditions the comparison exists to detect.
-fn venue_net_lots(positions: &[oq_gateway::PositionSnapshot], instrument: &Instrument) -> QtyLots {
-    QtyLots(
-        adopted_lots(positions, instrument)
-            .into_iter()
-            .map(|(side, lots, _)| lots.0 * side.sign())
-            .sum(),
-    )
+/// Preserve the venue's signed amounts even if a hedge leg is invalid.
+/// Adoption magnitudes would flip an invalid negative LONG to positive
+/// and report a fabricated net. Malformed decimals are never zero.
+fn venue_net_lots(
+    positions: &[oq_gateway::PositionSnapshot],
+    instrument: &Instrument,
+) -> Result<QtyLots, String> {
+    positions.iter().try_fold(QtyLots(0), |net, p| {
+        let lots = scaled_decimal(&p.amount_text, instrument.qty_scale).ok_or_else(|| {
+            format!(
+                "invalid position quantity {} {}: {}",
+                p.symbol, p.position_side, p.amount_text
+            )
+        })?;
+        net.0
+            .checked_add(lots)
+            .map(QtyLots)
+            .ok_or_else(|| "venue position sum overflow".to_string())
+    })
 }
 
 /// What this process believes it holds, in the shape the venue reports.
@@ -1783,14 +1862,9 @@ fn adopted_lots(
             );
             let entry =
                 PriceTicks(scaled_decimal(&p.entry_text, instrument.price_scale).unwrap_or(0));
-            // The leg the venue named, not the sign of the amount. On a
-            // hedged account they are different questions, and a venue
-            // can report a leg whose amount has a sign the leg should
-            // not have — one did, reporting a LONG leg at a negative
-            // quantity after a defect elsewhere let sells run past zero.
-            // Reading the sign there adopts onto the opposite leg, and a
-            // takeover onto the opposite leg opens where it meant to
-            // close.
+            // Startup validates named hedge legs before conversion. An
+            // invalid sign must never be reinterpreted as either a
+            // normal magnitude on this leg or exposure on the other leg.
             //
             // `BOTH` is a one-way account: one leg, and the sign is the
             // only thing that can say which way it points.
@@ -1890,7 +1964,7 @@ mod endings {
 
 #[cfg(test)]
 mod adoption {
-    use super::{adopted_legs, adopted_lots};
+    use super::{adopted_legs, adopted_lots, venue_net_lots};
     use oq_gateway::binance::PositionSnapshot;
     use oq_types::{Instrument, Side};
 
@@ -1922,6 +1996,27 @@ mod adoption {
         assert_eq!(got[0].2.0, 6_373_520, "63735.2 at two decimal places");
     }
 
+    #[test]
+    fn reconciliation_preserves_an_invalid_legs_sign() {
+        let mut long = leg(-0.002, 70_000.0);
+        long.position_side = "LONG".into();
+        let positions = [long, leg(-0.020, 70_000.0)];
+        assert_eq!(
+            venue_net_lots(&positions, &Instrument::linear(2, 4))
+                .unwrap()
+                .0,
+            -220
+        );
+        assert!(crate::session::validate_positions(&positions).is_err());
+    }
+
+    #[test]
+    fn a_malformed_position_is_not_reported_as_zero() {
+        let mut p = leg(0.002, 70_000.0);
+        p.amount_text = "unknown".into();
+        assert!(venue_net_lots(&[p], &Instrument::linear(2, 4)).is_err());
+    }
+
     /// A short is adopted as a short.
     #[test]
     fn the_side_follows_the_sign() {
@@ -1930,22 +2025,12 @@ mod adoption {
         assert_eq!(adopted_lots(&[leg(-0.016, 1.0)], &i)[0].0, Side::Sell);
     }
 
-    /// On a hedged account the leg the venue named wins over the sign.
-    ///
-    /// A venue can report a leg whose amount has a sign the leg should
-    /// not have — one did, reporting a LONG leg at a negative quantity
-    /// after sells were allowed to run past zero. Reading the sign there
-    /// adopts the position onto the *opposite* leg, and a takeover onto
-    /// the opposite leg is one that opens where it meant to close.
+    /// Neither changing the leg nor discarding its sign is safe.
     #[test]
-    fn a_named_leg_wins_over_the_sign() {
+    fn a_named_leg_with_an_invalid_sign_is_refused_before_adoption() {
         let mut long_gone_negative = leg(-0.014, 69_544.2);
         long_gone_negative.position_side = "LONG".into();
-        assert_eq!(
-            adopted_lots(&[long_gone_negative], &Instrument::linear(2, 4))[0].0,
-            Side::Buy,
-            "the venue said LONG; the sign is the anomaly, not the answer"
-        );
+        assert!(crate::session::validate_positions(&[long_gone_negative]).is_err());
     }
 
     /// A one-way account has one leg, and only the sign can say which

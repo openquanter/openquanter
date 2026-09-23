@@ -119,6 +119,96 @@ fn buy(qty: i64) -> ProposedOrder {
 }
 
 #[test]
+fn durable_range_is_used_without_changing_the_ownership_prefix() {
+    let mut s = session(Recording::accepting(), &[], &[], &[])
+        .unwrap_or_else(|e| panic!("{e}"))
+        .with_order_id_range(9_000..=9_001)
+        .unwrap_or_else(|e| panic!("{e}"));
+    s.submit(buy(1), PriceTicks(6_000_000), Nanos(0));
+    s.submit(buy(1), PriceTicks(6_000_000), Nanos(1));
+    let sent = s.venue().sent.borrow();
+    assert_eq!(sent[0].client_id, "live-9000");
+    assert_eq!(sent[1].client_id, "live-9001");
+    drop(sent);
+    assert!(matches!(
+        s.submit(buy(1), PriceTicks(6_000_000), Nanos(2)),
+        Submission::Rejected(_)
+    ));
+    assert_eq!(s.venue().sent.borrow().len(), 2);
+}
+
+#[test]
+fn timed_out_entry_does_not_query_an_old_process_order() {
+    struct Historical {
+        queried: std::cell::RefCell<Vec<String>>,
+    }
+    impl Execution for Historical {
+        fn place(&self, o: &NewOrder, _: &Instrument) -> Placed {
+            Placed::Unknown(oq_gateway::Unresolved {
+                client_id: o.client_id.clone(),
+                reason: "timeout".into(),
+            })
+        }
+        fn cancel(&self, _: &str, _: &str) -> Placed {
+            unreachable!()
+        }
+        fn order_status(&self, _: &str, id: &str) -> Result<Option<OrderAck>, VenueError> {
+            self.queried.borrow_mut().push(id.into());
+            Ok((id == "live-1").then(|| OrderAck {
+                venue_id: "old".into(),
+                client_id: id.into(),
+                status: "FILLED".into(),
+                executed_qty: "0.006".into(),
+            }))
+        }
+    }
+    let mut s = Session::start(
+        Historical {
+            queried: std::cell::RefCell::new(Vec::new()),
+        },
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "BTCUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "live".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .with_order_id_range(10_000..=20_000)
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(matches!(
+        s.submit(buy(1), PriceTicks(6_000_000), Nanos(0)),
+        Submission::Rejected(_)
+    ));
+    assert_eq!(*s.venue().queried.borrow(), vec!["live-10000"]);
+    assert_eq!(s.book().working(), 0);
+}
+
+#[test]
+fn declaring_an_invalid_hedge_leg_does_not_make_it_safe_to_adopt() {
+    for (side, amount) in [("LONG", -0.002), ("SHORT", 0.002)] {
+        let result = session(
+            Recording::accepting(),
+            &[held("BTCUSDT", side, amount)],
+            &[],
+            &[Position {
+                symbol: "BTCUSDT".into(),
+                side: side.into(),
+                amount,
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(StartupRefusal::InvalidPosition { .. })
+        ));
+    }
+}
+
+#[test]
 fn a_position_nobody_declared_stops_the_process() {
     let e = session(
         Recording::accepting(),

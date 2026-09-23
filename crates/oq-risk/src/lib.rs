@@ -340,7 +340,7 @@ impl RiskGate {
         } else {
             account.position.0.saturating_add(signed)
         };
-        if resulting.abs() > self.limits.max_position_qty.0 {
+        if !order.reduce_only && resulting.abs() > self.limits.max_position_qty.0 {
             return Decision::Refuse(Breach::PositionWouldExceed {
                 resulting: QtyLots(resulting),
                 limit: self.limits.max_position_qty,
@@ -353,7 +353,11 @@ impl RiskGate {
         let Some(notional) = instrument.notional(reference, order.qty) else {
             return Decision::Refuse(Breach::Unpriceable);
         };
-        if notional.0 > self.limits.max_order_notional.0 {
+        // Opening limits must not strand an existing position when its
+        // price rises. Closes retain the quantity bound, price band,
+        // rate limit and kill switch; their reduction semantics must be
+        // enforced by the execution path.
+        if !order.reduce_only && notional.0 > self.limits.max_order_notional.0 {
             return Decision::Refuse(Breach::NotionalTooLarge {
                 notional,
                 limit: self.limits.max_order_notional,
@@ -535,6 +539,54 @@ mod tests {
         o.side = Side::Sell;
         o.reduce_only = true;
         assert!(g.check(&o, &account, &btc(), Nanos(0)).is_permitted());
+    }
+
+    #[test]
+    fn a_close_can_reduce_exposure_after_price_or_position_exceeds_opening_limits() {
+        let limits = Limits {
+            max_order_notional: Cash::from_units(100),
+            ..workable()
+        };
+        let account = AccountState {
+            position: QtyLots(-25),
+            ..flat()
+        };
+        let mut close = buy(20);
+        close.reduce_only = true;
+        let mut gate = RiskGate::new(limits);
+        assert!(
+            gate.check(&close, &account, &btc(), Nanos(0))
+                .is_permitted()
+        );
+        close.reduce_only = false;
+        assert!(matches!(
+            gate.check(&close, &account, &btc(), Nanos(1)),
+            Decision::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn closes_still_obey_the_kill_switch_price_band_and_quantity_bound() {
+        let mut close = buy(5);
+        close.reduce_only = true;
+        let mut gate = RiskGate::new(workable());
+        gate.kill_switch().trip();
+        assert!(matches!(
+            gate.check(&close, &flat(), &btc(), Nanos(0)),
+            Decision::Refuse(Breach::Halted)
+        ));
+        gate.kill_switch().clear();
+        close.limit_price = Some(PriceTicks(1));
+        assert!(matches!(
+            gate.check(&close, &flat(), &btc(), Nanos(0)),
+            Decision::Refuse(Breach::PriceOutsideBand { .. })
+        ));
+        close.limit_price = Some(MARK);
+        close.qty = QtyLots(21);
+        assert!(matches!(
+            gate.check(&close, &flat(), &btc(), Nanos(0)),
+            Decision::Refuse(Breach::OrderTooLarge { .. })
+        ));
     }
 
     #[test]

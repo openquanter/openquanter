@@ -227,6 +227,25 @@ impl Books {
         Booked::Applied(self.kernel.apply(&Event::VenueFill(*fill)).to_vec())
     }
 
+    /// A hedge close beyond the held leg cannot be represented by the
+    /// kernel's non-crossing hedge model. The runner must halt before
+    /// letting the strategy respond, while still journalling the fill.
+    #[must_use]
+    pub fn close_exceeds_position(&self, fill: &Fill) -> bool {
+        if self.kernel.state().mode != oq_core::PositionMode::Hedge
+            || fill.offset != Offset::Close
+            || self.seen.contains(&fill.trade.0)
+        {
+            return false;
+        }
+        let (long, short) = self.legs();
+        let available = match fill.side {
+            Side::Sell => long.0,
+            Side::Buy => -short.0,
+        };
+        fill.qty.0 > available
+    }
+
     /// Distinct trades booked.
     #[must_use]
     pub fn booked(&self) -> usize {
