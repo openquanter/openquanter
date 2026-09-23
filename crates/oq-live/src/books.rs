@@ -252,6 +252,17 @@ impl Books {
         self.seen.len()
     }
 
+    /// Whether this trade is already in the books.
+    ///
+    /// For telling a recovered report the stream did deliver from one it
+    /// did not, before either is handed back to the loop — applying both
+    /// is harmless, but counting the first as a discovery would call a
+    /// difference explained when nothing had explained it.
+    #[must_use]
+    pub fn has_booked(&self, trade: u64) -> bool {
+        self.seen.contains(&trade)
+    }
+
     /// The strategy's view, for this observation.
     ///
     /// The whole reason this module exists: every field here was a

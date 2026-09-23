@@ -1124,6 +1124,161 @@ impl Execution for Binance {
             _ => Err(malformed("order status", &body)),
         }
     }
+
+    /// Two reads: the order by client id, then its trades by the venue's
+    /// id. The second is skipped when nothing has executed, so an order
+    /// still resting untouched costs one request, not two.
+    fn recover_order(
+        &self,
+        symbol: &str,
+        client_id: &str,
+    ) -> Result<Option<Vec<OrderUpdate>>, VenueError> {
+        let order = match self.get_signed(
+            self.dialect.wire().order,
+            &format!("symbol={symbol}&origClientOrderId={client_id}"),
+        ) {
+            Ok(b) => b,
+            // Never heard of: nothing to recover, and not an error.
+            Err(VenueError::Venue { body, .. }) if field_i64(&body, "code") == Some(-2013) => {
+                return Ok(Some(Vec::new()));
+            }
+            Err(e) => return Err(e),
+        };
+        let executed = field_str(&order, "executedQty").unwrap_or_else(|| "0".into());
+        let trades = if is_zero_decimal(&executed) {
+            String::from("[]")
+        } else {
+            let venue_id = need_i64(&order, "orderId")?;
+            self.get_signed(
+                self.dialect.wire().user_trades,
+                &format!("symbol={symbol}&orderId={venue_id}"),
+            )?
+        };
+        recovered_reports(&order, &trades).map(Some)
+    }
+}
+
+/// Rebuild the stream's reports for one order from the order and its
+/// trades, as the REST endpoints return them.
+///
+/// Pure, for the reason [`parse_user_event`] is: what this claims the
+/// venue said is checked against recorded bodies without a socket.
+///
+/// Every trade becomes a fill report carrying its own trade id, so the
+/// caller's deduplication discards any the stream did deliver. The last
+/// one carries the order's final status when that status is `FILLED`,
+/// which is how the stream marks the fill that ended an order; a
+/// `CANCELED` or `EXPIRED` order gets its ending as a separate report
+/// with no traded quantity, again as the stream sends it.
+///
+/// # Errors
+/// A body missing a field the reports cannot be built without, or
+/// trades whose quantities do not add up to what the order says
+/// executed — a page cut short would otherwise be recovered as a
+/// partial fill that never happened.
+pub fn recovered_reports(order: &str, trades: &str) -> Result<Vec<OrderUpdate>, VenueError> {
+    let symbol = need_str(order, "symbol")?;
+    let client_id = need_str(order, "clientOrderId")?;
+    let venue_id = need_i64(order, "orderId")?.to_string();
+    let status = need_str(order, "status")?;
+    let executed = field_str(order, "executedQty").unwrap_or_else(|| "0".into());
+    let side = need_str(order, "side")?;
+    let position_side = field_str(order, "positionSide").unwrap_or_else(|| "BOTH".into());
+    let venue_id_number = need_i64(order, "orderId")?;
+
+    let mut rows: Vec<String> = objects(trades)
+        .into_iter()
+        // Asked for by order id, but checked rather than trusted: a
+        // trade from another order booked against this one is a
+        // position that was never taken.
+        .filter(|t| field_i64(t, "orderId") == Some(venue_id_number))
+        .collect();
+    rows.sort_by_key(|t| (field_i64(t, "time"), field_i64(t, "id")));
+
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    let mut cumulative = String::from("0");
+    for (n, t) in rows.iter().enumerate() {
+        let qty = need_str(t, "qty")?;
+        cumulative = add_decimal(&cumulative, &qty).ok_or_else(|| malformed("qty", t))?;
+        let last = n + 1 == rows.len();
+        out.push(OrderUpdate {
+            symbol: symbol.clone(),
+            client_id: client_id.clone(),
+            venue_id: venue_id.clone(),
+            status: if last && status == "FILLED" {
+                status.clone()
+            } else {
+                "PARTIALLY_FILLED".into()
+            },
+            last_qty: qty,
+            cumulative_qty: cumulative.clone(),
+            last_price: need_str(t, "price")?,
+            side: side.clone(),
+            position_side: position_side.clone(),
+            maker: need_bool(t, "maker")?,
+            trade_id: Some(need_i64(t, "id")?).filter(|id| *id > 0),
+            event_ms: field_i64(t, "time").unwrap_or_default(),
+        });
+    }
+    if !decimal_eq(&cumulative, &executed) {
+        return Err(malformed("trades do not add up to executedQty", order));
+    }
+    if matches!(status.as_str(), "CANCELED" | "EXPIRED") {
+        out.push(OrderUpdate {
+            symbol,
+            client_id,
+            venue_id,
+            status,
+            last_qty: "0".into(),
+            cumulative_qty: cumulative,
+            last_price: "0".into(),
+            side,
+            position_side,
+            maker: false,
+            trade_id: None,
+            event_ms: field_i64(order, "updateTime").unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// A decimal string as an integer at `scale` places, exactly.
+fn scaled_decimal(text: &str, scale: usize) -> Option<i128> {
+    let (int, frac) = text.split_once('.').unwrap_or((text, ""));
+    if frac.len() > scale {
+        return None;
+    }
+    let mut digits = String::from(int);
+    digits.push_str(frac);
+    digits.extend(core::iter::repeat_n('0', scale - frac.len()));
+    digits.parse().ok()
+}
+
+fn frac_len(text: &str) -> usize {
+    text.split_once('.').map_or(0, |(_, f)| f.len())
+}
+
+/// The sum of two decimal strings, in decimal text. Exact: quantities
+/// summed as floats are how `0.1 + 0.2` stops matching `0.3`.
+fn add_decimal(a: &str, b: &str) -> Option<String> {
+    let scale = frac_len(a).max(frac_len(b));
+    let sum = scaled_decimal(a, scale)? + scaled_decimal(b, scale)?;
+    if scale == 0 {
+        return Some(sum.to_string());
+    }
+    let sign = if sum < 0 { "-" } else { "" };
+    let digits = format!("{:0>width$}", sum.unsigned_abs(), width = scale + 1);
+    let (int, frac) = digits.split_at(digits.len() - scale);
+    Some(format!("{sign}{int}.{frac}"))
+}
+
+fn decimal_eq(a: &str, b: &str) -> bool {
+    let scale = frac_len(a).max(frac_len(b));
+    matches!((scaled_decimal(a, scale), scaled_decimal(b, scale)), (Some(x), Some(y)) if x == y)
+}
+
+fn is_zero_decimal(text: &str) -> bool {
+    decimal_eq(text, "0")
 }
 
 impl crate::account::Account for Binance {
@@ -2273,5 +2428,121 @@ mod ban_backoff {
         b.banned_until_ms
             .store(now_ms() + b.clock_offset_ms() - 1, Relaxed);
         assert_eq!(b.ban_remaining_ms(), None, "an expired ban is not a ban");
+    }
+}
+
+#[cfg(test)]
+mod recovery {
+    use super::{add_decimal, recovered_reports};
+
+    fn order(status: &str, executed: &str) -> String {
+        format!(
+            r#"{{"orderId":28595189800,"symbol":"BTCUSDT","status":"{status}","clientOrderId":"oqp-1789995315898935595","price":"85620.60","origQty":"0.0020","executedQty":"{executed}","side":"SELL","positionSide":"LONG","reduceOnly":false,"updateTime":1790000000000}}"#
+        )
+    }
+
+    fn trade(id: i64, order_id: i64, qty: &str, time: i64) -> String {
+        format!(
+            r#"{{"buyer":false,"commission":"0.01","commissionAsset":"USDT","id":{id},"maker":true,"orderId":{order_id},"price":"85620.60","qty":"{qty}","quoteQty":"171.24","realizedPnl":"0.70","side":"SELL","positionSide":"LONG","symbol":"BTCUSDT","time":{time}}}"#
+        )
+    }
+
+    /// The take-profit whose fill the stream never delivered.
+    #[test]
+    fn a_filled_order_is_one_fill_that_ends_it() {
+        let trades = format!(
+            "[{}]",
+            trade(539900001, 28595189800, "0.0020", 1789999999000)
+        );
+        let r = recovered_reports(&order("FILLED", "0.0020"), &trades).unwrap();
+        assert_eq!(r.len(), 1);
+        let u = &r[0];
+        assert_eq!(u.client_id, "oqp-1789995315898935595");
+        assert_eq!(u.status, "FILLED");
+        assert_eq!(u.trade_id, Some(539900001));
+        assert_eq!(
+            (u.last_qty.as_str(), u.last_price.as_str()),
+            ("0.0020", "85620.60")
+        );
+        assert_eq!(
+            (u.side.as_str(), u.position_side.as_str()),
+            ("SELL", "LONG")
+        );
+        assert!(u.maker);
+    }
+
+    /// Only the last piece ends the order; a strategy told of the end at
+    /// the first piece releases an order that is still filling.
+    #[test]
+    fn a_fill_in_pieces_ends_only_on_the_last() {
+        let trades = format!(
+            "[{},{}]",
+            // Out of order on purpose: the venue sorts, and this does
+            // not assume it.
+            trade(12, 28595189800, "0.0015", 2000),
+            trade(11, 28595189800, "0.0005", 1000),
+        );
+        let r = recovered_reports(&order("FILLED", "0.0020"), &trades).unwrap();
+        let shape: Vec<_> = r
+            .iter()
+            .map(|u| (u.trade_id, u.status.as_str(), u.cumulative_qty.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (Some(11), "PARTIALLY_FILLED", "0.0005"),
+                (Some(12), "FILLED", "0.0020"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_remainder_is_its_own_report_after_the_fills() {
+        let trades = format!("[{}]", trade(21, 28595189800, "0.0005", 1000));
+        let r = recovered_reports(&order("CANCELED", "0.0005"), &trades).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            (r[0].status.as_str(), r[0].trade_id),
+            ("PARTIALLY_FILLED", Some(21))
+        );
+        assert_eq!((r[1].status.as_str(), r[1].trade_id), ("CANCELED", None));
+        assert_eq!(r[1].last_qty, "0");
+    }
+
+    #[test]
+    fn an_untouched_resting_order_recovers_nothing() {
+        assert!(
+            recovered_reports(&order("NEW", "0.0000"), "[]")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn another_orders_trade_is_not_booked_against_this_one() {
+        let trades = format!(
+            "[{},{}]",
+            trade(31, 28595189800, "0.0020", 1000),
+            trade(32, 99, "0.0100", 1000),
+        );
+        let r = recovered_reports(&order("FILLED", "0.0020"), &trades).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].trade_id, Some(31));
+    }
+
+    /// A short page would otherwise be recovered as a partial fill that
+    /// never happened, and the missing part would never be looked for.
+    #[test]
+    fn trades_that_do_not_add_up_are_refused() {
+        let trades = format!("[{}]", trade(41, 28595189800, "0.0005", 1000));
+        assert!(recovered_reports(&order("FILLED", "0.0020"), &trades).is_err());
+    }
+
+    #[test]
+    fn decimals_add_exactly() {
+        assert_eq!(add_decimal("0", "0.0020").as_deref(), Some("0.0020"));
+        assert_eq!(add_decimal("0.1", "0.2").as_deref(), Some("0.3"));
+        assert_eq!(add_decimal("0.0005", "0.0015").as_deref(), Some("0.0020"));
+        assert_eq!(add_decimal("5", "3").as_deref(), Some("8"));
     }
 }

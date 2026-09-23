@@ -36,7 +36,7 @@ use oq_types::{Cash, Instrument};
 
 use crate::binance::{AccountSnapshot, OpenOrder, PositionSnapshot, VenueError};
 use crate::broker::IdRules;
-use crate::exec::{Execution, NewOrder, OrderAck, Placed, UserStream};
+use crate::exec::{Execution, NewOrder, OrderAck, OrderUpdate, Placed, UserStream};
 use crate::klines::Kline;
 
 /// Everything a live run needs from the account side of one venue.
@@ -187,6 +187,16 @@ impl Execution for Box<dyn Account> {
 
     fn order_status(&self, symbol: &str, client_id: &str) -> Result<Option<OrderAck>, VenueError> {
         (**self).order_status(symbol, client_id)
+    }
+
+    // Forwarded explicitly: left to the default, a boxed account would
+    // answer "cannot say" for every adapter that can.
+    fn recover_order(
+        &self,
+        symbol: &str,
+        client_id: &str,
+    ) -> Result<Option<Vec<OrderUpdate>>, VenueError> {
+        (**self).recover_order(symbol, client_id)
     }
 }
 
