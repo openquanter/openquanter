@@ -792,6 +792,7 @@ where
     // one level up.
     let mut refused = 0_u64;
     let mut unresolved = 0_u64;
+    let mut reported_unresolved = 0_u64;
     let mut cancel_failed = 0_u64;
     let mut last_tick_report = Instant::now();
     // The last observation, kept so a fill arriving between ticks can be
@@ -1114,6 +1115,18 @@ where
             StreamOutcome::Idle | StreamOutcome::Ignored => {}
         }
 
+        // Placements whose outcome could not be established, reported to
+        // the supervisor as they happen. Its limit on them — several in a
+        // row and the process no longer knows what it has working — had
+        // no caller, so a run could go on sending orders while every one
+        // of them was of unknown fate.
+        while reported_unresolved < unresolved {
+            reported_unresolved += 1;
+            for action in supervisor.on_unresolved() {
+                settle(&action, &mut trader, &mut reader, &symbol);
+            }
+        }
+
         // Upkeep that time makes due, whether or not anything arrived.
         for action in supervisor.due(now) {
             match action {
@@ -1234,12 +1247,17 @@ where
             // the observation path. Each answer reaches the strategy
             // through `on_placed`, which is where it would have arrived
             // had the venue answered the first time.
-            for (local, resting) in trader.chase_unanswered() {
-                if resting {
+            let settled = trader.chase_unanswered();
+            for (local, resting) in &settled {
+                if *resting {
                     println!("resolved         {local:?} is resting after all");
                 } else {
                     println!("resolved         {local:?} never landed; it may be sent again");
                 }
+            }
+            // Outcomes established again: the run of unknowns is over.
+            if !settled.is_empty() && trader.unanswered() == 0 {
+                supervisor.on_resolved();
             }
             // Sampled and recorded together, so what a reader sees in
             // the terminal and what a replay sees in the journal are the
@@ -1602,7 +1620,11 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     }
     fn reconcile(&mut self, symbol: &str) {
         match self.session().venue().positions(symbol) {
-            Ok(p) => self.session_mut().reconcile(&p),
+            Ok(p) => {
+                if let Err(why) = self.session_mut().reconcile(&p) {
+                    self.halt(&why);
+                }
+            }
             Err(e) => eprintln!("reconcile        FAILED: {e}"),
         }
     }

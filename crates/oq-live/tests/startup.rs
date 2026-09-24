@@ -624,3 +624,23 @@ fn a_hedged_opening_order_is_capped_against_its_leg_not_the_net() {
     // And a leg with room is not refused on the other leg's account.
     assert!(s.submit(buy(1), PriceTicks(6_000_000), Nanos(2)).is_sent());
 }
+
+/// An impossible position found by a reconciliation is the caller's to
+/// halt on, so the halt withdraws what it should.
+///
+/// The session used to trip the switch itself. New orders stopped and
+/// every resting opening order went on filling, because withdrawing them
+/// is the trader's work and a halt taken inside the session never
+/// reached it.
+#[test]
+fn a_reconciliation_that_finds_an_impossible_leg_leaves_the_halt_to_the_caller() {
+    let mut s = session(Recording::accepting(), &[], &[], &[]).expect("starts");
+    let err = s
+        .reconcile(&[held("BTCUSDT", "LONG", -0.5)])
+        .expect_err("a long leg cannot be negative");
+    assert!(!err.is_empty());
+    assert!(
+        s.submit(buy(1), PriceTicks(6_000_000), Nanos(0)).is_sent(),
+        "the session did not halt on its own; the caller does, and withdraws"
+    );
+}
