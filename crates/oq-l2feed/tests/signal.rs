@@ -256,3 +256,53 @@ fn a_restart_seam_is_counted_as_a_gap() {
         "the restart seam must appear in the stream as a gap marker"
     );
 }
+
+/// A hard kill's half-record is cut off on reopen, not appended after.
+///
+/// Appended after, it became the middle of the file: the manifest
+/// counted records the file could not yield, decoding failed on the
+/// checksum, and the restart after that refused to open the window.
+#[test]
+fn a_torn_tail_is_cut_off_before_a_restart_appends() {
+    let dir = tempdir().join("torn");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stream = StreamId::new("binance-perp", "BTCUSDT", "trade");
+    let clock = FixedClock(1_786_000_000_000_000_000);
+
+    let write_some = |n: usize| {
+        let mut w = CaptureWriter::new(&dir, stream.clone(), software_for_writer())
+            .expect("open writer")
+            .with_rotation(Rotation::Daily);
+        for i in 0..n {
+            w.append(&oq_l2feed::frame::Record {
+                kind: Kind::Payload,
+                local_ts: clock.now_ns(),
+                exch_ts: clock.now_ns(),
+                payload: format!(r#"{{"i":{i}}}"#).into_bytes(),
+            })
+            .expect("append");
+        }
+        w.seal().expect("seal")
+    };
+
+    let first = write_some(5);
+    // A hard kill mid-frame: half of a sixth record's bytes.
+    let bytes = std::fs::read(&first.path).expect("read");
+    let one = bytes.len() / 5;
+    let mut torn = bytes.clone();
+    torn.extend_from_slice(&bytes[..one / 2]);
+    std::fs::write(&first.path, &torn).expect("tear");
+
+    for (session, n) in [(2, 51), (3, 4)] {
+        let sealed = write_some(n);
+        let bytes = std::fs::read(&sealed.path).expect("read");
+        let (records, left) = decode_all(&bytes)
+            .unwrap_or_else(|e| panic!("session {session}: the file must still decode: {e}"));
+        assert_eq!(left, 0, "session {session}: no tear left inside the file");
+        assert_eq!(
+            records.len() as u64,
+            sealed.manifest.records,
+            "session {session}: manifest and file agree"
+        );
+    }
+}
