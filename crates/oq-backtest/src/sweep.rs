@@ -372,6 +372,10 @@ pub enum Refusal {
         id: String,
         /// The first tick where it did.
         tick: usize,
+        /// Orders it sent on that tick with the whole window known.
+        full: usize,
+        /// Orders it sent on that tick with only the prefix known.
+        truncated: usize,
     },
     /// A statistic could not be computed at all.
     ///
@@ -406,10 +410,16 @@ impl core::fmt::Display for Refusal {
                 "deflated Sharpe ratio is {value:.3}, below the limit of {limit:.3}: \
                  the result does not survive the number of trials that produced it"
             ),
-            Self::Lookahead { id, tick } => write!(
+            Self::Lookahead {
+                id,
+                tick,
+                full,
+                truncated,
+            } => write!(
                 f,
                 "{id} decides differently on a prefix of the data than on all of it, first \
-                 at tick {tick}: it uses data it could not have had, and its result is not \
+                 at tick {tick} ({full} order(s) with the whole window known, {truncated} with \
+                 only the prefix): it uses data it could not have had, and its result is not \
                  one a live run can reproduce"
             ),
             Self::Unscored { statistic, why } => write!(
@@ -477,6 +487,8 @@ impl SweepReport {
             out.push(Refusal::Lookahead {
                 id: id.clone(),
                 tick: first.tick,
+                full: first.full.len(),
+                truncated: first.truncated.len(),
             });
         }
         out
@@ -492,6 +504,43 @@ impl SweepReport {
 #[cfg(test)]
 mod strict_mode {
     use super::*;
+
+    /// A winner that decided differently on a prefix is refused, and the
+    /// refusal says what it sent each way.
+    #[test]
+    fn a_winner_that_used_the_future_is_refused() {
+        let mut r = report(Ok(0.1), Ok(0.99));
+        assert!(r.refusals(Thresholds::default()).is_empty());
+        r.lookahead = Some((
+            "fast=5".to_string(),
+            LookaheadReport {
+                signals: 10,
+                checked: 10,
+                divergences: vec![crate::lookahead::Divergence {
+                    checked_at: 7,
+                    tick: 7,
+                    at: oq_types::Nanos(7),
+                    full: vec![oq_strategy::Intent::CancelAll],
+                    truncated: Vec::new(),
+                }],
+            },
+        ));
+        let refusals = r.refusals(Thresholds::default());
+        assert_eq!(
+            refusals,
+            vec![Refusal::Lookahead {
+                id: "fast=5".to_string(),
+                tick: 7,
+                full: 1,
+                truncated: 0,
+            }]
+        );
+        assert!(
+            refusals[0]
+                .to_string()
+                .contains("1 order(s) with the whole window")
+        );
+    }
 
     /// A report with a given PBO and a slope that passes, so a test
     /// about one threshold is not silently also about the other.
