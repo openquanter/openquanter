@@ -707,6 +707,14 @@ where
             return ExitCode::FAILURE;
         }
     };
+    // The starting book, on a venue whose depth stream is incremental
+    // only. Fetched in the loop once updates are arriving, which is the
+    // venue's own procedure: stream first, snapshot second.
+    let snapshot_url = feed_venue.depth_snapshot_url(&symbol);
+    if snapshot_url.is_some() {
+        agg.expect_snapshots();
+    }
+    let mut snapshot_retry = Retry::default();
     let mut supervisor = Supervisor::new(Timings::default());
     let scales = market.scales();
     let event_time = feed_venue.event_time_reader();
@@ -937,6 +945,41 @@ where
                         }
                         break;
                     }
+                }
+            }
+        }
+
+        // The starting book, when the one being built is waiting for it.
+        //
+        // Bounded well below the read timeouts around it: this loop is
+        // also the one that hears fills, and a snapshot that takes long
+        // is one to ask for again rather than wait on.
+        if let Some(url) = &snapshot_url
+            && agg.needs_snapshot()
+            && agg.buffered() > 0
+            && snapshot_retry.due(Instant::now())
+        {
+            let installed = oq_l2feed::ws::fetch_snapshot(url, SNAPSHOT_TIMEOUT)
+                .map_err(|e| e.to_string())
+                .and_then(|body| {
+                    feed_venue
+                        .parse_depth_snapshot(&body, scales)
+                        .map_err(|e| e.to_string())
+                })
+                .and_then(|snap| {
+                    let id = snap.last_update_id;
+                    agg.install_snapshot(&snap)
+                        .map(|()| id)
+                        .map_err(|e| e.to_string())
+                });
+            match installed {
+                Ok(id) => {
+                    snapshot_retry.succeeded();
+                    println!("depth snapshot   installed at update {id}");
+                }
+                Err(e) => {
+                    snapshot_retry.failed(Instant::now());
+                    eprintln!("depth snapshot   not installed, asking again later: {e}");
                 }
             }
         }
@@ -1347,12 +1390,15 @@ where
             // advances nothing while the connection looks healthy.
             let c = agg.counts();
             println!(
-                "feed             depth {}, trades {}, ooo {}, quiet {}, pre-trade {}",
+                "feed             depth {}, trades {}, ooo {}, quiet {}, pre-trade {}, \
+                 snapshots {}, resyncs {}",
                 c.depth_applied,
                 c.trades,
                 c.out_of_order,
                 c.quiet_windows,
-                c.windows_before_first_trade
+                c.windows_before_first_trade,
+                c.snapshots,
+                c.resyncs
             );
         }
     }
@@ -1913,6 +1959,9 @@ fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) -> boo
 /// A second after the first failure, doubling to a minute. Reset by a
 /// replacement that works, so a stream that drops once a day is not
 /// held to yesterday's interval.
+/// The most a depth snapshot may hold up the loop that also hears fills.
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Default)]
 struct Retry {
     wait: Duration,
