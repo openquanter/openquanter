@@ -521,6 +521,10 @@ impl<E: Execution> Session<E> {
             position_side: leg_for(self.position_side, approved.side, approved.reduce_only),
         };
         // Before the venue, not after. See `journalling`.
+        //
+        // The system clock and not the loop's `Clock`, deliberately: this
+        // measures how long the machine took, which decides nothing, and
+        // a virtual clock would report zero for it every time.
         let journalled_at = std::time::Instant::now();
         self.write(&Record::Submitted {
             at: now,
