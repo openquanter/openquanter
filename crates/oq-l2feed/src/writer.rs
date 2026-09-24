@@ -356,11 +356,14 @@ impl CaptureWriter {
         drop(open.file);
 
         // Hash what is actually on disk rather than what was intended:
-        // the manifest's job is to describe the artifact.
-        let raw = fs::read(&open.path)?;
+        // the manifest's job is to describe the artifact. In pieces: a
+        // liquid symbol's day is gigabytes, and reading it whole to hash
+        // it put the seal — the moment the manifest is written — at the
+        // mercy of the OOM killer.
+        let digest = hash_file(&open.path)?;
         let manifest = open
             .builder
-            .build(&self.stream, open.window, &self.software, &raw);
+            .build_hashed(&self.stream, open.window, &self.software, digest);
 
         let manifest_path = self.stream.manifest_for(&self.root, open.window);
         fs::write(&manifest_path, manifest.to_json())?;
@@ -398,13 +401,7 @@ impl CaptureWriter {
         // stale, and decoding also tolerates a torn tail left by a hard
         // kill.
         let mut builder = ManifestBuilder::new();
-        let existing = fs::read(&path).unwrap_or_default();
-        if !existing.is_empty() {
-            let (records, torn) = crate::frame::decode_all(&existing)
-                .map_err(|e| io::Error::other(format!("cannot reopen {}: {e}", path.display())))?;
-            for record in &records {
-                builder.observe(record);
-            }
+        if let Some((clean, len)) = scan_existing(&path, &mut builder)? {
             // Cut the torn tail off before appending after it. Left in
             // place, the half-record a hard kill wrote became the middle
             // of the file: the next frame was read as its continuation,
@@ -412,8 +409,7 @@ impl CaptureWriter {
             // could no longer yield, and the restart after that refused
             // to open the window at all — which stopped capture for the
             // rest of it.
-            if torn > 0 {
-                let clean = (existing.len() - torn) as u64;
+            if len > clean {
                 let file = OpenOptions::new().write(true).open(&path)?;
                 file.set_len(clean)?;
                 file.sync_all()?;
@@ -443,6 +439,77 @@ impl CaptureWriter {
         });
         Ok(())
     }
+}
+
+/// The SHA-256 of a file, read a megabyte at a time.
+fn hash_file(path: &std::path::Path) -> io::Result<String> {
+    use std::io::Read;
+    let mut file = File::open(path)?;
+    let mut hasher = oq_hash::sha256::Sha256::new();
+    let mut chunk = vec![0_u8; 1 << 20];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&chunk[..n]);
+    }
+    Ok(oq_hash::sha256::to_hex(&hasher.finalize()))
+}
+
+/// Decode an existing window file into `builder`, a piece at a time.
+///
+/// Returns where the last whole record ends and how long the file is —
+/// the difference being a torn tail — or `None` when there is no file
+/// or it is empty. Memory is bounded by the largest record, not by the
+/// file: reading a day whole to count it cost twice its size on every
+/// restart.
+///
+/// # Errors
+/// I/O, or corruption before the final frame.
+fn scan_existing(
+    path: &std::path::Path,
+    builder: &mut ManifestBuilder,
+) -> io::Result<Option<(u64, u64)>> {
+    use std::io::Read;
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(None);
+    }
+    let mut pending: Vec<u8> = Vec::new();
+    let mut chunk = vec![0_u8; 1 << 20];
+    let mut clean = 0_u64;
+    loop {
+        let mut offset = 0;
+        loop {
+            match crate::frame::decode(&pending[offset..]) {
+                Ok((record, consumed)) => {
+                    builder.observe(&record);
+                    offset += consumed;
+                }
+                Err(crate::frame::DecodeError::Truncated) => break,
+                Err(e) => {
+                    return Err(io::Error::other(format!(
+                        "cannot reopen {}: {e}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        pending.drain(..offset);
+        clean += offset as u64;
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        pending.extend_from_slice(&chunk[..n]);
+    }
+    Ok(Some((clean, len)))
 }
 
 #[cfg(test)]
@@ -708,5 +775,72 @@ mod tests {
             io::ErrorKind::NotFound
         );
         fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod streaming {
+    use super::{ManifestBuilder, hash_file, scan_existing};
+    use crate::frame::{Kind, Record, decode_all};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("oq-l2feed-streaming-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir.join(name)
+    }
+
+    fn records(n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..n {
+            Record {
+                kind: Kind::Payload,
+                local_ts: 1_000 + i as i64,
+                exch_ts: 1_000 + i as i64,
+                // Big enough that frames straddle the megabyte reads.
+                payload: vec![b'x'; 70_000 + i],
+            }
+            .encode(&mut out);
+        }
+        out
+    }
+
+    /// Hashed a megabyte at a time, the digest is the one the whole file
+    /// would have given — the manifest's claim about the artifact.
+    #[test]
+    fn a_file_hashed_in_pieces_has_the_whole_files_digest() {
+        let path = scratch("hash.oqcap");
+        let bytes = records(40);
+        std::fs::write(&path, &bytes).expect("write");
+        assert_eq!(hash_file(&path).expect("hash"), oq_hash::sha256_hex(&bytes));
+    }
+
+    /// Decoded in pieces, with frames straddling the reads, the count and
+    /// the clean length are what decoding the whole file gives.
+    #[test]
+    fn a_file_scanned_in_pieces_counts_what_decoding_it_whole_does() {
+        let path = scratch("scan.oqcap");
+        let mut bytes = records(40);
+        let whole = bytes.len() as u64;
+        bytes.extend_from_slice(&records(1)[..500]);
+        std::fs::write(&path, &bytes).expect("write");
+
+        let mut builder = ManifestBuilder::new();
+        let (clean, len) = scan_existing(&path, &mut builder)
+            .expect("scan")
+            .expect("a file");
+        assert_eq!((clean, len), (whole, bytes.len() as u64));
+        let (all, torn) = decode_all(&bytes).expect("decode");
+        assert_eq!(torn as u64, len - clean);
+        assert_eq!(builder.records(), all.len() as u64);
+    }
+
+    #[test]
+    fn no_file_is_nothing_to_scan() {
+        let mut builder = ManifestBuilder::new();
+        assert!(
+            scan_existing(&scratch("absent.oqcap"), &mut builder)
+                .expect("scan")
+                .is_none()
+        );
     }
 }

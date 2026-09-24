@@ -140,6 +140,20 @@ impl ManifestBuilder {
         software: &Software,
         raw: &[u8],
     ) -> Manifest {
+        self.build_hashed(stream, window, software, sha256_hex(raw))
+    }
+
+    /// As [`ManifestBuilder::build`], given the file's digest rather than
+    /// its bytes, so a day's capture need not be held in memory to be
+    /// described.
+    #[must_use]
+    pub fn build_hashed(
+        self,
+        stream: &StreamId,
+        window: Window,
+        software: &Software,
+        sha256_raw: String,
+    ) -> Manifest {
         Manifest {
             format_version: crate::FORMAT_VERSION,
             venue: stream.venue.clone(),
@@ -155,7 +169,7 @@ impl ManifestBuilder {
             clock_offset: self.clock_offset,
             capture_version: software.version.clone(),
             capture_commit: software.commit.clone(),
-            sha256_raw: sha256_hex(raw),
+            sha256_raw,
         }
     }
 }
