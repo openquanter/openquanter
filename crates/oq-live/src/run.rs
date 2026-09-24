@@ -1038,7 +1038,10 @@ where
                             );
                         }
                     }
-                } else if matches!(u.status.as_str(), "CANCELED" | "EXPIRED") {
+                } else if matches!(
+                    u.status.as_str(),
+                    "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH"
+                ) {
                     books.on_closed();
                     // Written here because here is where the venue
                     // confirmed it. Without this the journal shows an
@@ -2143,7 +2146,7 @@ fn adopted_legs(
 fn ending_of(status: &str) -> Option<Ending> {
     match status {
         "FILLED" => Some(Ending::Filled),
-        "CANCELED" | "EXPIRED" => Some(Ending::Cancelled),
+        "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" => Some(Ending::Cancelled),
         _ => None,
     }
 }
@@ -2182,6 +2185,8 @@ mod endings {
         assert_eq!(ending_of("FILLED"), Some(Ending::Filled));
         assert_eq!(ending_of("CANCELED"), Some(Ending::Cancelled));
         assert_eq!(ending_of("EXPIRED"), Some(Ending::Cancelled));
+        // Self-trade prevention ends an order as surely as a cancel.
+        assert_eq!(ending_of("EXPIRED_IN_MATCH"), Some(Ending::Cancelled));
     }
 }
 

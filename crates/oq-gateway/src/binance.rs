@@ -1263,7 +1263,7 @@ pub fn recovered_reports(order: &str, trades: &str) -> Result<Vec<OrderUpdate>, 
     if !decimal_eq(&cumulative, &executed) {
         return Err(malformed("trades do not add up to executedQty", order));
     }
-    if matches!(status.as_str(), "CANCELED" | "EXPIRED") {
+    if matches!(status.as_str(), "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH") {
         out.push(OrderUpdate {
             symbol,
             client_id,
