@@ -69,8 +69,6 @@
 //! turns this from written to working, and until someone runs it this
 //! module is not to be pointed at `Endpoint::Live`.
 
-use core::time::Duration;
-
 use oq_hash::hmac::hmac_sha256;
 use oq_types::{Instrument, QtyLots, Side, TimeInForce};
 
@@ -120,14 +118,10 @@ impl Okx {
     /// between demo and live — [`Endpoint`] does, and nothing else can.
     #[must_use]
     pub fn new(base: impl Into<String>, creds: Credentials, endpoint: Endpoint) -> Self {
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(45)))
-            .http_status_as_error(false)
-            .build();
         Self {
             base: base.into(),
             creds,
-            agent: config.into(),
+            agent: crate::http::venue_agent(),
             simulated: matches!(endpoint, Endpoint::Testnet),
             clock_offset_ms: 0,
             round_trip_ms: 0,

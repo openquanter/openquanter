@@ -50,8 +50,6 @@
 //! evidence any adapter here has started with. It is still not a placed
 //! order.
 
-use core::time::Duration;
-
 use oq_types::Instrument;
 
 use crate::VenueError;
@@ -89,11 +87,7 @@ impl Deribit {
                 "Basic {}",
                 crate::b64::encode(format!("{}:{secret}", creds.key()).as_bytes())
             ),
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(45)))
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: crate::http::venue_agent(),
         }
     }
 }
