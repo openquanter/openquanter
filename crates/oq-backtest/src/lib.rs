@@ -17,6 +17,7 @@
 
 pub mod deviation;
 pub mod fidelity;
+pub mod lookahead;
 pub mod run;
 pub mod sweep;
 pub mod validity;
@@ -27,6 +28,7 @@ pub use fidelity::{
 };
 /// The strategy contract, re-exported so `oq_backtest::strategy::…` keeps
 /// resolving for code written before it moved out.
+pub use lookahead::{Divergence, LookaheadReport, lookahead};
 pub use oq_strategy as strategy;
 pub use oq_strategy::{Context, Ending, Intent, Strategy};
 pub use run::{

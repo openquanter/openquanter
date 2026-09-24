@@ -150,6 +150,8 @@
 //! call rather than fetched across the boundary.
 
 use oq_backtest::{Context, Intent, MarginMode, RunConfig, Strategy, run, run_stream};
+use std::sync::{Arc, Mutex};
+
 use oq_engine::Tick;
 use oq_margin::{Contract, TierTable};
 use oq_types::{Cash, InstrumentId, Offset, OrderId, QtyLots, Side};
@@ -418,9 +420,23 @@ struct PyDriven {
     /// The first error Python raised, kept so the run can report it
     /// rather than a panic mid-fold.
     failure: Option<String>,
+    /// Where to report that error when the caller does not hold this
+    /// strategy afterwards — the lookahead check builds and drops one per
+    /// rerun, and a rerun whose strategy raised and fell silent would
+    /// otherwise read as a strategy that decided not to trade.
+    report_to: Option<Arc<Mutex<Option<String>>>>,
 }
 
 impl PyDriven {
+    fn fail(&mut self, why: String) {
+        if let Some(shared) = &self.report_to
+            && let Ok(mut slot) = shared.lock()
+        {
+            slot.get_or_insert_with(|| why.clone());
+        }
+        self.failure = Some(why);
+    }
+
     /// Ask Python for the orders, given whatever this cadence hands it.
     fn ask(&mut self, py: Python<'_>, ctx: &Context, out: &mut Vec<Intent>) {
         if self.failure.is_some() {
@@ -457,7 +473,7 @@ impl PyDriven {
         };
 
         match result {
-            Err(e) => self.failure = Some(e.to_string()),
+            Err(e) => self.fail(e.to_string()),
             Ok(obj) => {
                 if obj.is_none(py) {
                     return;
@@ -470,7 +486,7 @@ impl PyDriven {
                         }
                     }
                     Err(_) => {
-                        self.failure = Some(
+                        self.fail(
                             "a strategy must return None or a list of Order; \
                              returning anything else would be silently ignored"
                                 .to_owned(),
@@ -777,6 +793,7 @@ pub fn run_backtest(
         pending: Vec::with_capacity(batch),
         next_id: 0,
         failure: None,
+        report_to: None,
     };
 
     let config = RunConfig::new(
@@ -954,6 +971,123 @@ pub fn compare_modes(
     })
 }
 
+/// What the lookahead check found. See `lookahead_check`.
+#[pyclass(name = "LookaheadReport", frozen, get_all)]
+pub struct PyLookaheadReport {
+    /// Ticks on which the full run sent any order.
+    pub signals: usize,
+    /// How many of those were rerun on a prefix.
+    pub checked: usize,
+    /// No rerun decided differently.
+    pub clean: bool,
+    /// Fewer points were rerun than there were signals, so a clean
+    /// result covers a sample of them.
+    pub sampled: bool,
+    /// Each disagreement as `(checked_at, tick, exch_ts)`: the prefix
+    /// that disagreed, the first tick it disagreed on, and that tick's
+    /// time.
+    pub divergences: Vec<(usize, usize, i64)>,
+}
+
+#[pymethods]
+impl PyLookaheadReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "LookaheadReport(signals={}, checked={}, clean={}, divergences={})",
+            self.signals,
+            self.checked,
+            if self.clean { "True" } else { "False" },
+            self.divergences.len()
+        )
+    }
+}
+
+/// Whether a strategy decides from the past alone.
+///
+/// `build` is called with a list of the ticks the strategy may know
+/// about and returns a strategy object — once with all of `ticks`, then
+/// once per checked point with the ticks up to that point. A strategy
+/// that fits anything to its data has to fit it to what it is given
+/// here; one built from the whole window sends different orders on a
+/// prefix than on all of it, and each point where it does is reported.
+///
+/// Compatibility mode only: batching delays decisions by design, and
+/// that delay is not the thing this looks for.
+///
+/// # Errors
+///
+/// Whatever `build` or the strategy raised, in any of the runs.
+#[pyfunction]
+#[pyo3(signature = (build, ticks, balance, max_points = 200, enforce_margin = true, contract_size = 10_000))]
+#[allow(clippy::needless_pass_by_value)]
+pub fn lookahead_check(
+    py: Python<'_>,
+    build: Py<PyAny>,
+    ticks: &Bound<'_, PyAny>,
+    balance: i64,
+    max_points: usize,
+    enforce_margin: bool,
+    contract_size: i64,
+) -> PyResult<PyLookaheadReport> {
+    let series = ticks_from(ticks)?;
+    let config = RunConfig::new(
+        InstrumentId::new(1),
+        Contract::new(contract_size),
+        TierTable::example_btcusdt(),
+        Cash::from_units(balance),
+    )
+    .with_margin(if enforce_margin {
+        MarginMode::Enforced
+    } else {
+        MarginMode::Ignored
+    });
+    let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    let construct = |known: &[Tick]| -> PyDriven {
+        Python::attach(|py| {
+            let built = PyList::new(py, known.iter().map(PyTick::from))
+                .and_then(|list| build.bind(py).call1((list,)))
+                .map(pyo3::Bound::unbind);
+            let mut driven = PyDriven {
+                name: String::new(),
+                object: py.None(),
+                cadence: Cadence::EveryTick,
+                pending: Vec::new(),
+                next_id: 0,
+                failure: None,
+                report_to: Some(Arc::clone(&failure)),
+            };
+            match built {
+                Ok(object) => {
+                    driven.name = strategy_name(py, &object);
+                    driven.object = object;
+                }
+                Err(e) => driven.fail(format!("build raised: {e}")),
+            }
+            driven
+        })
+    };
+    let report =
+        py.detach(|| oq_backtest::lookahead::lookahead(&config, construct, &series, max_points));
+
+    if let Some(why) = failure.lock().ok().and_then(|slot| slot.clone()) {
+        return Err(PyValueError::new_err(format!(
+            "the strategy failed during the check: {why}"
+        )));
+    }
+    Ok(PyLookaheadReport {
+        signals: report.signals,
+        checked: report.checked,
+        clean: report.clean(),
+        sampled: report.sampled(),
+        divergences: report
+            .divergences
+            .iter()
+            .map(|d| (d.checked_at, d.tick, d.at.0))
+            .collect(),
+    })
+}
+
 /// Register the tier's types and functions on the module.
 ///
 /// # Errors
@@ -969,9 +1103,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrder>()?;
     m.add_class::<PyRunResult>()?;
     m.add_class::<PyModeComparison>()?;
+    m.add_class::<PyLookaheadReport>()?;
     m.add_function(wrap_pyfunction!(load_ticks, m)?)?;
     m.add_function(wrap_pyfunction!(save_ticks, m)?)?;
     m.add_function(wrap_pyfunction!(run_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(compare_modes, m)?)?;
+    m.add_function(wrap_pyfunction!(lookahead_check, m)?)?;
     Ok(())
 }

@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use oq_backtest::sweep::Thresholds;
 use oq_backtest::{Candidate, Context, Intent, MarginMode, RunConfig, Strategy, sweep};
+use oq_engine::Tick;
 use oq_examples::{MarketShape, series};
 use oq_margin::{Contract, TierTable};
 use oq_types::{Cash, InstrumentId, OrderId, QtyLots, Side};
@@ -34,6 +35,9 @@ const CONFIGS: usize = 100;
 /// this is a little over that, so the run is not smaller than the thing
 /// the gate is about.
 const TICKS: usize = 600_000;
+
+/// Builds one configuration's strategy from the data it may know about.
+type Builder = Box<dyn Fn(&[Tick]) -> Cross>;
 
 /// A two-average crossover. Chosen because its parameters form a natural
 /// grid and because it trades often enough that the accounting is
@@ -136,9 +140,14 @@ fn main() {
         .collect();
     assert_eq!(grid.len(), CONFIGS);
 
-    let builders: Vec<Box<dyn Fn() -> Cross>> = grid
+    // Built from nothing but the parameters: a moving-average cross knows
+    // only the ticks it has been shown, which the lookahead check below
+    // confirms rather than assumes.
+    let builders: Vec<Builder> = grid
         .iter()
-        .map(|&(f, s)| Box::new(move || Cross::new(f, s)) as Box<dyn Fn() -> Cross>)
+        .map(|&(f, s)| {
+            Box::new(move |_: &[Tick]| Cross::new(f, s)) as Box<dyn Fn(&[Tick]) -> Cross>
+        })
         .collect();
     let candidates: Vec<Candidate<'_, Cross>> = grid
         .iter()
@@ -215,6 +224,19 @@ fn main() {
         }
         Err(e) => println!("  PBO              unavailable: {e}"),
     }
+    match &report.lookahead {
+        Some((id, l)) => println!(
+            "  lookahead        {id}: {} of {} signal ticks rerun on a prefix, {}",
+            l.checked,
+            l.signals,
+            if l.clean() {
+                "every one decided the same".to_string()
+            } else {
+                format!("{} decided differently", l.divergences.len())
+            }
+        ),
+        None => println!("  lookahead        not checked: nothing scored"),
+    }
     if !report.unscorable.is_empty() {
         println!(
             "  unscorable       {} configuration(s)",
@@ -229,6 +251,10 @@ fn main() {
             "FAIL: the gate names {CONFIGS} configurations, this ran {}",
             report.results.len()
         );
+        ok = false;
+    }
+    if report.lookahead.as_ref().is_none_or(|(_, l)| !l.clean()) {
+        println!("FAIL: the winner was not shown to decide from the past alone");
         ok = false;
     }
     if elapsed > BUDGET_SECS {
