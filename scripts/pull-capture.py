@@ -37,6 +37,7 @@ must not read as loss.
 """
 
 import argparse
+import fcntl
 import hashlib
 import os
 import sys
@@ -70,11 +71,13 @@ class OnlyOne:
     which does not exist on the Synology this runs on. A liveness test
     that silently reports "not running" is worse than none.
 
-    So the lock is a file, not a process check. `O_EXCL` is atomic on
-    every filesystem this touches, and a stale one names the pid that
-    left it rather than being cleared automatically: this cannot tell a
-    crash from a slow run, and pid reuse makes the obvious check wrong
-    rather than merely unreliable.
+    So the lock is a kernel lock (`flock`) on a file, not a process
+    check and not the file's existence. The kernel decides which caller
+    holds it, and releases it when the holder exits however it exits:
+    a puller killed mid-run leaves a file that refuses nothing, where a
+    file-as-lock refused every later run until someone deleted it. The
+    file is never removed, since removing it by name could delete one a
+    successor already holds.
     """
 
     def __init__(self, path):
@@ -82,24 +85,24 @@ class OnlyOne:
         self.fd = None
 
     def __enter__(self):
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            os.write(self.fd, f"pid {os.getpid()}\n".encode())
-        except FileExistsError:
-            try:
-                held = open(self.path).read().strip()
-            except OSError:
-                held = "nothing about itself"
-            print(f"pull: another puller holds {self.path} ({held}).\n"
-                  f"      If that process is gone, remove the file.",
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            held = os.read(self.fd, 1024).decode(errors="replace").strip()
+            os.close(self.fd)
+            self.fd = None
+            print(f"pull: another puller holds {self.path} "
+                  f"({held or 'nothing about itself'}).",
                   file=sys.stderr)
             raise SystemExit(EXIT_LOCKED)
+        os.ftruncate(self.fd, 0)
+        os.write(self.fd, f"pid {os.getpid()}\n".encode())
         return self
 
     def __exit__(self, *exc):
         if self.fd is not None:
             os.close(self.fd)
-            os.unlink(self.path)
         return False
 
 

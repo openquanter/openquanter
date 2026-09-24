@@ -119,3 +119,29 @@ class AFileSomeoneHasOpenIsNotDeleted(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OnlyOnePullerRuns(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.lock = os.path.join(self.dir, ".pull.lock")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def test_a_second_puller_is_refused_while_the_first_holds_the_lock(self):
+        with pull.OnlyOne(self.lock):
+            with self.assertRaises(SystemExit) as refused:
+                with pull.OnlyOne(self.lock):
+                    self.fail("two pullers ran at once")
+            self.assertEqual(refused.exception.code, pull.EXIT_LOCKED)
+        with pull.OnlyOne(self.lock):
+            pass
+
+    def test_a_file_left_by_a_killed_puller_refuses_nothing(self):
+        # What a puller killed mid-run leaves: the file, and no lock on it.
+        with open(self.lock, "w") as f:
+            f.write("pid 1\n")
+        with pull.OnlyOne(self.lock):
+            with open(self.lock) as f:
+                self.assertEqual(f.read(), f"pid {os.getpid()}\n")
