@@ -53,7 +53,13 @@ pub struct Position {
 pub struct Book {
     positions: Vec<Position>,
     working: Vec<String>,
-    seen_trades: HashSet<i64>,
+    /// Fills already applied, by trade id *and* the order it filled.
+    ///
+    /// The trade id alone is not enough: when two systems on one account
+    /// trade against each other, both sides of the match carry the same
+    /// trade id, and keying on it alone would discard the second side as
+    /// a redelivery of the first.
+    seen_trades: HashSet<(i64, String)>,
     /// Fills that arrived twice and were discarded.
     duplicates: u64,
     /// Client id prefix this process issues. Events naming an order that
@@ -102,9 +108,37 @@ impl Book {
     /// redelivering steadily is worth noticing even though each
     /// individual duplicate is handled correctly.
     pub fn apply(&mut self, u: &OrderUpdate) -> bool {
-        if !self.is_ours(&u.client_id) {
+        let ours = self.is_ours(&u.client_id);
+        let is_fill = matches!(u.status.as_str(), "PARTIALLY_FILLED" | "FILLED");
+        if is_fill {
+            let Some(trade_id) = u.trade_id else {
+                // A fill event with no trade id cannot be
+                // deduplicated, so it is not applied. Applying it
+                // would make a redelivery indistinguishable from a
+                // second fill, which is the error that compounds.
+                if !ours {
+                    self.foreign += 1;
+                }
+                return false;
+            };
+            if !self.seen_trades.insert((trade_id, u.client_id.clone())) {
+                if ours {
+                    self.duplicates += 1;
+                }
+                return false;
+            }
+            // Every fill moves the position, whoever placed the order.
+            // The position is the account's, and it is what the risk
+            // gate caps: until this line it moved only when the venue's
+            // own number was adopted — at startup and after a lost
+            // stream — so a ladder filling rung by rung on a healthy link
+            // was checked against the position it started with, and the
+            // cap could not fire.
+            self.book_fill(u);
+        }
+        if !ours {
             self.foreign += 1;
-            return false;
+            return is_fill;
         }
         match u.status.as_str() {
             "NEW" => {
@@ -120,23 +154,41 @@ impl Book {
                 before != self.working.len()
             }
             "PARTIALLY_FILLED" | "FILLED" => {
-                let Some(trade_id) = u.trade_id else {
-                    // A fill event with no trade id cannot be
-                    // deduplicated, so it is not applied. Applying it
-                    // would make a redelivery indistinguishable from a
-                    // second fill, which is the error that compounds.
-                    return false;
-                };
-                if !self.seen_trades.insert(trade_id) {
-                    self.duplicates += 1;
-                    return false;
-                }
                 if u.status == "FILLED" {
                     self.working.retain(|w| w != &u.client_id);
                 }
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Move the leg a fill names by the quantity it traded.
+    fn book_fill(&mut self, u: &OrderUpdate) {
+        let Ok(qty) = u.last_qty.parse::<f64>() else {
+            return;
+        };
+        let signed = if u.side.eq_ignore_ascii_case("BUY") {
+            qty
+        } else {
+            -qty
+        };
+        let leg = if u.position_side.is_empty() {
+            "BOTH"
+        } else {
+            u.position_side.as_str()
+        };
+        match self
+            .positions
+            .iter_mut()
+            .find(|p| p.symbol == u.symbol && p.side.eq_ignore_ascii_case(leg))
+        {
+            Some(p) => p.amount += signed,
+            None => self.positions.push(Position {
+                symbol: u.symbol.clone(),
+                side: leg.to_ascii_uppercase(),
+                amount: signed,
+            }),
         }
     }
 
@@ -198,6 +250,25 @@ impl Book {
         // decimal round-trip is 160 lots, and truncating it to 159 would
         // make the gate believe the account is smaller than it is.
         QtyLots((self.net(symbol) * scale).round() as i64)
+    }
+
+    /// One leg's signed quantity in lots: `LONG` is positive, `SHORT`
+    /// negative, as the venue reports them.
+    ///
+    /// What an opening order on a hedged account is capped against. The
+    /// net of the two legs is the wrong number there: long 20 and short
+    /// 20 net to nothing, and a cap on the net lets both legs grow
+    /// without bound in step.
+    #[must_use]
+    pub fn leg_lots(&self, symbol: &str, leg: &str, qty_scale: u8) -> QtyLots {
+        let scale = 10_f64.powi(i32::from(qty_scale));
+        let amount: f64 = self
+            .positions
+            .iter()
+            .filter(|p| p.symbol == symbol && p.side.eq_ignore_ascii_case(leg))
+            .map(|p| p.amount)
+            .sum();
+        QtyLots((amount * scale).round() as i64)
     }
 
     /// Net signed quantity for a symbol across every leg.
@@ -369,7 +440,7 @@ mod ownership {
         // and a later fill of ours reusing that id — venues number trades
         // per symbol, not per client — would be discarded as a duplicate.
         let mut b = Book::owning("oq123");
-        assert!(!b.apply(&update("someone-else-1", "FILLED", Some(7))));
+        b.apply(&update("someone-else-1", "FILLED", Some(7)));
         assert!(
             b.apply(&update("oq123-1", "FILLED", Some(7))),
             "our fill with the same trade id must still be applied"
@@ -394,5 +465,38 @@ mod ownership {
         let mut b = Book::new();
         assert!(b.apply(&update("anything", "NEW", None)));
         assert_eq!(b.working(), 1);
+    }
+}
+
+#[cfg(test)]
+mod fills {
+    use super::*;
+
+    fn fill(client_id: &str, trade_id: i64, side: &str) -> OrderUpdate {
+        OrderUpdate {
+            symbol: "BTCUSDT".into(),
+            client_id: client_id.into(),
+            venue_id: "1".to_string(),
+            status: "FILLED".into(),
+            last_qty: "0.004".into(),
+            cumulative_qty: "0.004".into(),
+            last_price: "60000".into(),
+            side: side.into(),
+            position_side: "BOTH".into(),
+            maker: true,
+            trade_id: Some(trade_id),
+            event_ms: 0,
+        }
+    }
+
+    /// Two systems on one account trading against each other: both
+    /// sides carry one trade id, and both moved the account.
+    #[test]
+    fn both_sides_of_a_match_between_two_systems_are_applied() {
+        let mut b = Book::owning("oq123");
+        b.apply(&fill("oq123-1", 7, "BUY"));
+        b.apply(&fill("other-1", 7, "SELL"));
+        assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(0));
+        assert_eq!(b.duplicates(), 0);
     }
 }

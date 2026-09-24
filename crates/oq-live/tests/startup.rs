@@ -513,3 +513,114 @@ mod hedged_legs {
         }
     }
 }
+
+/// A fill as the account stream reports it.
+fn filled(
+    client_id: &str,
+    trade_id: i64,
+    side: &str,
+    leg: &str,
+    qty: &str,
+) -> oq_gateway::OrderUpdate {
+    oq_gateway::OrderUpdate {
+        symbol: "BTCUSDT".into(),
+        client_id: client_id.into(),
+        venue_id: "1".into(),
+        status: "FILLED".into(),
+        last_qty: qty.into(),
+        cumulative_qty: qty.into(),
+        last_price: "60000".into(),
+        side: side.into(),
+        position_side: leg.into(),
+        maker: true,
+        trade_id: Some(trade_id),
+        event_ms: 0,
+    }
+}
+
+fn capped(position_side: PositionSide, cap: i64) -> Session<Recording> {
+    Session::start(
+        Recording::accepting(),
+        RiskGate::new(Limits {
+            max_position_qty: QtyLots(cap),
+            ..limits()
+        }),
+        SessionConfig {
+            symbol: "BTCUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side,
+            id_prefix: "live".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("clean venue")
+}
+
+/// The cap follows the fills, not the position at startup.
+///
+/// A ladder filling rung by rung on a healthy link was checked against
+/// the position it started with — the session's own book moved only
+/// when the venue's number was adopted — so `max_position_qty` could not
+/// fire for as long as the stream stayed up.
+#[test]
+fn the_position_cap_tightens_as_fills_arrive() {
+    let mut s = capped(PositionSide::OneWay, 10);
+    assert!(s.submit(buy(8), PriceTicks(6_000_000), Nanos(0)).is_sent());
+    s.apply(&filled("live-1", 1, "BUY", "BOTH", "0.008"));
+    assert_eq!(s.book().net_lots("BTCUSDT", 3), QtyLots(8));
+    match s.submit(buy(3), PriceTicks(6_000_000), Nanos(1)) {
+        Submission::Refused(Breach::PositionWouldExceed { resulting, limit }) => {
+            assert_eq!((resulting, limit), (QtyLots(11), QtyLots(10)));
+        }
+        other => panic!("8 held plus 3 is past a cap of 10: {other:?}"),
+    }
+}
+
+/// A redelivered fill does not move the position twice.
+#[test]
+fn a_redelivered_fill_moves_the_position_once() {
+    let mut s = capped(PositionSide::OneWay, 1000);
+    s.apply(&filled("live-1", 1, "BUY", "BOTH", "0.008"));
+    s.apply(&filled("live-1", 1, "BUY", "BOTH", "0.008"));
+    assert_eq!(s.book().net_lots("BTCUSDT", 3), QtyLots(8));
+}
+
+/// Another system's fill on the same symbol is still the account's
+/// position, and the cap is on the account.
+#[test]
+fn another_systems_fill_moves_the_position_the_cap_sees() {
+    let mut s = capped(PositionSide::OneWay, 10);
+    s.apply(&filled("manual-1", 5, "BUY", "BOTH", "0.009"));
+    assert!(matches!(
+        s.submit(buy(2), PriceTicks(6_000_000), Nanos(0)),
+        Submission::Refused(Breach::PositionWouldExceed { .. })
+    ));
+}
+
+/// On a hedged account an opening order is capped against its own leg.
+///
+/// Long 9 and short 9 net to nothing. Capped on the net, both legs could
+/// grow in step without bound.
+#[test]
+fn a_hedged_opening_order_is_capped_against_its_leg_not_the_net() {
+    let mut s = capped(PositionSide::Long, 10);
+    s.apply(&filled("live-1", 1, "BUY", "LONG", "0.009"));
+    s.apply(&filled("live-2", 2, "SELL", "SHORT", "0.009"));
+    assert_eq!(s.book().net_lots("BTCUSDT", 3), QtyLots(0));
+    assert!(matches!(
+        s.submit(buy(2), PriceTicks(6_000_000), Nanos(0)),
+        Submission::Refused(Breach::PositionWouldExceed { .. })
+    ));
+    let sell = ProposedOrder {
+        side: Side::Sell,
+        ..buy(2)
+    };
+    assert!(matches!(
+        s.submit(sell, PriceTicks(6_000_000), Nanos(1)),
+        Submission::Refused(Breach::PositionWouldExceed { .. })
+    ));
+    // And a leg with room is not refused on the other leg's account.
+    assert!(s.submit(buy(1), PriceTicks(6_000_000), Nanos(2)).is_sent());
+}
