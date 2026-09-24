@@ -728,7 +728,7 @@ where
             let n = bars.len();
             for tick in warm_ticks(&bars) {
                 books.on_tick(&tick);
-                let ctx = books.context(tick);
+                let ctx = context_for(&books, tick, trader.working());
                 trader.on_history(&ctx);
             }
             println!("warm-up          {n} bar(s) of history replayed");
@@ -757,7 +757,7 @@ where
             // a replay should be pricing anything, and a stale price
             // offered here would be a number a strategy could act on if
             // it forgot it was replaying.
-            let ctx = books.context(oq_engine::Tick::default());
+            let ctx = context_for(&books, oq_engine::Tick::default(), trader.working());
             trader.on_history_fill(&fill, &ctx);
         }
         println!("recovery         {n} of this strategy's own fill(s) replayed");
@@ -884,7 +884,7 @@ where
                                 println!("books            {output:?}");
                             }
                             last_tick = Some(tick);
-                            let ctx = books.context(tick);
+                            let ctx = context_for(&books, tick, trader.working());
                             for outcome in trader.on_tick(&ctx, now) {
                                 if let Outcome::Sent { local, .. } = &outcome {
                                     // The kernel is told an order exists.
@@ -1006,7 +1006,7 @@ where
                             // After the books, so the context the
                             // strategy reads already contains this fill.
                             if let Some(t) = last_tick {
-                                let ctx = books.context(t);
+                                let ctx = context_for(&books, t, trader.working());
                                 for outcome in trader.on_fill(&fill, &ctx, now) {
                                     match &outcome {
                                         Outcome::Sent { .. } => sent += 1,
@@ -1065,7 +1065,7 @@ where
                 if let Some(ending) = ending_of(&u.status) {
                     match last_tick {
                         Some(t) => {
-                            let ctx = books.context(t);
+                            let ctx = context_for(&books, t, trader.working());
                             for outcome in trader.on_ended(&u.client_id, ending, &ctx, now) {
                                 match &outcome {
                                     Outcome::Sent { .. } => sent += 1,
@@ -1708,6 +1708,22 @@ fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
 /// residual of −20 where both should have said −10 and zero.
 fn fee_evidence(venue_charged: Cash, model_charged: Cash) -> (Cash, Cash) {
     (Cash(-venue_charged.0), Cash(-model_charged.0))
+}
+
+/// The context a strategy is handed, with the working count from the
+/// session's book.
+///
+/// `Books` counted working orders itself, and counted them wrong: every
+/// fill decremented the count, so an order filling in three pieces
+/// removed three, and orders a strategy placed from `on_fill` or
+/// `on_ended` were never added. The session's book tracks this process's
+/// own orders by client id — resting from the acknowledgement until the
+/// venue reports them filled, cancelled or expired — which is the number
+/// a strategy sizing against `working` means.
+fn context_for(books: &crate::books::Books, tick: oq_engine::Tick, working: u32) -> Context {
+    let mut ctx = books.context(tick);
+    ctx.working = working as usize;
+    ctx
 }
 
 /// A venue's side word as a side. Anything but a buy is a sell, as
@@ -2933,5 +2949,51 @@ mod fee_sign {
             &evidence,
         );
         assert_eq!(a.residual, Some(Cash(0)), "{}", a.render());
+    }
+}
+
+#[cfg(test)]
+mod working_count {
+    use super::context_for;
+    use oq_types::{
+        Cash, InstrumentId, Liquidity, Nanos, Offset, OrderId, PriceTicks, QtyLots, Side, Stamp,
+        TradeId,
+    };
+
+    /// An order that fills in pieces is still working until its last
+    /// piece. The books' own count dropped by one per piece.
+    #[test]
+    fn the_strategy_is_given_the_sessions_working_count() {
+        let mut books = crate::books::Books::new(
+            InstrumentId::new(1),
+            oq_margin::Contract::new(10_000),
+            oq_margin::TierTable::example_btcusdt(),
+            Cash::from_units(100_000),
+            oq_core::PositionMode::OneWay,
+        );
+        books.on_submit(OrderId(1), Side::Buy, QtyLots(10), Offset::Open, Nanos(1));
+        let piece = oq_types::Fill {
+            stamp: Stamp::new(2, 2),
+            instrument: InstrumentId::new(1),
+            order: OrderId(1),
+            trade: TradeId(1),
+            side: Side::Buy,
+            offset: Offset::Open,
+            price: PriceTicks(6_000_000),
+            qty: QtyLots(4),
+            liquidity: Liquidity::Maker,
+        };
+        let _ = books.on_venue_fill(&piece);
+        let tick = oq_engine::Tick::default();
+        assert_eq!(
+            books.context(tick).working,
+            0,
+            "the books' own count, one piece in"
+        );
+        assert_eq!(
+            context_for(&books, tick, 1).working,
+            1,
+            "still resting at the venue"
+        );
     }
 }
