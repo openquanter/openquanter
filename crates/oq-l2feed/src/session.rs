@@ -162,8 +162,19 @@ pub fn install_signal_handlers() {
     // relaxed atomic store and calls nothing.
     unsafe {
         for sig in [libc::SIGTERM, libc::SIGINT] {
+            // `sigaction` with no `SA_RESTART`, rather than `signal`,
+            // which on both Linux glibc and macOS installs with it. With
+            // it a read blocked in the kernel is restarted after the
+            // handler runs, so the flag the handler set is never looked
+            // at: a capture blocked in a handshake ignored SIGTERM for
+            // as long as the peer stayed silent. Without it the read
+            // returns `EINTR` and the loop sees the flag.
+            let mut action: libc::sigaction = core::mem::zeroed();
+            action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
+            action.sa_flags = 0;
+            libc::sigemptyset(&raw mut action.sa_mask);
             assert!(
-                libc::signal(sig, on_signal as *const () as libc::sighandler_t) != libc::SIG_ERR,
+                libc::sigaction(sig, &raw const action, core::ptr::null_mut()) == 0,
                 "cannot install handler for signal {sig}"
             );
         }
@@ -436,6 +447,13 @@ pub fn run_with_clock<C: Connector, K: Clock>(
                         writer.flush()?;
                         last_flush = Instant::now();
                     }
+                }
+                // A read the shutdown signal interrupted. Not a lost
+                // connection: declaring one here wrote a gap marker into
+                // the archive on every clean stop.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted && shutdown_requested() => {
+                    stats.stop = StopReason::Signalled;
+                    break 'outer;
                 }
                 Err(_) => {
                     lost_at = Some((clock.now_ns(), Instant::now()));
