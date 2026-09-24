@@ -400,10 +400,23 @@ impl CaptureWriter {
         let mut builder = ManifestBuilder::new();
         let existing = fs::read(&path).unwrap_or_default();
         if !existing.is_empty() {
-            let (records, _torn) = crate::frame::decode_all(&existing)
+            let (records, torn) = crate::frame::decode_all(&existing)
                 .map_err(|e| io::Error::other(format!("cannot reopen {}: {e}", path.display())))?;
             for record in &records {
                 builder.observe(record);
+            }
+            // Cut the torn tail off before appending after it. Left in
+            // place, the half-record a hard kill wrote became the middle
+            // of the file: the next frame was read as its continuation,
+            // the checksum failed, the manifest counted records the file
+            // could no longer yield, and the restart after that refused
+            // to open the window at all — which stopped capture for the
+            // rest of it.
+            if torn > 0 {
+                let clean = (existing.len() - torn) as u64;
+                let file = OpenOptions::new().write(true).open(&path)?;
+                file.set_len(clean)?;
+                file.sync_all()?;
             }
         }
 
