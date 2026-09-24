@@ -35,7 +35,7 @@ impl Strategy for Quoter {
         }
         // Re-quote every twenty observations, whatever happened.
         if let Some(id) = self.resting
-            && self.ticks % 20 == 0
+            && self.ticks.is_multiple_of(20)
         {
             out.push(Intent::Cancel(id));
             self.resting = None;
@@ -83,7 +83,7 @@ struct Insistent {
 impl Strategy for Insistent {
     fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
         self.ticks += 1;
-        if ctx.tick.last.0 == 0 || self.ticks % 20 != 0 {
+        if ctx.tick.last.0 == 0 || !self.ticks.is_multiple_of(20) {
             return;
         }
         if let Some(id) = self.last.take() {
@@ -162,7 +162,7 @@ impl Strategy for Both {
     fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
         self.ticks += 1;
         let last = ctx.tick.last.0;
-        if last == 0 || self.ticks % 20 != 0 {
+        if last == 0 || !self.ticks.is_multiple_of(20) {
             return;
         }
         self.both_held |= ctx.position.0 > 0 && ctx.short_position.0 < 0;

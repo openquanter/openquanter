@@ -305,7 +305,7 @@ fn main() -> std::process::ExitCode {
                     }
                     // Periodically, so a long quiet stretch still shows
                     // that the watch is alive and reading.
-                    if watcher.tally.reads % 60 == 0 {
+                    if watcher.tally.reads.is_multiple_of(60) {
                         println!("  -- {}", watcher.tally.render());
                     }
                 } else if describe_only {

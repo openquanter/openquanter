@@ -29,7 +29,7 @@ to help right now are trying it, filing precise issues, and discussing design.
 
 ## Development
 
-Rust 2024 edition; minimum supported Rust version is 1.85.
+Rust 2024 edition; minimum supported Rust version is 1.89.
 
 ```bash
 cargo build --workspace

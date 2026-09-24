@@ -61,10 +61,10 @@ mod tests {
         let prefix = format!("ids-restart-{}", std::process::id());
         let root = std::env::temp_dir().join(&prefix);
         let _ = std::fs::remove_dir_all(&root);
-        let held = Interlock::claim("test", "contract", &prefix).unwrap();
+        let held = Interlock::claim(&root, "test", "contract", &prefix).unwrap();
         let first = held.reserve_order_ids(&root, 100).unwrap();
         drop(held);
-        let held = Interlock::claim("test", "contract", &prefix).unwrap();
+        let held = Interlock::claim(&root, "test", "contract", &prefix).unwrap();
         let second = held.reserve_order_ids(&root, 50).unwrap();
         assert!(second.start() > first.end());
         std::fs::remove_dir_all(root).unwrap();
@@ -75,7 +75,7 @@ mod tests {
         let prefix = format!("ids-corrupt-{}", std::process::id());
         let root = std::env::temp_dir().join(&prefix);
         let _ = std::fs::remove_dir_all(&root);
-        let held = Interlock::claim("test", "contract", &prefix).unwrap();
+        let held = Interlock::claim(&root, "test", "contract", &prefix).unwrap();
         held.reserve_order_ids(&root, 100).unwrap();
         let path = root
             .join(held.path().file_name().unwrap())
@@ -90,7 +90,7 @@ mod tests {
         let prefix = format!("ids-interrupted-{}", std::process::id());
         let root = std::env::temp_dir().join(&prefix);
         let _ = std::fs::remove_dir_all(&root);
-        let held = Interlock::claim("test", "contract", &prefix).unwrap();
+        let held = Interlock::claim(&root, "test", "contract", &prefix).unwrap();
         let first = held.reserve_order_ids(&root, 100).unwrap();
         let path = root
             .join(held.path().file_name().unwrap())
