@@ -408,38 +408,17 @@ where
                 continue;
             }
         };
-        tick_count += 1;
-        let event = Event::Tick {
-            instrument: None,
-            tick,
-        };
-        let mut tick_fills: Vec<Fill> = Vec::new();
-        let outputs: Vec<Output> = kernel.apply(&event).to_vec();
-        note_endings(&outputs, kernel.working(), &mut ended);
-        for out in &outputs {
-            match out {
-                Output::Filled(f) => {
-                    fills.push(*f);
-                    tick_fills.push(*f);
-                }
-                Output::Liquidated {
-                    at,
-                    price,
-                    qty,
-                    equity,
-                } => liquidations.push(Liquidation {
-                    at: *at,
-                    price: *price,
-                    qty: *qty,
-                    equity: *equity,
-                }),
-                _ => {}
-            }
-        }
-
         // Funding settles between the previous tick and this one, on the
         // same half-open interval the schedule uses, so nothing settles
         // twice and nothing is skipped when ticks are sparse.
+        //
+        // Before this tick is applied, not after: a settlement in that
+        // interval happened while the account held what the previous
+        // tick left it with. Applied after, it charged a position opened
+        // by this tick's fills for an instant before it existed, and let
+        // one closed by them escape a settlement it was open for. A
+        // settlement at exactly this tick's time is taken to precede the
+        // tick, which is the order a venue settles and then matches.
         let now = tick.stamp.exch;
         if !config.funding.is_empty() {
             let due: Vec<_> = config.funding.between(last_funding, now).to_vec();
@@ -467,6 +446,35 @@ where
                 }
             }
             last_funding = now;
+        }
+
+        tick_count += 1;
+        let event = Event::Tick {
+            instrument: None,
+            tick,
+        };
+        let mut tick_fills: Vec<Fill> = Vec::new();
+        let outputs: Vec<Output> = kernel.apply(&event).to_vec();
+        note_endings(&outputs, kernel.working(), &mut ended);
+        for out in &outputs {
+            match out {
+                Output::Filled(f) => {
+                    fills.push(*f);
+                    tick_fills.push(*f);
+                }
+                Output::Liquidated {
+                    at,
+                    price,
+                    qty,
+                    equity,
+                } => liquidations.push(Liquidation {
+                    at: *at,
+                    price: *price,
+                    qty: *qty,
+                    equity: *equity,
+                }),
+                _ => {}
+            }
         }
 
         let summary = kernel.summary();
@@ -725,6 +733,40 @@ mod tests {
         fn name(&self) -> &str {
             "buy-and-hold"
         }
+    }
+
+    /// A settlement between two ticks is charged on the position held
+    /// between them. It was applied after the later tick's fills, so a
+    /// position opened by those fills paid for an instant before it
+    /// existed.
+    #[test]
+    fn funding_is_charged_on_the_position_held_when_it_settles() {
+        let p = 1_000_000;
+        let ticks = vec![
+            tick_at(0, p, p, p),
+            tick_at(10, p, p, p),
+            tick_at(20, p, p, p),
+        ];
+        let funding = oq_margin::FundingSchedule::new(vec![oq_margin::FundingRate {
+            at: Nanos(5),
+            rate: oq_types::Ratio::from_percent(1),
+            mark: PriceTicks(p),
+        }]);
+        let r = run(
+            &config(1_000_000).with_funding(funding),
+            &mut BuyAndHold {
+                qty: 10,
+                done: false,
+            },
+            &ticks,
+        );
+        assert_eq!(r.fills.len(), 1, "the buy fills at the second tick");
+        assert!(
+            r.fills[0].stamp.exch.0 > 5,
+            "and after the settlement: {:?}",
+            r.fills[0].stamp
+        );
+        assert_eq!(r.funding_paid, Cash::ZERO, "flat when it settled");
     }
 
     fn falling_market() -> Vec<Tick> {
