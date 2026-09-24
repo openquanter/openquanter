@@ -316,6 +316,7 @@ mod tests {
             maker: false,
             trade_id,
             event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
         }
     }
 
@@ -421,6 +422,7 @@ mod ownership {
             maker: false,
             trade_id,
             event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
         }
     }
 
@@ -513,6 +515,7 @@ mod fills {
             maker: true,
             trade_id: Some(trade_id),
             event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
         }
     }
 
@@ -548,6 +551,7 @@ mod stp {
             maker: false,
             trade_id: None,
             event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
         };
         b.apply(&u);
         assert_eq!(b.working(), 1);

@@ -53,8 +53,15 @@ pub enum Output {
     Liquidated {
         at: Nanos,
         price: PriceTicks,
+        /// The net exposure closed out.
         qty: QtyLots,
         equity: Cash,
+        /// The holding it happened to.
+        instrument: InstrumentId,
+        /// Each leg as it was when it was closed, the short negative.
+        /// The net above cannot say that a hedged account lost both.
+        long: QtyLots,
+        short: QtyLots,
     },
 }
 
@@ -840,6 +847,8 @@ impl State {
         // number a reader compares against the position they thought
         // they had.
         let qty = QtyLots(self.holdings[h].qty.0 + self.holdings[h].short_qty.0);
+        let (long, short) = (self.holdings[h].qty, self.holdings[h].short_qty);
+        let instrument = self.holdings[h].instrument;
         let holding = self.at(h);
         holding.qty = QtyLots::ZERO;
         holding.entry = PriceTicks::ZERO;
@@ -851,6 +860,9 @@ impl State {
             price,
             qty,
             equity,
+            instrument,
+            long,
+            short,
         }
     }
 }

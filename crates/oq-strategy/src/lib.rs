@@ -38,7 +38,7 @@ pub mod indicator;
 
 pub use indicator::{Ema, Macd, MacdValue, Rsi, Sma, Warmup, Window};
 
-use oq_types::{Fill, InstrumentId, Offset, OrderId, PriceTicks, QtyLots, Side};
+use oq_types::{Fill, InstrumentId, Nanos, Offset, OrderId, PriceTicks, QtyLots, Side};
 
 /// What a strategy wants to happen next.
 ///
@@ -97,6 +97,32 @@ impl Intent {
             Self::Cancel(_) | Self::CancelAll => None,
         }
     }
+}
+
+/// Why the venue closed a position nobody asked it to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    /// The account fell below maintenance margin.
+    Liquidation,
+    /// Auto-deleveraging: the venue closed a *profitable* position to
+    /// cover another account's liquidation. The leg that was winning is
+    /// the one that goes.
+    Adl,
+    /// The contract settled — delivered, or delisted.
+    Settlement,
+}
+
+/// Part of a position the venue closed on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VenueClosed {
+    pub instrument: InstrumentId,
+    pub reason: CloseReason,
+    /// The leg that was closed: `Buy` for the long, `Sell` for the short.
+    pub leg: Side,
+    /// How much of it, as a positive quantity.
+    pub qty: QtyLots,
+    pub price: PriceTicks,
+    pub at: Nanos,
 }
 
 /// How an order ended.
@@ -267,6 +293,20 @@ pub trait Strategy {
     /// fill. A strategy therefore never sees a stale position, and
     /// never has to reconstruct one.
     fn on_fill(&mut self, _fill: &Fill, _ctx: &Context, _out: &mut Vec<Intent>) {}
+
+    /// Called when the venue closed part of a position on its own: a
+    /// liquidation, auto-deleveraging, or settlement.
+    ///
+    /// Not an `on_fill`. None of these is an order this strategy placed,
+    /// and delivering one as a fill hands the strategy an execution for
+    /// an order it does not know — which a careful strategy counts and
+    /// ignores, and so keeps managing a leg that is no longer there: a
+    /// take-profit sized to a position half of which has gone, a ladder
+    /// under a leg that was closed at the bankruptcy price.
+    ///
+    /// `ctx` already reflects the close. Delivered in a backtest when the
+    /// kernel liquidates, and live when the venue reports one.
+    fn on_venue_closed(&mut self, _closed: &VenueClosed, _ctx: &Context, _out: &mut Vec<Intent>) {}
 
     /// Called when the venue has answered a submission — and only then.
     ///

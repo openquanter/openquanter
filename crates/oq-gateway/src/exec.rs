@@ -582,4 +582,28 @@ pub struct OrderUpdate {
     pub trade_id: Option<i64>,
     /// Venue event time, milliseconds.
     pub event_ms: i64,
+    /// Who placed the order: someone on the account, or the venue itself
+    /// closing a position.
+    pub initiator: Initiator,
+}
+
+/// Who placed an order.
+///
+/// The venue places orders of its own on an account — to liquidate it, to
+/// deleverage it against another account's liquidation, to settle an
+/// expiring contract — and reports them on the same stream as the
+/// account's own. They belong to no strategy, and one read as a fill of
+/// an order a strategy does not know is a leg that strategy goes on
+/// managing after it has gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Initiator {
+    /// An order someone on the account placed: this process or another.
+    #[default]
+    Account,
+    /// A liquidation.
+    Liquidation,
+    /// Auto-deleveraging.
+    Adl,
+    /// Settlement of a delivered or delisted contract.
+    Settlement,
 }
