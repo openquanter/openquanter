@@ -206,7 +206,9 @@ Pre-alpha, and specific about it. **Built and tested today:**
 - **Statistics** — deflated Sharpe ratio, probability of backtest
   overfitting, trial registry.
 - **Parity** — trade-by-trade diffing with difference attribution, over
-  baselines identified by code, data and configuration together.
+  baselines identified by code, data and configuration together; and
+  markouts, which say whether one run's fills were followed by worse prices
+  than another's (`oq-parity markout`).
 
 - **The order path** — a venue-independent execution contract with five
   venues behind it, three of them complete and two stopping at
