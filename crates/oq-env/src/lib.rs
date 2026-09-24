@@ -44,11 +44,11 @@
 
 pub mod vec;
 
-use oq_backtest::{Observation, RunConfig, Tier};
+use oq_backtest::{MarginMode, Observation, RunConfig, Tier};
 use oq_core::matcher::Matcher;
 use oq_core::{Event, Kernel, Output, State};
 use oq_engine::Tick;
-use oq_types::{Cash, InstrumentId, Offset, OrderId, QtyLots, Side};
+use oq_types::{Cash, InstrumentId, Nanos, Offset, OrderId, QtyLots, Side};
 
 pub use vec::VecEnv;
 
@@ -142,6 +142,8 @@ pub struct Env {
     ended: Option<Ending>,
     config: RunConfig,
     seed: u64,
+    /// Funding is settled up to here.
+    last_funding: Nanos,
 }
 
 impl Env {
@@ -165,6 +167,7 @@ impl Env {
             ended: None,
             config,
             seed,
+            last_funding: Nanos(i64::MIN),
         };
         env.reset();
         env
@@ -178,7 +181,7 @@ impl Env {
                 oq_engine::L1Engine::new(config.instrument, *p),
             ))),
         };
-        State::new(
+        let state = State::new(
             config.instrument,
             config.contract,
             config.table.clone(),
@@ -186,7 +189,14 @@ impl Env {
         )
         .with_fees(config.fees)
         .with_mode(config.position_mode)
-        .matching_with(matcher)
+        .matching_with(matcher);
+        // As the backtest reads it. Ignored here and honoured there, an
+        // agent was trained against liquidations the evaluation of the
+        // same config never applies.
+        match config.margin {
+            MarginMode::Enforced => state,
+            MarginMode::Ignored => state.without_liquidation(),
+        }
     }
 
     /// Start the episode over.
@@ -196,6 +206,7 @@ impl Env {
     /// position into an episode the agent believes is fresh.
     pub fn reset(&mut self) -> Observed {
         self.kernel = Kernel::new(Self::state(&self.config));
+        self.last_funding = Nanos(i64::MIN);
         self.cursor = 0;
         self.next_id = 1;
         self.last_equity = self.config.starting_balance;
@@ -306,6 +317,27 @@ impl Env {
                     self.kernel.install_snapshot(update_id, &bids, &asks);
                 }
                 Observation::Tick(tick) => {
+                    // Funding due since the last tick, on the position held
+                    // until now, as the backtest settles it. It was not
+                    // settled at all: the reward had no financing cost,
+                    // and a policy that held through expensive funding
+                    // learned it was free.
+                    let now = tick.stamp.exch;
+                    let due = self.config.funding.between(self.last_funding, now).to_vec();
+                    self.last_funding = self.last_funding.max(now);
+                    for rate in due {
+                        let outputs = self.kernel.apply(&Event::Funding {
+                            at: rate.at,
+                            rate: rate.rate,
+                            mark: rate.mark,
+                        });
+                        if outputs
+                            .iter()
+                            .any(|o| matches!(o, Output::Liquidated { .. }))
+                        {
+                            self.ended = Some(Ending::Liquidated);
+                        }
+                    }
                     let outputs = self.kernel.apply(&Event::Tick {
                         instrument: Some(self.instrument),
                         tick,
