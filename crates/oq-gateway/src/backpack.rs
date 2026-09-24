@@ -486,32 +486,8 @@ impl Execution for Backpack {
                 ),
             });
         }
-        let side = match order.side {
-            oq_types::Side::Buy => "Bid",
-            oq_types::Side::Sell => "Ask",
-        };
-        let mut params: Vec<(&'static str, String)> = vec![
-            ("clientId", order.client_id.clone()),
-            (
-                "orderType",
-                if order.limit_price.is_some() {
-                    "Limit"
-                } else {
-                    "Market"
-                }
-                .to_string(),
-            ),
-            ("quantity", decimal(order.qty.0, instrument.qty_scale)),
-            ("side", side.to_string()),
-            ("symbol", order.symbol.clone()),
-        ];
-        if let Some(price) = order.limit_price {
-            params.push(("price", decimal(price.0, instrument.price_scale)));
-        }
-        if order.reduce_only {
-            params.push(("reduceOnly", "true".to_string()));
-        }
-        let params = sorted(params);
+        let params = order_params(order, instrument);
+
         match self.send("POST", "/api/v1/order", "orderExecute", &params) {
             Ok(text) => classify(200, &text, &order.client_id),
             Err(VenueError::Venue { status, body }) => classify(status, &body, &order.client_id),
@@ -598,6 +574,48 @@ mod account_reads {
         assert!(parse_positions("[]").expect("a flat account").is_empty());
         assert!(parse_open_orders("[]").expect("nothing resting").is_empty());
     }
+}
+
+/// The signed parameters for a new order, sorted as the signature wants.
+#[must_use]
+pub fn order_params(order: &NewOrder, instrument: &Instrument) -> Vec<(&'static str, String)> {
+    let side = match order.side {
+        oq_types::Side::Buy => "Bid",
+        oq_types::Side::Sell => "Ask",
+    };
+    let mut params: Vec<(&'static str, String)> = vec![
+        ("clientId", order.client_id.clone()),
+        (
+            "orderType",
+            if order.limit_price.is_some() {
+                "Limit"
+            } else {
+                "Market"
+            }
+            .to_string(),
+        ),
+        ("quantity", decimal(order.qty.0, instrument.qty_scale)),
+        ("side", side.to_string()),
+        ("symbol", order.symbol.clone()),
+    ];
+    if let Some(price) = order.limit_price {
+        params.push(("price", decimal(price.0, instrument.price_scale)));
+        // Stated rather than left to the default, which is GTC: an
+        // IOC sent as that rests.
+        params.push((
+            "timeInForce",
+            match order.tif {
+                oq_types::TimeInForce::GoodTilCancel => "GTC",
+                oq_types::TimeInForce::ImmediateOrCancel => "IOC",
+                oq_types::TimeInForce::FillOrKill => "FOK",
+            }
+            .to_string(),
+        ));
+    }
+    if order.reduce_only {
+        params.push(("reduceOnly", "true".to_string()));
+    }
+    sorted(params)
 }
 
 #[cfg(test)]

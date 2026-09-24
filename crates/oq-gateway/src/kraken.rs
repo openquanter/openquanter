@@ -146,18 +146,33 @@ pub fn authent(secret: &[u8], post_data: &str, nonce: &str, path: &str) -> Strin
 /// and carries one. Written out rather than defaulted, because a market
 /// order sent with a stale limit price is an order at a price nobody
 /// chose.
-#[must_use]
-pub fn order_body(order: &NewOrder, instrument: &Instrument) -> String {
+///
+/// A limit order's time in force is its order type here: `lmt` rests,
+/// `ioc` does not. There is no fill-or-kill, and one is refused rather
+/// than sent as something weaker.
+///
+/// # Errors
+/// A fill-or-kill limit order.
+pub fn order_body(order: &NewOrder, instrument: &Instrument) -> Result<String, String> {
     let side = match order.side {
         oq_types::Side::Buy => "buy",
         oq_types::Side::Sell => "sell",
     };
     let size = decimal(order.qty.0, instrument.qty_scale);
     let mut body = match order.limit_price {
-        Some(price) => format!(
-            "orderType=lmt&limitPrice={}",
-            decimal(price.0, instrument.price_scale)
-        ),
+        Some(price) => {
+            let kind = match order.tif {
+                oq_types::TimeInForce::GoodTilCancel => "lmt",
+                oq_types::TimeInForce::ImmediateOrCancel => "ioc",
+                oq_types::TimeInForce::FillOrKill => {
+                    return Err("this venue has no fill-or-kill limit order".to_string());
+                }
+            };
+            format!(
+                "orderType={kind}&limitPrice={}",
+                decimal(price.0, instrument.price_scale)
+            )
+        }
         None => "orderType=mkt".to_string(),
     };
     body.push_str(&format!(
@@ -167,7 +182,7 @@ pub fn order_body(order: &NewOrder, instrument: &Instrument) -> String {
     if order.reduce_only {
         body.push_str("&reduceOnly=true");
     }
-    body
+    Ok(body)
 }
 
 /// What a `/sendorder` answer meant.
@@ -238,6 +253,71 @@ pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
                 field_str(&send_status, "reason").unwrap_or_else(|| truncate(&send_status))
             ),
         })
+    }
+}
+
+/// What a `cancelorder` answer meant.
+///
+/// Not [`classify`]: that reads a *placement*, whose success words are
+/// `placed` and `filled`. A cancel answers in `cancelStatus`, and its
+/// success word is `cancelled` — which the placement reader called a
+/// refusal, so every successful cancel was reported as one that failed.
+///
+/// The venue documents three answers: `cancelled` (possibly after part
+/// of it filled), `filled` (it had already filled completely, so there
+/// was nothing to cancel) and `notFound`.
+#[must_use]
+pub fn classify_cancel(status: u16, body: &str, client_id: &str) -> Placed {
+    if !(200..300).contains(&status) {
+        return Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!("HTTP {status}: {}", truncate(body)),
+        });
+    }
+    match field_str(body, "result").as_deref() {
+        Some("success") => {}
+        Some("error") => {
+            return Placed::Rejected(Reject {
+                code: None,
+                message: field_str(body, "error")
+                    .unwrap_or_else(|| format!("refused: {}", truncate(body))),
+            });
+        }
+        _ => {
+            return Placed::Unknown(Unresolved {
+                client_id: client_id.to_string(),
+                reason: format!("unreadable answer: {}", truncate(body)),
+            });
+        }
+    }
+    let Some(cancel) = crate::json::object_field(body, "cancelStatus") else {
+        return Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!("no cancelStatus: {}", truncate(body)),
+        });
+    };
+    let word = field_str(&cancel, "status").unwrap_or_default();
+    match word.as_str() {
+        "cancelled" => Placed::Accepted(OrderAck {
+            venue_id: field_str(&cancel, "order_id").unwrap_or_default(),
+            client_id: client_id.to_string(),
+            status: word,
+            executed_qty: "0".to_string(),
+        }),
+        // Over, but not by this request: a filled order's fills arrive
+        // on their own, and calling this a successful cancel would tell
+        // the caller the quantity never traded.
+        "filled" | "notFound" => Placed::Rejected(Reject {
+            code: None,
+            message: format!("{word}: nothing left to cancel"),
+        }),
+        _ => Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!(
+                "a cancel status this build does not know: {}",
+                truncate(&cancel)
+            ),
+        }),
     }
 }
 
@@ -578,7 +658,15 @@ impl Execution for Kraken {
                 ),
             });
         }
-        let params = order_body(order, instrument);
+        let params = match order_body(order, instrument) {
+            Ok(params) => params,
+            Err(message) => {
+                return Placed::Rejected(Reject {
+                    code: None,
+                    message,
+                });
+            }
+        };
         match self.send("/api/v3/sendorder", &params) {
             Ok(text) => classify(200, &text, &order.client_id),
             Err(VenueError::Venue { status, body }) => classify(status, &body, &order.client_id),
@@ -596,8 +684,8 @@ impl Execution for Kraken {
         // so it names one order for good.
         let params = format!("cliOrdId={client_id}");
         match self.send("/api/v3/cancelorder", &params) {
-            Ok(text) => classify(200, &text, client_id),
-            Err(VenueError::Venue { status, body }) => classify(status, &body, client_id),
+            Ok(text) => classify_cancel(200, &text, client_id),
+            Err(VenueError::Venue { status, body }) => classify_cancel(status, &body, client_id),
             Err(e) => Placed::Unknown(Unresolved {
                 client_id: client_id.to_string(),
                 reason: e.to_string(),
@@ -818,5 +906,58 @@ mod tests {
         // Longer than either of the first two venues allows, which is
         // the direction that matters: an id built for them fits here.
         assert!(IdRules::KRAKEN.accepts(&"a".repeat(36)));
+    }
+}
+
+#[cfg(test)]
+mod cancels {
+    use super::*;
+
+    /// docs.kraken.com, futures-api, cancel-order: the documented success.
+    const CANCELLED: &str = r#"{"result":"success","cancelStatus":{"status":"cancelled","order_id":"cb4e34f6-4eb3-4d4b-9724-4c3035b99d47","receivedTime":"2020-07-22T13:26:20.806Z","orderEvents":[{"type":"CANCEL","uid":"cb4e34f6-4eb3-4d4b-9724-4c3035b99d47","order":{"orderId":"cb4e34f6-4eb3-4d4b-9724-4c3035b99d47","cliOrdId":"1234568","type":"lmt","symbol":"PI_XBTUSD","side":"buy","quantity":5500,"filled":0,"limitPrice":8000,"reduceOnly":false,"timestamp":"2020-07-22T13:25:56.366Z","lastUpdateTimestamp":"2020-07-22T13:25:56.366Z"}}]},"serverTime":"2020-07-22T13:26:20.806Z"}"#;
+
+    /// The placement reader called this a refusal.
+    #[test]
+    fn a_cancelled_order_is_a_successful_cancel() {
+        assert!(
+            matches!(classify(200, CANCELLED, "1234568"), Placed::Rejected(_)),
+            "the old reading"
+        );
+        match classify_cancel(200, CANCELLED, "1234568") {
+            Placed::Accepted(ack) => {
+                assert_eq!(ack.venue_id, "cb4e34f6-4eb3-4d4b-9724-4c3035b99d47");
+                assert_eq!(ack.status, "cancelled");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn filled_and_not_found_are_not_cancels() {
+        for word in ["filled", "notFound"] {
+            let body =
+                CANCELLED.replace(r#""status":"cancelled""#, &format!(r#""status":"{word}""#));
+            assert!(
+                matches!(classify_cancel(200, &body, "1"), Placed::Rejected(_)),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_that_cannot_be_read_is_unknown() {
+        let body = CANCELLED.replace(r#""status":"cancelled""#, r#""status":"somethingNew""#);
+        assert!(matches!(
+            classify_cancel(200, &body, "1"),
+            Placed::Unknown(_)
+        ));
+        assert!(matches!(
+            classify_cancel(502, "bad gateway", "1"),
+            Placed::Unknown(_)
+        ));
+        assert!(matches!(
+            classify_cancel(200, r#"{"result":"error","error":"apiLimitExceeded"}"#, "1"),
+            Placed::Rejected(_)
+        ));
     }
 }
