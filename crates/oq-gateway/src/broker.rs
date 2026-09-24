@@ -101,6 +101,22 @@ impl IdRules {
     /// Hyperliquid: a `cloid`, 128 bits as hex.
     pub const HYPERLIQUID: Self = Self::Hex { bytes: 16 };
 
+    /// What goes between an ownership prefix and a sequence number: a
+    /// hyphen where the venue takes punctuation, nothing where it does
+    /// not. OKX takes letters and digits only, and a hyphen there was
+    /// refused at startup for "insufficient room" — a message about
+    /// length for a problem with one character.
+    #[must_use]
+    pub const fn separator(&self) -> &'static str {
+        match *self {
+            Self::Text {
+                punctuation_allowed: true,
+                ..
+            } => "-",
+            _ => "",
+        }
+    }
+
     /// Whether `id` is usable as it stands.
     #[must_use]
     pub fn accepts(&self, id: &str) -> bool {

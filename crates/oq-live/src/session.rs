@@ -178,6 +178,8 @@ pub struct Session<E: Execution> {
     sequence: u64,
     sequence_end: u64,
     prefix: String,
+    /// Between the prefix and the sequence: the venue's rules decide.
+    separator: &'static str,
 }
 
 impl<E: Execution> Session<E> {
@@ -253,6 +255,7 @@ impl<E: Execution> Session<E> {
             sequence: 0,
             sequence_end: u64::MAX,
             prefix: config.id_prefix,
+            separator: "-",
         })
     }
 
@@ -273,6 +276,18 @@ impl<E: Execution> Session<E> {
         self.sequence = *range.start() - 1;
         self.sequence_end = *range.end();
         Ok(self)
+    }
+
+    /// Compose client ids as `rules` allow.
+    ///
+    /// A hyphen between prefix and sequence where the venue accepts
+    /// punctuation — every existing id on those venues has one, and the
+    /// ownership check reads the prefix either way — and nothing where it
+    /// does not.
+    #[must_use]
+    pub const fn with_id_rules(mut self, rules: oq_gateway::broker::IdRules) -> Self {
+        self.separator = rules.separator();
+        self
     }
 
     /// Write decisions to `journal` from here on.
@@ -490,7 +505,7 @@ impl<E: Execution> Session<E> {
             );
         }
         self.sequence += 1;
-        let client_id = format!("{}-{}", self.prefix, self.sequence);
+        let client_id = format!("{}{}{}", self.prefix, self.separator, self.sequence);
         let order = NewOrder {
             symbol: self.symbol.clone(),
             side: approved.side,
