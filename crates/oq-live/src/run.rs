@@ -658,7 +658,7 @@ where
         println!("journal          off, by request; nothing here can be replayed");
         session
     } else {
-        match oq_journal::Writer::open(&journal_path, oq_journal::SyncPolicy::EveryRecordNoFsync) {
+        match env.open_journal(std::path::Path::new(&journal_path)) {
             Ok(w) => {
                 println!("journal          {journal_path}");
                 session.journalling(w)

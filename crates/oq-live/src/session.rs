@@ -331,6 +331,11 @@ impl<E: Execution> Session<E> {
         let Some(journal) = self.journal.as_mut() else {
             return true;
         };
+        // Said once. Every later record fails the same way, and a line per
+        // tick buries the one that says when it started.
+        if self.journal_lost.is_some() {
+            return false;
+        }
         let payload = record.encode();
         // Flushed here rather than on drop: the whole point is that the
         // record exists before the order does, and a record sitting in a

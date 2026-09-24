@@ -125,6 +125,35 @@ impl Strategy for Insistent {
     }
 }
 
+/// Rests an opening bid far under the market and never withdraws it,
+/// then offers another every ten seconds. Whatever takes its orders off
+/// the venue before the run ends, it was not this.
+struct Patient {
+    next: u64,
+    ticks: u64,
+}
+
+impl Strategy for Patient {
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+        self.ticks += 1;
+        let last = ctx.tick.last.0;
+        if last == 0 || (self.next > 0 && !self.ticks.is_multiple_of(100)) {
+            return;
+        }
+        self.next += 1;
+        out.push(ctx.limit(
+            OrderId::new(self.next),
+            Side::Buy,
+            PriceTicks(last - 1_000),
+            QtyLots(1),
+        ));
+    }
+
+    fn name(&self) -> &str {
+        "patient"
+    }
+}
+
 /// Holds a long and a short at once, the way a hedged ladder does: every
 /// twenty observations it withdraws everything and quotes an entry for
 /// each flat leg and an exit for each held one.
@@ -233,6 +262,7 @@ enum Kind {
     Quoter,
     Insistent,
     Hedged,
+    Patient,
 }
 
 fn run_kind(
@@ -302,6 +332,7 @@ fn run_kind(
             &cfg,
             &env,
         ),
+        Kind::Patient => run_on(sim.account(), |_| Patient { next: 0, ticks: 0 }, &cfg, &env),
         Kind::Hedged => run_on(
             sim.account(),
             |_| Both {
@@ -421,6 +452,7 @@ fn a_misbehaving_venue_leaves_the_journal_true() {
         rate_limited: 20_000,
         partial_fill: 200_000,
         silent_fill_after: None,
+        journal_fails_after: None,
     };
     for seed in 1..=12 {
         let (sim, code, _) = simulate_with("faults", seed, 10, faults);
@@ -466,6 +498,7 @@ fn a_hedged_account_stays_true_through_the_faults() {
         rate_limited: 20_000,
         partial_fill: 200_000,
         silent_fill_after: None,
+        journal_fails_after: None,
     };
     let mut both = 0;
     for seed in 1..=6 {
@@ -490,4 +523,70 @@ fn a_seed_names_one_run_with_many_orders_resting() {
     let (_, _, a) = run_kind("many", 13, 10, Faults::default(), Kind::Hedged);
     let (_, _, b) = run_kind("many", 13, 10, Faults::default(), Kind::Hedged);
     assert!(a == b, "two runs of one seed wrote different journals");
+}
+
+/// A journal that stops taking records stops the orders with it.
+///
+/// Recording before sending is what makes a crash recoverable: the client
+/// id on disk is the handle a restart asks the venue with. So once the
+/// disk fills, nothing may reach the venue that the journal does not
+/// name, and the run halts — withdrawing the opening order resting from
+/// before, which the strategy here never would, long before the end of
+/// the run would have.
+#[test]
+fn a_journal_that_fills_up_stops_the_orders_and_halts_the_run() {
+    let faults = Faults {
+        journal_fails_after: Some(40),
+        ..Faults::default()
+    };
+    let (sim, _code, _) = run_kind("fullj", 3, 3, faults, Kind::Patient);
+
+    let journal = dir_path("fullj", 3).join("run.oqj");
+    let replay = oq_journal::Reader::open(&journal)
+        .expect("open")
+        .replay()
+        .expect("what was written reads");
+    assert_eq!(
+        replay.next_seq, 40,
+        "the journal took exactly its 40 records"
+    );
+    let recorded: Vec<String> = replay
+        .since(0)
+        .filter_map(|f| oq_live::record::Record::decode(f.kind, &f.payload))
+        .filter_map(|r| match r {
+            oq_live::record::Record::Submitted { client_id, .. } => Some(client_id),
+            _ => None,
+        })
+        .collect();
+
+    let placed = sim.placed();
+    assert!(
+        !placed.is_empty(),
+        "the first bid went out while the journal worked"
+    );
+    for id in &placed {
+        assert!(
+            recorded.contains(id),
+            "{id} reached the venue and the journal cannot name it"
+        );
+    }
+
+    let withdrawn = sim.withdrawn_at();
+    let first = &placed[0];
+    let at = withdrawn
+        .iter()
+        .find(|(id, _)| id == first)
+        .map(|(_, at)| *at)
+        .expect("the resting bid was withdrawn");
+    // Ticks close once a second, so the fortieth record lands about forty
+    // seconds in; the run ends at three minutes.
+    assert!(
+        at < Duration::from_secs(90),
+        "withdrawn at {at:?}: by the end-of-run shutdown, not by a halt"
+    );
+    assert!(
+        sim.resting().is_empty(),
+        "left resting: {:?}",
+        sim.resting()
+    );
 }
