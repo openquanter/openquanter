@@ -209,6 +209,12 @@ impl L2Engine {
         self.inner.released()
     }
 
+    /// Every fill still held back by response latency. See
+    /// [`L1Engine::drain_unreported`].
+    pub fn drain_unreported(&mut self) -> Vec<L0Fill> {
+        self.inner.drain_unreported()
+    }
+
     /// Taker fills priced by walking the book.
     #[must_use]
     pub const fn swept(&self) -> u64 {
