@@ -196,7 +196,13 @@ Pre-alpha, and specific about it. **Built and tested today:**
   missed, and a capture that silently dropped a third of the trades
   would pass every integrity check in the pipeline. `oq-merge` and
   `oq-resequence` reconcile archives that two writers or two runs
-  produced.
+  produced. Measured against an independent copy of the same day —
+  Tardis's free sample for 2026-09-01, BTCUSDT perpetual — the capture
+  held every trade id Tardis did, 3,602,361 of them, plus 36,677 it did
+  not: 20,467 real trades Tardis lost in five bursts, the largest 10,540
+  in two minutes, and 16,210 zero-size records the venue sends on the
+  trade stream that are not trades. Depth held 3,243,361 messages to
+  Tardis's 3,242,665, with no minute short by more than 1%.
 - **Capture to backtest** — `oq-ingest` folds captured depth and trades
   into the tick format the engine replays. Conversion is deliberately
   lossy: a window of L2 becomes a best bid and a best ask, and the raw
