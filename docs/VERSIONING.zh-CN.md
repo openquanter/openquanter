@@ -55,7 +55,7 @@ OpenQuanter 1.x 是一个闭源交易平台，实盘运行了数年。它从未�
 
 | 制品 | 版本位置 | 规范 |
 |---|---|---|
-| 采集文件格式 | manifest 里的 `format_version`，当前为 1 | [采集格式规范](CAPTURE-FORMAT.zh-CN.md) |
+| 采集文件格式 | manifest 里的 `format_version`，当前为 2（读者仍接受 1） | [采集格式规范](CAPTURE-FORMAT.zh-CN.md) |
 | Tick 文件格式 | 文件头里的 `version`，当前为 2 | [Tick 格式规范](TICK-FORMAT.zh-CN.md) |
 | Journal 帧格式 | 帧头里的 `VERSION` | `oq-journal` |
 

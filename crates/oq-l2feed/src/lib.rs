@@ -8,7 +8,7 @@
 //! anyone verify it years later.
 
 /// Version of the on-disk capture format, per `docs/CAPTURE-FORMAT.md`.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 pub mod archive;
 
