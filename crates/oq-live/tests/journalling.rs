@@ -554,7 +554,7 @@ fn an_order_the_journal_cannot_record_is_not_sent() {
     let path = temp("broken.oqj");
     let _ = std::fs::remove_file(&path);
     let mut journal = Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer");
-    journal.fail_from_here();
+    journal.fail_after(0);
     let mut s = Session::start(
         Counting::default(),
         RiskGate::new(limits()),

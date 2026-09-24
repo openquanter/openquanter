@@ -91,6 +91,9 @@ pub struct Faults {
     /// moves and nothing the loop can read explains it — the state a
     /// process must stop trading in.
     pub silent_fill_after: Option<Duration>,
+    /// After this many records the journal's next write fails, as it
+    /// does when the disk fills, and every write after it.
+    pub journal_fails_after: Option<u64>,
 }
 
 /// An order resting at the simulated venue.
@@ -146,6 +149,8 @@ struct Core {
     generation: u64,
     /// Every client id ever sent, and when, for the invariants.
     placed: Vec<(String, Duration)>,
+    /// Every order withdrawn by a cancel, and when.
+    withdrawn: Vec<(String, Duration)>,
     /// When the silent fill happened, if it has.
     silent_at: Option<Duration>,
 }
@@ -174,6 +179,7 @@ impl Core {
             connected: false,
             generation: 0,
             placed: Vec::new(),
+            withdrawn: Vec::new(),
             silent_at: None,
             cfg,
         }
@@ -428,6 +434,12 @@ impl Sim {
         self.0.borrow().placed.iter().map(|(_, at)| *at).collect()
     }
 
+    /// When each withdrawn order was cancelled, on the simulated clock.
+    #[must_use]
+    pub fn withdrawn_at(&self) -> Vec<(String, Duration)> {
+        self.0.borrow().withdrawn.clone()
+    }
+
     /// When the silent fill happened, if it has.
     #[must_use]
     pub fn silent_at(&self) -> Option<Duration> {
@@ -606,6 +618,14 @@ impl Environment for SimEnv {
         &self.clock
     }
 
+    fn open_journal(&self, path: &std::path::Path) -> oq_journal::Result<oq_journal::Writer> {
+        let mut w = oq_journal::Writer::open(path, oq_journal::SyncPolicy::EveryRecordNoFsync)?;
+        if let Some(n) = self.sim.0.borrow().cfg.faults.journal_fails_after {
+            w.fail_after(n);
+        }
+        Ok(w)
+    }
+
     fn market_data(
         &self,
         _venue: &str,
@@ -702,6 +722,8 @@ impl Execution for SimAccount {
         let mut core = self.0.0.borrow_mut();
         match core.resting.remove(client_id) {
             Some(o) => {
+                let at = core.clock.elapsed();
+                core.withdrawn.push((client_id.to_string(), at));
                 let UserEvent::Order(report) =
                     core.update(client_id, o.venue_id, o.leg, o.side, "CANCELED")
                 else {

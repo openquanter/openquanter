@@ -54,6 +54,8 @@ pub struct Writer {
     scratch: Vec<u8>,
     /// Set by the first failed write or flush; see [`JournalError::Broken`].
     broken: bool,
+    /// Appends left before a simulated failure; see [`Writer::fail_after`].
+    fail_in: Option<u64>,
 }
 
 impl Writer {
@@ -98,6 +100,7 @@ impl Writer {
             bytes_written: clean_len,
             scratch: Vec::with_capacity(1024),
             broken: false,
+            fail_in: None,
         })
     }
 
@@ -133,6 +136,16 @@ impl Writer {
         }
         let seq = self.next_seq;
         let next = seq.checked_add(1).ok_or(JournalError::SequenceExhausted)?;
+        if let Some(left) = self.fail_in {
+            if left == 0 {
+                self.broken = true;
+                return Err(JournalError::Io(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "simulated: no space left on device",
+                )));
+            }
+            self.fail_in = Some(left - 1);
+        }
         self.scratch.clear();
         Frame::new(seq, kind, payload.to_vec()).encode_into(&mut self.scratch);
         self.guard(|w| {
@@ -162,14 +175,16 @@ impl Writer {
         })
     }
 
-    /// Behave from here on as though a write had just failed.
+    /// Accept `appends` more records, then fail the next write as a full
+    /// disk does, and every write after it.
     ///
     /// For testing what a caller does when its journal stops accepting
     /// records: a real failure — a full disk, a vanished device — is not
-    /// something a test can arrange portably.
+    /// something a test can arrange portably, and a simulation has to be
+    /// able to arrange it at a chosen point in a run.
     #[doc(hidden)]
-    pub fn fail_from_here(&mut self) {
-        self.broken = true;
+    pub fn fail_after(&mut self, appends: u64) {
+        self.fail_in = Some(appends);
     }
 
     /// Flush buffered records to the OS.
@@ -386,11 +401,17 @@ mod tests {
     }
 
     #[test]
-    fn the_test_hook_breaks_a_writer_the_same_way() {
+    fn the_test_hook_fails_a_writer_the_same_way_at_the_chosen_point() {
         let path = temp_path("hook");
-        let mut w = Writer::open(&path, SyncPolicy::Never).expect("open");
-        w.fail_from_here();
-        assert!(matches!(w.append(1, b"x"), Err(JournalError::Broken)));
+        let mut w = Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("open");
+        w.fail_after(2);
+        w.append(1, b"one").expect("first");
+        w.append(1, b"two").expect("second");
+        assert!(matches!(w.append(1, b"three"), Err(JournalError::Io(_))));
+        assert!(matches!(w.append(1, b"four"), Err(JournalError::Broken)));
+        drop(w);
+        let w = Writer::open(&path, SyncPolicy::Never).expect("reopen");
+        assert_eq!(w.next_seq(), 2);
         drop(w);
         std::fs::remove_file(&path).ok();
     }

@@ -74,6 +74,14 @@ pub trait Environment {
     /// Where durable process state — the reserved order ids — lives.
     fn state_root(&self) -> Option<PathBuf>;
 
+    /// Open the journal at `path` for appending.
+    ///
+    /// # Errors
+    /// Whatever opening it reports.
+    fn open_journal(&self, path: &std::path::Path) -> oq_journal::Result<oq_journal::Writer> {
+        oq_journal::Writer::open(path, oq_journal::SyncPolicy::EveryRecordNoFsync)
+    }
+
     /// Whether an operator has asked the process to stop.
     fn shutdown_requested(&self) -> bool;
 
