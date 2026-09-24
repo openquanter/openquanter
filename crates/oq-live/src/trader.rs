@@ -19,7 +19,7 @@
 //! when the venue says the order has ended, and a cancel for an id that
 //! is not in it is reported rather than swallowed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use oq_gateway::Execution;
 use oq_risk::ProposedOrder;
@@ -85,6 +85,17 @@ pub struct Trader<S: Strategy, E: Execution> {
     session: Session<E>,
     /// Strategy id to the client id the venue knows.
     live: HashMap<u64, String>,
+    /// The live orders that were sent to reduce a position.
+    ///
+    /// Kept so a halt can tell them apart: stopping withdraws what would
+    /// add exposure and leaves what would take it off. A halted process
+    /// that also pulled its take-profits would leave a position with no
+    /// exit at all, managed by nothing, for as long as the halt lasts.
+    closing: HashSet<u64>,
+    /// Opening orders a halt has already withdrawn, so a halt repeated
+    /// every few minutes does not send the same cancel again. One whose
+    /// cancel did not go through stays out of this set and is tried again.
+    withdrawn: HashSet<u64>,
     intents: Vec<Intent>,
     /// Submissions the venue has not answered, and the id it was given.
     unanswered: Vec<(OrderId, String)>,
@@ -113,6 +124,8 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             strategy,
             session,
             live: HashMap::new(),
+            closing: HashSet::new(),
+            withdrawn: HashSet::new(),
             intents: Vec::new(),
             unanswered: Vec::new(),
         }
@@ -218,7 +231,50 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
 
     /// The venue says an order has ended. Forget its association.
     pub fn forget(&mut self, client_id: &str) {
-        self.live.retain(|_, v| v != client_id);
+        let gone: Vec<u64> = self
+            .live
+            .iter()
+            .filter(|(_, v)| v.as_str() == client_id)
+            .map(|(k, _)| *k)
+            .collect();
+        for local in gone {
+            self.live.remove(&local);
+            self.closing.remove(&local);
+            self.withdrawn.remove(&local);
+        }
+    }
+
+    /// Withdraw every live order that would add to the position, and
+    /// leave the ones that would reduce it.
+    ///
+    /// What a halt does to the book. Not everything: a halt that pulled
+    /// the take-profits as well left a position with no exit — and not
+    /// nothing, which is what halting did until now. A ladder left
+    /// resting under a halted process went on filling for two days
+    /// while the process could neither see nor manage it, and the
+    /// position it built was one no strategy had decided to hold.
+    ///
+    /// Each order is withdrawn once. One whose cancel did not go through
+    /// is tried again on the next call, which a halt that repeats makes
+    /// the retry.
+    pub fn withdraw_opening(&mut self) -> Vec<Outcome> {
+        let mut opening: Vec<(u64, String)> = self
+            .live
+            .iter()
+            .filter(|(k, _)| !self.closing.contains(k) && !self.withdrawn.contains(k))
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        opening.sort_unstable();
+        opening
+            .into_iter()
+            .map(|(local, client_id)| {
+                let outcome = self.withdraw(OrderId(local), client_id);
+                if matches!(outcome, Outcome::Cancelled { .. }) {
+                    self.withdrawn.insert(local);
+                }
+                outcome
+            })
+            .collect()
     }
 
     /// Ask the venue again about submissions that never got an answer.
@@ -412,9 +468,13 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         mark: PriceTicks,
         now: Nanos,
     ) -> Outcome {
+        let closing = order.reduce_only;
         match self.session.submit(order, mark, now) {
             Submission::Sent(client_id) => {
                 self.live.insert(local.0, client_id.clone());
+                if closing {
+                    self.closing.insert(local.0);
+                }
                 Outcome::Sent { local, client_id }
             }
             Submission::Refused(b) => Outcome::Refused {

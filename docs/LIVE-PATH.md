@@ -159,6 +159,11 @@ during a reconnect is otherwise a difference nothing can explain, and
 the process halts over a fill two requests would have found. A
 difference the venue's records do not explain still halts.
 
+A halt withdraws the orders that would **add** to the position and keeps
+the ones that would reduce it. Withdrawing nothing leaves a ladder filling
+under a process that can no longer see it; withdrawing everything leaves
+the position with no exit.
+
 The reason to halt rather than self-correct at all is that a reconciler
 which silently repairs cannot tell you it has been repairing the same
 discrepancy every ten seconds for a week. The discrepancy is the finding.

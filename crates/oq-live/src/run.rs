@@ -1477,7 +1477,8 @@ trait TraderLike {
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
     fn reconcile(&mut self, symbol: &str);
     fn renew(&self);
-    fn halt(&self, why: &str);
+    /// Stop trading, and withdraw what would add to the position.
+    fn halt(&mut self, why: &str);
 }
 
 impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
@@ -1595,9 +1596,22 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
             eprintln!("keepalive        FAILED: {e}");
         }
     }
-    fn halt(&self, why: &str) {
+    fn halt(&mut self, why: &str) {
         eprintln!("HALT             {why}");
         self.session().gate().kill_switch().trip();
+        // Tripping the switch stops new orders and nothing else. Orders
+        // already resting kept working for the whole of a halt: a ladder
+        // left under a halted process filled twice over two days, into a
+        // position no strategy had decided to hold, while the process
+        // could neither see it nor act on it. The opening ones go now;
+        // the closing ones stay, because a halt that pulled the
+        // take-profit would leave the position with no exit at all.
+        //
+        // Cancels are not gated by the switch — withdrawing reduces risk
+        // — so these reach the venue even though nothing new can.
+        for outcome in self.withdraw_opening() {
+            report(&outcome);
+        }
     }
 }
 

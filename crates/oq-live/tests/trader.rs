@@ -773,3 +773,83 @@ fn an_order_that_never_landed_is_reported_as_not_resting() {
     assert_eq!(t.chase_unanswered(), vec![(OrderId(7), false)]);
     assert_eq!(t.strategy().answers, vec![(OrderId(7), false)]);
 }
+
+fn close(id: u64) -> Intent {
+    Intent::Limit {
+        instrument: oq_types::InstrumentId::new(1),
+        id: OrderId(id),
+        side: Side::Sell,
+        price: PriceTicks(6_100_000),
+        qty: QtyLots(1),
+        offset: Offset::Close,
+    }
+}
+
+/// What a halt withdraws: the ladder, not the take-profit.
+///
+/// Halting used to withdraw nothing. A ladder left under a halted
+/// process filled twice over two days into a position nothing had
+/// decided to hold. Withdrawing everything is no better — the position
+/// is then left with no exit at all.
+#[test]
+fn a_halt_withdraws_opening_orders_and_keeps_closing_ones() {
+    let mut t = trader(vec![limit(1), close(2), limit(3)]);
+    let sent = t.on_tick(&ctx(), Nanos(0));
+    let client = |local: u64| {
+        sent.iter()
+            .find_map(|o| match o {
+                Outcome::Sent {
+                    local: l,
+                    client_id,
+                } if l.0 == local => Some(client_id.clone()),
+                _ => None,
+            })
+            .expect("sent")
+    };
+
+    let out = t.withdraw_opening();
+    let withdrawn: Vec<u64> = out
+        .iter()
+        .map(|o| match o {
+            Outcome::Cancelled { local, .. } => local.0,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(withdrawn, [1, 3]);
+    assert_eq!(
+        *t.session().venue().cancelled.borrow(),
+        [client(1), client(3)],
+        "the take-profit was never asked about"
+    );
+    // Still in the map until the venue confirms the cancel.
+    assert_eq!(t.resting().len(), 3);
+}
+
+/// A halt repeats every few minutes; a cancel already sent is not sent
+/// again on each repetition.
+#[test]
+fn a_repeated_halt_does_not_withdraw_the_same_order_twice() {
+    let mut t = trader(vec![limit(1), close(2)]);
+    t.on_tick(&ctx(), Nanos(0));
+    assert_eq!(t.withdraw_opening().len(), 1);
+    assert!(t.withdraw_opening().is_empty());
+    assert_eq!(t.session().venue().cancelled.borrow().len(), 1);
+}
+
+/// One whose cancel did not go through — a venue refusing, a link that
+/// is down — is tried again the next time, not written off.
+#[test]
+fn a_withdrawal_that_failed_is_tried_again() {
+    let mut t = wont_cancel(vec![limit(1)]);
+    t.on_tick(&ctx(), Nanos(0));
+    let first = t.withdraw_opening();
+    assert!(
+        matches!(first[..], [Outcome::CancelFailed { .. }]),
+        "{first:?}"
+    );
+    let second = t.withdraw_opening();
+    assert!(
+        matches!(second[..], [Outcome::CancelFailed { .. }]),
+        "{second:?}"
+    );
+}
