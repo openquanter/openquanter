@@ -433,12 +433,60 @@ pub fn order_action(orders: Vec<Value>) -> Value {
     ])
 }
 
+/// Whose account an action is placed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActingFor {
+    /// Not yet asked. Nothing is signed in this state: signing without a
+    /// vault places the order in the signer's own master account, which
+    /// for a subaccount is a different account from the one this client
+    /// reads.
+    Unresolved,
+    /// The account is a master; actions carry no vault address.
+    Master,
+    /// The account is a subaccount or a vault, and every action names it.
+    Vault([u8; 20]),
+}
+
+/// What `userRole` says an account address is, as it bears on signing.
+///
+/// # Errors
+/// An address the venue does not know, one that is an agent (an API
+/// wallet, whose address is the signer and never the account), or an
+/// answer this build cannot read.
+pub fn acting_for(body: &str, account: &str) -> Result<ActingFor, String> {
+    match crate::json::field_str(body, "role").as_deref() {
+        Some("user") => Ok(ActingFor::Master),
+        Some("subAccount" | "vault") => Ok(ActingFor::Vault(address_bytes(account)?)),
+        Some("agent") => Err(format!(
+            "{account} is an API wallet; OQ_VENUE_KEY must be the account it trades for"
+        )),
+        Some("missing") => Err(format!("{account} has no account on this deployment")),
+        _ => Err(format!("unreadable userRole answer: {}", truncate(body))),
+    }
+}
+
+fn address_bytes(address: &str) -> Result<[u8; 20], String> {
+    let hex = address.trim_start_matches("0x");
+    let mut out = [0u8; 20];
+    if hex.len() != 40 {
+        return Err(format!("not a 20-byte address: {address}"));
+    }
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let text = core::str::from_utf8(pair).map_err(|_| format!("not hex: {address}"))?;
+        out[i] = u8::from_str_radix(text, 16).map_err(|_| format!("not hex: {address}"))?;
+    }
+    Ok(out)
+}
+
 /// A client for one Hyperliquid deployment.
 pub struct Hyperliquid {
     base: String,
     key: SigningKey,
     /// Master or subaccount whose state the signer is authorised to trade.
     account_address: String,
+    /// Whom an action is signed on behalf of, once the venue has said
+    /// what `account_address` is.
+    acting_for: ActingFor,
     mainnet: bool,
     agent: ureq::Agent,
     /// Asset metadata in index order. Empty until `load_universe`.
@@ -467,6 +515,7 @@ impl Hyperliquid {
             },
             key: signing_key(creds)?,
             account_address,
+            acting_for: ActingFor::Unresolved,
             mainnet,
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(45)))
@@ -482,16 +531,17 @@ impl Hyperliquid {
     /// # Errors
     /// Whatever the transport reports, or a key that cannot sign.
     pub fn post_action(&self, action: &Value, nonce: u64) -> Result<String, VenueError> {
-        let signature = sign_l1_action(&self.key, action, nonce, None, self.mainnet)
+        let vault = match self.acting_for {
+            ActingFor::Unresolved => {
+                return Err(VenueError::Transport(
+                    "the account's role is not resolved; call load_universe first".to_string(),
+                ));
+            }
+            ActingFor::Master => None,
+            ActingFor::Vault(address) => Some(address),
+        };
+        let body = action_body(action, nonce, vault, &self.key, self.mainnet)
             .map_err(VenueError::Transport)?;
-        let mut body = String::from("{\"action\":");
-        body.push_str(&to_json(action));
-        body.push_str(&format!(
-            ",\"nonce\":{nonce},\"signature\":{{\"r\":\"{}\",\"s\":\"{}\",\"v\":{}}}}}",
-            signature.r_hex(),
-            signature.s_hex(),
-            signature.v
-        ));
         let mut response = self
             .agent
             .post(format!("{}/exchange", self.base))
@@ -509,6 +559,37 @@ impl Hyperliquid {
             Err(VenueError::Venue { status, body: text })
         }
     }
+}
+
+/// The `/exchange` request body for a signed action.
+///
+/// The vault address goes into the signature *and* the body, as the
+/// venue's own SDK sends it; one without the other is refused, or worse,
+/// accepted on the signer's master account.
+///
+/// # Errors
+/// A key that cannot sign.
+pub fn action_body(
+    action: &Value,
+    nonce: u64,
+    vault: Option<[u8; 20]>,
+    key: &SigningKey,
+    mainnet: bool,
+) -> Result<String, String> {
+    let signature = sign_l1_action(key, action, nonce, vault, mainnet)?;
+    let mut body = String::from("{\"action\":");
+    body.push_str(&to_json(action));
+    body.push_str(&format!(
+        ",\"nonce\":{nonce},\"signature\":{{\"r\":\"{}\",\"s\":\"{}\",\"v\":{}}}",
+        signature.r_hex(),
+        signature.s_hex(),
+        signature.v
+    ));
+    if let Some(address) = vault {
+        body.push_str(&format!(",\"vaultAddress\":\"{}\"", address_hex(&address)));
+    }
+    body.push('}');
+    Ok(body)
 }
 
 /// The same value as JSON, for the request body.
@@ -556,11 +637,14 @@ pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
             reason: format!("unreadable answer: {}", truncate(body)),
         });
     }
-    // An `err` member at the envelope level is the action failing.
-    if let Some(err) = crate::json::field_str(body, "err") {
+    // The action failing as a whole: `"status":"err"`, with the reason
+    // as the `response` string. This read a key named `err`, which the
+    // venue never sends, so a refused action fell through to "a status
+    // this build does not know".
+    if let Some(reason) = envelope_error(body) {
         return Placed::Rejected(Reject {
             code: None,
-            message: err,
+            message: reason,
         });
     }
     // One status per order in the batch; this adapter sends one.
@@ -588,6 +672,61 @@ pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
             "resting".to_string()
         },
         executed_qty: crate::json::field_str(&entry, "totalSz").unwrap_or_else(|| "0".to_string()),
+    })
+}
+
+/// The reason an action failed as a whole, when it did.
+fn envelope_error(body: &str) -> Option<String> {
+    (crate::json::field_str(body, "status").as_deref() == Some("err"))
+        .then(|| crate::json::field_str(body, "response").unwrap_or_else(|| truncate(body)))
+}
+
+/// What a cancel answer meant.
+///
+/// Not [`classify`]: a placement succeeds as `resting` or `filled`, and a
+/// cancel succeeds as the bare string `"success"` — which the placement
+/// reader did not recognise, so every successful cancel came back
+/// unknown. A refusal is an `error` entry, as for a placement.
+#[must_use]
+pub fn classify_cancel(status: u16, body: &str, client_id: &str) -> Placed {
+    if !(200..300).contains(&status) {
+        return Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!("HTTP {status}: {}", truncate(body)),
+        });
+    }
+    if let Some(reason) = envelope_error(body) {
+        return Placed::Rejected(Reject {
+            code: None,
+            message: reason,
+        });
+    }
+    let Some(statuses) = crate::json::array_field(body, "statuses") else {
+        return Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!("unreadable answer: {}", truncate(body)),
+        });
+    };
+    if let Some(entry) = crate::json::object_containing(&statuses, "\"error\"") {
+        return Placed::Rejected(Reject {
+            code: None,
+            message: crate::json::field_str(&entry, "error").unwrap_or_else(|| truncate(&entry)),
+        });
+    }
+    if statuses.contains("\"success\"") {
+        return Placed::Accepted(crate::exec::OrderAck {
+            venue_id: String::new(),
+            client_id: client_id.to_string(),
+            status: "cancelled".to_string(),
+            executed_qty: "0".to_string(),
+        });
+    }
+    Placed::Unknown(Unresolved {
+        client_id: client_id.to_string(),
+        reason: format!(
+            "a cancel status this build does not know: {}",
+            truncate(body)
+        ),
     })
 }
 
@@ -687,7 +826,20 @@ impl Hyperliquid {
     /// # Errors
     /// Whatever the transport reports, or a meta response with no
     /// universe in it.
+    ///
+    /// Also asks what the account address is — master, subaccount or
+    /// vault — which decides whose account every action is signed for.
+    /// Until it has, nothing is sent.
     pub fn load_universe(&mut self) -> Result<usize, VenueError> {
+        let role = self.info(&format!(
+            r#"{{"type":"userRole","user":"{}"}}"#,
+            self.account_address
+        ))?;
+        self.acting_for =
+            acting_for(&role, &self.account_address).map_err(|reason| VenueError::Malformed {
+                what: "the account's role",
+                body: reason,
+            })?;
         let body = self.info(r#"{"type":"meta"}"#)?;
         let assets = parse_universe_meta(&body);
         if assets.is_empty() {
@@ -925,13 +1077,25 @@ impl crate::exec::Execution for Hyperliquid {
             });
         }
         let size = canonical_decimal(order.qty.0, instrument.qty_scale);
+        // There is no fill-or-kill here; refused rather than sent as
+        // something weaker.
+        let tif = match order.tif {
+            oq_types::TimeInForce::GoodTilCancel => "Gtc",
+            oq_types::TimeInForce::ImmediateOrCancel => "Ioc",
+            oq_types::TimeInForce::FillOrKill => {
+                return Placed::Rejected(Reject {
+                    code: None,
+                    message: "this venue has no fill-or-kill order".to_string(),
+                });
+            }
+        };
         let mut wire = match order_wire(
             asset,
             matches!(order.side, oq_types::Side::Buy),
             &price,
             &size,
             order.reduce_only,
-            "Gtc",
+            tif,
         ) {
             Value::Map(pairs) => pairs,
             other => return unreadable(order, other),
@@ -959,8 +1123,8 @@ impl crate::exec::Execution for Hyperliquid {
         let action = cancel_by_cloid_action(asset, client_id);
         let nonce = u64::try_from(crate::binance::now_ms()).unwrap_or_default();
         match self.post_action(&action, nonce) {
-            Ok(text) => classify(200, &text, client_id),
-            Err(VenueError::Venue { status, body }) => classify(status, &body, client_id),
+            Ok(text) => classify_cancel(200, &text, client_id),
+            Err(VenueError::Venue { status, body }) => classify_cancel(status, &body, client_id),
             Err(e) => Placed::Unknown(Unresolved {
                 client_id: client_id.to_string(),
                 reason: e.to_string(),
@@ -1179,6 +1343,152 @@ mod tests {
             "0x755c40ba9bf05223521753995abb2f73ab3229be8ec921f350cb447e384d8ed8"
         );
         assert_eq!(signature.v, 27);
+    }
+
+    /// hyperliquid-python-sdk, tests/signing_test.py,
+    /// `test_l1_action_signing_matches_with_vault`: the vault address is
+    /// part of what is signed, so an action for a subaccount signed
+    /// without it is an action for another account.
+    #[test]
+    fn the_published_vault_signing_vector() {
+        let action = Value::map(vec![
+            ("type", Value::str("dummy")),
+            ("num", Value::Uint(100_000_000_000)),
+        ]);
+        let vault = address_bytes("0x1719884eb866cb12b2287399b15f7db5e7d775ea").expect("address");
+        let mainnet = sign_l1_action(&key(), &action, 0, Some(vault), true).expect("signed");
+        assert_eq!(
+            mainnet.r_hex(),
+            "0x3c548db75e479f8012acf3000ca3a6b05606bc2ec0c29c50c515066a326239"
+        );
+        assert_eq!(
+            mainnet.s_hex(),
+            "0x4d402be7396ce74fbba3795769cda45aec00dc3125a984f2a9f23177b190da2c"
+        );
+        assert_eq!(mainnet.v, 28);
+        let testnet = sign_l1_action(&key(), &action, 0, Some(vault), false).expect("signed");
+        assert_eq!(
+            testnet.r_hex(),
+            "0xe281d2fb5c6e25ca01601f878e4d69c965bb598b88fac58e475dd1f5e56c362b"
+        );
+        assert_eq!(
+            testnet.s_hex(),
+            "0x7ddad27e9a238d045c035bc606349d075d5c5cd00a6cd1da23ab5c39d4ef0f60"
+        );
+        assert_eq!(testnet.v, 27);
+    }
+
+    /// hyperliquid-docs, exchange endpoint, "Cancel order(s)": the two
+    /// documented answers. The placement reader knew neither, so every
+    /// successful cancel came back unknown.
+    #[test]
+    fn a_cancel_is_read_as_a_cancel() {
+        let ok = r#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#;
+        let refused = r#"{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"error":"Order was never placed, already canceled, or filled."}]}}}"#;
+        assert!(
+            matches!(classify(200, ok, "c"), Placed::Unknown(_)),
+            "the old reading"
+        );
+        assert!(matches!(classify_cancel(200, ok, "c"), Placed::Accepted(_)));
+        match classify_cancel(200, refused, "c") {
+            Placed::Rejected(r) => assert!(r.message.contains("never placed"), "{r:?}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(classify_cancel(500, ok, "c"), Placed::Unknown(_)));
+    }
+
+    /// An action refused as a whole is `"status":"err"` with the reason
+    /// as `response`. The placement reader looked for a key named `err`.
+    #[test]
+    fn an_action_refused_as_a_whole_is_a_rejection() {
+        let body = r#"{"status":"err","response":"User or API Wallet 0x0 does not exist."}"#;
+        for placed in [classify(200, body, "c"), classify_cancel(200, body, "c")] {
+            match placed {
+                Placed::Rejected(r) => assert!(r.message.contains("does not exist"), "{r:?}"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// There is no fill-or-kill on this venue, and one is refused before
+    /// anything is signed rather than sent as a resting `Gtc`.
+    #[test]
+    fn a_fill_or_kill_order_is_refused() {
+        let creds = Credentials::new("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd", TEST_KEY);
+        let mut client = Hyperliquid::at(Endpoint::Testnet, &creds).expect("valid client");
+        client.universe = vec![AssetMeta {
+            name: "BTC".to_string(),
+            sz_decimals: 5,
+        }];
+        let order = crate::exec::NewOrder {
+            symbol: "BTC".to_string(),
+            side: oq_types::Side::Buy,
+            limit_price: Some(oq_types::PriceTicks(6_000_000)),
+            qty: oq_types::QtyLots(100),
+            tif: oq_types::TimeInForce::FillOrKill,
+            client_id: "0x0123456789abcdef0123456789abcdef".to_string(),
+            reduce_only: false,
+            position_side: crate::exec::PositionSide::OneWay,
+        };
+        match crate::exec::Execution::place(&client, &order, &Instrument::linear(1, 5)) {
+            Placed::Rejected(r) => assert!(r.message.contains("fill-or-kill"), "{r:?}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The five answers `userRole` documents, and what each means for
+    /// signing.
+    #[test]
+    fn the_account_role_decides_whose_account_is_traded() {
+        let account = "0x1719884eb866cb12b2287399b15f7db5e7d775ea";
+        let vault = address_bytes(account).expect("address");
+        assert_eq!(
+            acting_for(r#"{"role":"user"}"#, account),
+            Ok(ActingFor::Master)
+        );
+        assert_eq!(
+            acting_for(
+                r#"{"role":"subAccount","data":{"master":"0xabc"}}"#,
+                account
+            ),
+            Ok(ActingFor::Vault(vault))
+        );
+        assert_eq!(
+            acting_for(r#"{"role":"vault"}"#, account),
+            Ok(ActingFor::Vault(vault))
+        );
+        assert!(acting_for(r#"{"role":"agent","data":{"user":"0xabc"}}"#, account).is_err());
+        assert!(acting_for(r#"{"role":"missing"}"#, account).is_err());
+        assert!(acting_for("<html>", account).is_err());
+    }
+
+    /// The vault goes into the body as well as the signature, as the
+    /// venue's SDK sends it.
+    #[test]
+    fn a_vault_action_names_the_vault_in_its_body() {
+        let action = Value::map(vec![("type", Value::str("dummy"))]);
+        let vault = address_bytes("0x1719884eb866cb12b2287399b15f7db5e7d775ea").expect("address");
+        let with = action_body(&action, 1, Some(vault), &key(), true).expect("body");
+        assert!(
+            with.ends_with(r#","vaultAddress":"0x1719884eb866cb12b2287399b15f7db5e7d775ea"}"#),
+            "{with}"
+        );
+        let without = action_body(&action, 1, None, &key(), true).expect("body");
+        assert!(!without.contains("vaultAddress"), "{without}");
+        assert!(without.ends_with("}}"), "{without}");
+    }
+
+    /// Nothing is signed before the role is known: signing without a
+    /// vault would place a subaccount's order in its master.
+    #[test]
+    fn nothing_is_sent_before_the_account_role_is_known() {
+        let creds = Credentials::new("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd", TEST_KEY);
+        let client = Hyperliquid::at(Endpoint::Testnet, &creds).expect("valid client");
+        let action = Value::map(vec![("type", Value::str("dummy"))]);
+        let err = client
+            .post_action(&action, 1)
+            .expect_err("refused before the network");
+        assert!(err.to_string().contains("not resolved"), "{err}");
     }
 
     #[test]

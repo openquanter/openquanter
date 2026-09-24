@@ -148,8 +148,15 @@ pub fn order_request(order: &NewOrder, instrument: &Instrument) -> (&'static str
     );
     match order.limit_price {
         Some(price) => {
+            // Stated rather than left to the default: the default is
+            // good-til-cancelled, and an IOC sent as that rests.
+            let tif = match order.tif {
+                oq_types::TimeInForce::GoodTilCancel => "good_til_cancelled",
+                oq_types::TimeInForce::ImmediateOrCancel => "immediate_or_cancel",
+                oq_types::TimeInForce::FillOrKill => "fill_or_kill",
+            };
             query.push_str(&format!(
-                "&type=limit&price={}",
+                "&type=limit&price={}&time_in_force={tif}",
                 decimal(price.0, instrument.price_scale)
             ));
         }

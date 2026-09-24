@@ -154,8 +154,15 @@ pub fn order_body(order: &NewOrder, instrument: &Instrument, category: &str) -> 
     );
     match order.limit_price {
         Some(price) => {
+            // Stated rather than left to the default, which is `gtc`: an
+            // IOC sent as that rests.
+            let tif = match order.tif {
+                oq_types::TimeInForce::GoodTilCancel => "gtc",
+                oq_types::TimeInForce::ImmediateOrCancel => "ioc",
+                oq_types::TimeInForce::FillOrKill => "fok",
+            };
             body.push_str(&format!(
-                r#","orderType":"limit","price":"{}""#,
+                r#","orderType":"limit","price":"{}","timeInForce":"{tif}""#,
                 decimal(price.0, instrument.price_scale)
             ));
         }
