@@ -148,7 +148,10 @@ impl Book {
                 self.working.push(u.client_id.clone());
                 true
             }
-            "CANCELED" | "EXPIRED" | "REJECTED" => {
+            // `EXPIRED_IN_MATCH` is self-trade prevention ending an order:
+            // an ending like any other, and read as none it held a
+            // working slot for the rest of the run.
+            "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED" => {
                 let before = self.working.len();
                 self.working.retain(|w| w != &u.client_id);
                 before != self.working.len()
@@ -498,5 +501,34 @@ mod fills {
         b.apply(&fill("other-1", 7, "SELL"));
         assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(0));
         assert_eq!(b.duplicates(), 0);
+    }
+}
+
+#[cfg(test)]
+mod stp {
+    use super::*;
+
+    #[test]
+    fn an_order_ended_by_self_trade_prevention_stops_working() {
+        let mut b = Book::owning("oq");
+        let mut u = OrderUpdate {
+            symbol: "BTCUSDT".into(),
+            client_id: "oq-1".into(),
+            venue_id: "1".into(),
+            status: "NEW".into(),
+            last_qty: "0".into(),
+            cumulative_qty: "0".into(),
+            last_price: "0".into(),
+            side: "BUY".into(),
+            position_side: "BOTH".into(),
+            maker: false,
+            trade_id: None,
+            event_ms: 0,
+        };
+        b.apply(&u);
+        assert_eq!(b.working(), 1);
+        u.status = "EXPIRED_IN_MATCH".into();
+        assert!(b.apply(&u));
+        assert_eq!(b.working(), 0);
     }
 }
