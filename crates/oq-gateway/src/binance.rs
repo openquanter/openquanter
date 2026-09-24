@@ -671,6 +671,22 @@ impl Binance {
         match sent {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
+                // A 429 is the warning before the ban: the venue says to
+                // back off, and a client that keeps sending turns it into
+                // a 418 whose length grows with every repeat. Honoured
+                // locally through the same guard a ban uses, for as long
+                // as the venue asks (`Retry-After`) or a minute if it
+                // does not say.
+                if status == 429 {
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<i64>().ok());
+                    let until = cooldown_until(now_ms() + self.clock_offset_ms(), retry_after);
+                    self.banned_until_ms
+                        .fetch_max(until, core::sync::atomic::Ordering::Relaxed);
+                }
                 let body = resp
                     .body_mut()
                     .read_to_string()
@@ -730,6 +746,16 @@ impl Binance {
             .then(|| until - (now_ms() + self.clock_offset_ms()))
             .filter(|remaining| *remaining > 0)
     }
+}
+
+/// When a rate-limit warning's cool-down ends, in venue milliseconds.
+///
+/// `Retry-After` in seconds when the venue gave one — clamped to at
+/// least a second, since a zero would be no cool-down at all — and a
+/// minute when it did not: the venue's request-weight window.
+fn cooldown_until(now_venue_ms: i64, retry_after_s: Option<i64>) -> i64 {
+    let seconds = retry_after_s.map_or(60, |s| s.max(1));
+    now_venue_ms + seconds * 1000
 }
 
 /// The moment a `-1003` says its ban lifts, in venue milliseconds.
@@ -2427,6 +2453,19 @@ mod ban_backoff {
 
     /// The ban is enforced before the request is built, and lifts by
     /// itself when its moment passes.
+    /// The warning before the ban is honoured for as long as the venue
+    /// asks, or its one-minute weight window when it does not say.
+    #[test]
+    fn a_rate_limit_warning_cools_down_for_as_long_as_asked() {
+        assert_eq!(super::cooldown_until(1_000, Some(5)), 6_000);
+        assert_eq!(super::cooldown_until(1_000, None), 61_000);
+        assert_eq!(
+            super::cooldown_until(1_000, Some(0)),
+            2_000,
+            "zero is no cool-down"
+        );
+    }
+
     #[test]
     fn a_standing_ban_refuses_locally_and_then_expires() {
         use core::sync::atomic::Ordering::Relaxed;
