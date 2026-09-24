@@ -361,6 +361,7 @@ fn participation(fills: &[Fill], ticks: &[Tick], window: usize) -> Participation
     let windows = ticks.len().div_ceil(window);
     let mut peak = 0.0f64;
     let mut peak_window = 0usize;
+    let mut measured = 0usize;
     for w in 0..windows {
         let start = w * window;
         let end = (start + window).min(ticks.len());
@@ -377,11 +378,21 @@ fn participation(fills: &[Fill], ticks: &[Tick], window: usize) -> Participation
             .filter(|f| f.stamp.exch.0 >= from && f.stamp.exch.0 <= to)
             .map(|f| f.qty.0)
             .sum();
+        measured += 1;
         let share = traded as f64 / market as f64;
         if share > peak {
             peak = share;
             peak_window = w;
         }
+    }
+
+    // A peak of zero over no windows is not a measurement. It read as
+    // "measured, and the run never moved the market" when no window had
+    // been measured at all — a window of one tick spans no volume.
+    if measured == 0 {
+        return Participation::Unmeasurable(
+            "no window spans two observations with volume between them, so no peak was measured",
+        );
     }
 
     Participation::Measured {
@@ -614,6 +625,12 @@ mod tests {
         ));
         assert!(matches!(
             report(&r, &ticks[..1], 5, 0.01).participation,
+            Participation::Unmeasurable(_)
+        ));
+        // A window of one tick spans no volume, so every window is
+        // skipped and there is no peak to report.
+        assert!(matches!(
+            report(&r, &ticks, 1, 0.01).participation,
             Participation::Unmeasurable(_)
         ));
         let flat: Vec<Tick> = (0..10).map(|i| tick(i, 0)).collect();
