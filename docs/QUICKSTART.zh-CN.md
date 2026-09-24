@@ -230,6 +230,11 @@ cargo run --release -p oq-live --example grid_live -- \
   --symbol BTCUSDT --minutes 30
 ```
 
+环境变量适合在 shell 里用。作为服务运行的进程应改用 systemd 凭据——
+`LoadCredential=OQ_VENUE_KEY:/path/to/file`，密钥同理——存在时优先读取:
+环境变量能被同一用户下的任何进程从 `/proc/<pid>/environ` 读到，还会被
+每个子进程继承。
+
 这是一个真策略——就是"你已经认识的那些策略"里那个网格——对着一个真实
 订单簿,前面挡着风控闸门,内核记着账,journal 记着流水,影子回测在旁边
 同步跑,所以两者之间的差距是**当场被测量**的,而不是事后拿来争论的。
