@@ -40,12 +40,32 @@
 //! mismatch. That failure looks exactly like "there is no data here".
 //!
 //! So the naming rule lives beside the reading rule, and both are here.
+//!
+//! # Decompression is bounded
+//!
+//! A zstd frame can expand without limit: 33 KB of crafted input
+//! decodes to 1 GB, and every byte of it lands in one `Vec`. The files
+//! read here come from an archive another host writes, so a frame is
+//! trusted to expand only as far as real capture data does — measured
+//! at 5x to 10x at the archive's level 9 — with room to spare, and
+//! refused past that instead of taking the machine's memory with it.
 
 use std::io::{self, Read};
 use std::path::Path;
 
 /// zstd's frame magic, little-endian `0xFD2FB528`.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// How far a frame may expand, as a multiple of its compressed size.
+///
+/// Real capture data compresses 5x to 10x; 64x leaves six times the
+/// largest ratio seen and still stops a crafted frame at a small
+/// fraction of what it would expand to.
+const MAX_RATIO: usize = 64;
+
+/// Output any file may reach whatever its size, so a small file that
+/// compresses unusually well is never the one refused.
+const MIN_LIMIT: usize = 64 << 20;
 
 /// The capture extension, before any compression suffix.
 const CAPTURE_EXT: &str = ".oqcap";
@@ -102,24 +122,40 @@ pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         return Ok(raw);
     }
 
-    let mut out = Vec::with_capacity(raw.len() * 4);
-    let mut decoder =
-        ruzstd::decoding::StreamingDecoder::new(io::Cursor::new(&raw)).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {e}", path.display()),
-            )
-        })?;
-    decoder.read_to_end(&mut out).map_err(|e| {
+    decompress(&raw, limit(raw.len()))
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+}
+
+/// The most a frame of `compressed` bytes may decode to.
+fn limit(compressed: usize) -> usize {
+    MIN_LIMIT.max(compressed.saturating_mul(MAX_RATIO))
+}
+
+/// Decode one zstd stream, refusing to produce more than `limit` bytes.
+fn decompress(raw: &[u8], limit: usize) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(raw.len().saturating_mul(4).min(limit));
+    let decoder = ruzstd::decoding::StreamingDecoder::new(io::Cursor::new(raw))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    // One byte past the limit is how an output of exactly `limit` is
+    // told apart from one that would have kept going.
+    let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    decoder.take(cap).read_to_end(&mut out).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "{}: decompression failed after {} bytes: {e}",
-                path.display(),
-                out.len()
-            ),
+            format!("decompression failed after {} bytes: {e}", out.len()),
         )
     })?;
+    if out.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "expands past {limit} bytes, {}x its {} compressed; \
+                 no real capture compresses that well",
+                limit / raw.len().max(1),
+                raw.len()
+            ),
+        ));
+    }
     Ok(out)
 }
 
@@ -177,6 +213,64 @@ mod tests {
             assert_eq!(read(&p).expect("read"), b"hello", "{name}");
             let _ = std::fs::remove_file(&p);
         }
+    }
+
+    /// A frame that expands past its limit is refused, not decoded into
+    /// memory; one that reaches the limit exactly is not.
+    #[test]
+    fn a_frame_that_expands_past_its_limit_is_refused() {
+        let zeros = vec![0u8; 1 << 20];
+        let frame = ruzstd::encoding::compress_to_vec(
+            zeros.as_slice(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        assert!(
+            frame.len() * MAX_RATIO < zeros.len(),
+            "the fixture is a bomb"
+        );
+
+        assert_eq!(
+            decompress(&frame, zeros.len()).expect("at the limit"),
+            zeros
+        );
+        let err = decompress(&frame, zeros.len() - 1).expect_err("past the limit");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(format!("{err}").contains("expands past"), "{err}");
+    }
+
+    /// The limit follows the file's size: a floor so a small, very
+    /// compressible file is never the one refused, and above it a ratio
+    /// well clear of any real capture.
+    #[test]
+    fn the_limit_scales_with_the_compressed_size() {
+        assert_eq!(limit(0), MIN_LIMIT);
+        assert_eq!(
+            limit(33 << 10),
+            MIN_LIMIT,
+            "the 33 KB bomb stops at the floor"
+        );
+        // The largest hourly file measured: 101 MB compressed, 1.1 GB raw.
+        assert!(limit(101_511_938) > 1_113_493_011);
+        assert_eq!(limit(1 << 30), 64 << 30);
+        assert_eq!(limit(usize::MAX), usize::MAX, "saturates, never wraps");
+    }
+
+    /// Through `read`, a small file that compresses far past the ratio
+    /// still opens, because it is under the floor.
+    #[test]
+    fn a_small_very_compressible_file_still_reads() {
+        let small = vec![7u8; 1 << 20];
+        let p = tmp("small.oqcap.zst");
+        std::fs::write(
+            &p,
+            ruzstd::encoding::compress_to_vec(
+                small.as_slice(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            ),
+        )
+        .expect("write");
+        assert_eq!(read(&p).expect("under the floor"), small);
+        let _ = std::fs::remove_file(&p);
     }
 
     /// The hour is `13` whether or not the file has been compressed.
