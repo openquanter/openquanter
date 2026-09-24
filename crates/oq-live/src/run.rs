@@ -227,10 +227,9 @@ where
         return ExitCode::FAILURE;
     }
 
-    // Market data first: it decides the precision and grid that the
-    // order path has to respect, and connecting it before anything is
-    // sent means a feed that will not open stops the run before it
-    // trades rather than after.
+    // Market data first: connecting it before anything is sent means a
+    // feed that will not open stops the run before it trades rather than
+    // after. Its precision is not taken from here — see `scales` below.
     let (mut market, feed_venue) =
         match MarketData::open(venue.id(), deployment, &symbol, Duration::from_millis(200)) {
             Ok(pair) => pair,
@@ -716,7 +715,19 @@ where
     }
     let mut snapshot_retry = Retry::default();
     let mut supervisor = Supervisor::new(Timings::default());
-    let scales = market.scales();
+    // Parsed at the precision of the deployment being traded, not the
+    // table compiled into the feed adapter. The two disagree — this
+    // venue's test deployment quotes quantity to four places where the
+    // table says three — and every message carrying a fourth place was
+    // refused and dropped without a word: the book missed updates, the
+    // tick volume missed trades, and what it did count was in lots ten
+    // times the size of the ones the strategy's thresholds were
+    // converted to.
+    let scales = oq_l2feed::depth::Scales {
+        price: u32::from(instrument.price_scale),
+        qty: u32::from(instrument.qty_scale),
+    };
+    let mut unreadable_depth: u64 = 0;
     let event_time = feed_venue.event_time_reader();
 
     let mut trader = Trader::new(make_strategy(&instrument), session);
@@ -873,10 +884,23 @@ where
                         let seen = now_ns();
                         let at = event_time(&bytes).unwrap_or(seen);
                         let closed = if which == 0 {
-                            feed_venue
-                                .parse_depth(&bytes, scales)
-                                .ok()
-                                .and_then(|u| agg.on_depth(at, seen, &u))
+                            match feed_venue.parse_depth(&bytes, scales) {
+                                Ok(u) => agg.on_depth(at, seen, &u),
+                                // Not a book update: an acknowledgement or
+                                // a control message, which is no loss.
+                                Err(oq_l2feed::depth::ParseError::NotDepth) => None,
+                                // A book update that could not be read is
+                                // a hole in the chain. Counted, and the
+                                // first one said out loud: this used to be
+                                // silent, and silent is how it lasted.
+                                Err(e) => {
+                                    unreadable_depth += 1;
+                                    if unreadable_depth == 1 {
+                                        eprintln!("depth            unreadable update: {e}");
+                                    }
+                                    None
+                                }
+                            }
                         } else {
                             feed_venue
                                 .parse_trade(&bytes, scales)
@@ -1391,14 +1415,15 @@ where
             let c = agg.counts();
             println!(
                 "feed             depth {}, trades {}, ooo {}, quiet {}, pre-trade {}, \
-                 snapshots {}, resyncs {}",
+                 snapshots {}, resyncs {}, unreadable {}",
                 c.depth_applied,
                 c.trades,
                 c.out_of_order,
                 c.quiet_windows,
                 c.windows_before_first_trade,
                 c.snapshots,
-                c.resyncs
+                c.resyncs,
+                unreadable_depth
             );
         }
     }

@@ -27,7 +27,6 @@ use std::time::Instant;
 const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(30);
 use std::io;
 
-use oq_l2feed::depth::Scales;
 use oq_l2feed::session::{Connector, MessageSource};
 use oq_l2feed::venue::{Deployment, Venue};
 use oq_l2feed::ws::WsConnector;
@@ -183,13 +182,12 @@ impl<C: Connector> Stream<C> {
 pub struct MarketData {
     depth: Stream,
     trade: Stream,
-    scales: Scales,
 }
 
 impl MarketData {
     /// # Errors
     /// When the venue is unknown on that deployment, or publishes
-    /// neither stream, or does not list the contract.
+    /// neither stream.
     pub fn open(
         venue_id: &str,
         deployment: Deployment,
@@ -202,13 +200,6 @@ impl MarketData {
                  falling back to another deployment"
             )
         })?;
-        let instrument = venue
-            .instrument(symbol)
-            .ok_or_else(|| format!("{venue_id} does not list {symbol}"))?;
-        let scales = Scales {
-            price: u32::from(instrument.price_scale),
-            qty: u32::from(instrument.qty_scale),
-        };
         // The coarser book where the venue publishes one.
         //
         // This host folds depth into fixed windows, so resolution finer
@@ -229,14 +220,8 @@ impl MarketData {
         let md = Self {
             depth: Stream::open(venue.as_ref(), symbol, depth_stream, read_timeout)?,
             trade: Stream::open(venue.as_ref(), symbol, "trade", read_timeout)?,
-            scales,
         };
         Ok((md, venue))
-    }
-
-    #[must_use]
-    pub const fn scales(&self) -> Scales {
-        self.scales
     }
 
     pub fn depth(&mut self) -> &mut Stream {
