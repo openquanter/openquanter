@@ -445,7 +445,10 @@ where
                     }
                 }
             }
-            last_funding = now;
+            // Forward only. A tick stamped earlier than the last one
+            // would otherwise move the mark back, and the next tick would
+            // settle the stretch between them a second time.
+            last_funding = last_funding.max(now);
         }
 
         tick_count += 1;
@@ -767,6 +770,38 @@ mod tests {
             r.fills[0].stamp
         );
         assert_eq!(r.funding_paid, Cash::ZERO, "flat when it settled");
+    }
+
+    /// A tick stamped earlier than the one before it neither ends the
+    /// run nor settles a stretch twice.
+    #[test]
+    fn a_tick_out_of_order_settles_nothing_twice() {
+        let p = 1_000_000;
+        let funding = oq_margin::FundingSchedule::new(
+            [115, 150]
+                .into_iter()
+                .map(|at| oq_margin::FundingRate {
+                    at: Nanos(at),
+                    rate: oq_types::Ratio::from_percent(1),
+                    mark: PriceTicks(p),
+                })
+                .collect(),
+        );
+        let paid = |at: &[i64]| {
+            let ticks: Vec<Tick> = at.iter().map(|&t| tick_at(t, p, p, p)).collect();
+            run(
+                &config(1_000_000).with_funding(funding.clone()),
+                &mut BuyAndHold {
+                    qty: 10,
+                    done: false,
+                },
+                &ticks,
+            )
+            .funding_paid
+        };
+        let in_order = paid(&[0, 100, 120, 200]);
+        assert_ne!(in_order, Cash::ZERO, "a position was open for both");
+        assert_eq!(paid(&[0, 100, 120, 110, 200]), in_order);
     }
 
     fn falling_market() -> Vec<Tick> {
