@@ -226,3 +226,29 @@ fn the_report_leads_with_the_first_divergence() {
     assert!(rendered.contains("first divergence at fill 10"));
     assert!(rendered.contains("after 10 matching fills"));
 }
+
+/// A baseline that made nothing admits no relative tolerance, so only a
+/// candidate that also made nothing agrees with it.
+#[test]
+fn a_zero_baseline_passes_only_an_exact_match() {
+    let flat = |pnl| RunOutput::new(Vec::new(), pnl);
+    let report = compare(
+        &manifest("abc123"),
+        &flat(0.0),
+        &manifest("abc123"),
+        &flat(250.0),
+    );
+    assert_eq!(report.pnl_relative_error, None);
+    assert!(
+        !report.passes(1e-6),
+        "a candidate that made 250 against a baseline of 0 is not within tolerance"
+    );
+
+    let same = compare(
+        &manifest("abc123"),
+        &flat(0.0),
+        &manifest("abc123"),
+        &flat(0.0),
+    );
+    assert!(same.passes(1e-6));
+}
