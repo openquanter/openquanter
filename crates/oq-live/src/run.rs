@@ -793,6 +793,7 @@ where
     let mut refused = 0_u64;
     let mut unresolved = 0_u64;
     let mut reported_unresolved = 0_u64;
+    let mut reconnect = Retry::default();
     let mut cancel_failed = 0_u64;
     let mut last_tick_report = Instant::now();
     // The last observation, kept so a fill arriving between ticks can be
@@ -1086,7 +1087,7 @@ where
                     act(&action, &mut trader, &symbol);
                 }
             }
-            StreamOutcome::Disconnected(why) => {
+            StreamOutcome::Disconnected(why) if reconnect.due(Instant::now()) => {
                 metrics.disconnects += 1;
                 eprintln!("user stream      lost: {why}");
                 // Reconnect here, where the reader is. `act` cannot: it
@@ -1108,11 +1109,33 @@ where
                 // `Reconcile`, and reconciling first — as this arm did
                 // while the reconnection sat below the loop — asks the
                 // venue to repair books over a link already known dead.
-                for action in supervisor.on_disconnect() {
-                    settle(&action, &mut trader, &mut reader, &symbol);
+                //
+                // Spaced out. A replacement that fails leaves the dead
+                // reader in place, which reports the loss again on the
+                // very next read — so this arm ran once per loop, each
+                // time opening a listen key and reading the account over
+                // REST, with nothing between the attempts. That is the
+                // request pattern a venue answers with a ban, and a ban
+                // also blocks the cancels a halt needs.
+                let now_instant = Instant::now();
+                if reconnect.due(now_instant) {
+                    for action in supervisor.on_disconnect() {
+                        if matches!(action, Action::Reconnect) {
+                            if reopen_user_stream(trader.venue().as_ref(), &mut reader) {
+                                reconnect.succeeded();
+                            } else {
+                                reconnect.failed(now_instant);
+                            }
+                        } else {
+                            settle(&action, &mut trader, &mut reader, &symbol);
+                        }
+                    }
                 }
             }
-            StreamOutcome::Idle | StreamOutcome::Ignored => {}
+            // Lost, and waiting out the interval before the next
+            // attempt. Neither counted nor printed again: it is the same
+            // loss, reported by a reader already known dead.
+            StreamOutcome::Disconnected(_) | StreamOutcome::Idle | StreamOutcome::Ignored => {}
         }
 
         // Placements whose outcome could not be established, reported to
@@ -1723,7 +1746,9 @@ fn settle<S: Strategy>(
     symbol: &str,
 ) {
     match action {
-        Action::Reconnect => reopen_user_stream(trader.venue().as_ref(), reader),
+        Action::Reconnect => {
+            reopen_user_stream(trader.venue().as_ref(), reader);
+        }
         other => act(other, trader, symbol),
     }
 }
@@ -1734,7 +1759,7 @@ fn settle<S: Strategy>(
 /// condemned and will condemn itself again on its next read, which is a
 /// retry every read timeout rather than a process that gave up on the
 /// one attempt it happened to make during an outage.
-fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) {
+fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) -> bool {
     match venue.open_user_stream() {
         Ok(fresh) => match UserStreamReader::connect(&fresh, USER_STREAM_READ_TIMEOUT) {
             Ok(r) => {
@@ -1746,10 +1771,50 @@ fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) {
                 // recovery leaves a reader unable to tell whether it is
                 // still down, which is the question they opened it for.
                 println!("user stream      reconnected");
+                true
             }
-            Err(e) => eprintln!("user stream      reconnect FAILED: {e}"),
+            Err(e) => {
+                eprintln!("user stream      reconnect FAILED: {e}");
+                false
+            }
         },
-        Err(e) => eprintln!("user stream      reopen FAILED: {e}"),
+        Err(e) => {
+            eprintln!("user stream      reopen FAILED: {e}");
+            false
+        }
+    }
+}
+
+/// The spacing between attempts to replace a lost account stream.
+///
+/// A second after the first failure, doubling to a minute. Reset by a
+/// replacement that works, so a stream that drops once a day is not
+/// held to yesterday's interval.
+#[derive(Debug, Default)]
+struct Retry {
+    wait: Duration,
+    next: Option<Instant>,
+}
+
+impl Retry {
+    const FIRST: Duration = Duration::from_secs(1);
+    const LONGEST: Duration = Duration::from_secs(60);
+
+    fn due(&self, now: Instant) -> bool {
+        self.next.is_none_or(|next| now >= next)
+    }
+
+    fn failed(&mut self, now: Instant) {
+        self.wait = if self.next.is_none() {
+            Self::FIRST
+        } else {
+            (self.wait * 2).min(Self::LONGEST)
+        };
+        self.next = Some(now + self.wait);
+    }
+
+    fn succeeded(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -2778,5 +2843,39 @@ mod symbol_filter {
     fn a_report_about_this_symbol_is_whatever_its_case() {
         assert!(reports_on(&report("BTCUSDT"), "BTCUSDT"));
         assert!(reports_on(&report("btcusdt"), "BTCUSDT"));
+    }
+}
+
+#[cfg(test)]
+mod reconnect_spacing {
+    use super::Retry;
+    use core::time::Duration;
+    use std::time::Instant;
+
+    #[test]
+    fn failures_space_attempts_out_to_a_minute_and_success_resets() {
+        let t0 = Instant::now();
+        let mut r = Retry::default();
+        assert!(r.due(t0), "the first attempt is immediate");
+
+        let mut waits = Vec::new();
+        let mut now = t0;
+        for _ in 0..9 {
+            r.failed(now);
+            waits.push(r.wait.as_secs());
+            assert!(!r.due(now), "not again at once");
+            now += r.wait;
+            assert!(r.due(now));
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+
+        r.succeeded();
+        assert!(r.due(now));
+        r.failed(now);
+        assert_eq!(
+            r.wait,
+            Duration::from_secs(1),
+            "a stream that recovered starts over"
+        );
     }
 }
