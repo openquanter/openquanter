@@ -121,7 +121,8 @@ pub struct ParityReport {
     pub fill_counts: (usize, usize),
     /// Realized P&L of each run.
     pub pnl: (f64, f64),
-    /// Relative P&L error, or `None` when the baseline P&L is zero.
+    /// Relative P&L error, or `None` when the baseline P&L is zero and a
+    /// relative error has no meaning.
     pub pnl_relative_error: Option<f64>,
 }
 
@@ -134,7 +135,15 @@ impl ParityReport {
     pub fn passes(&self, pnl_tolerance: f64) -> bool {
         self.baseline_status.permits_behavioral_conclusions()
             && self.differences.is_empty()
-            && self.pnl_relative_error.is_none_or(|e| e <= pnl_tolerance)
+            && match self.pnl_relative_error {
+                Some(e) => e <= pnl_tolerance,
+                // A zero baseline admits no relative tolerance, so only an
+                // exact match agrees. Reading "no relative error" as "within
+                // tolerance" passed a candidate that made any amount against
+                // a baseline that made nothing — "cannot tell" rendered as
+                // "they agree".
+                None => self.pnl.1 == self.pnl.0,
+            }
     }
 }
 
