@@ -72,6 +72,59 @@ impl Strategy for Quoter {
     }
 }
 
+/// Re-quotes a bid under the market every twenty observations, whatever
+/// it believes it has working, so only a halt can stop it from sending.
+struct Insistent {
+    next: u64,
+    last: Option<OrderId>,
+    ticks: u64,
+}
+
+impl Strategy for Insistent {
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+        self.ticks += 1;
+        if ctx.tick.last.0 == 0 || self.ticks % 20 != 0 {
+            return;
+        }
+        if let Some(id) = self.last.take() {
+            out.push(Intent::Cancel(id));
+        }
+        self.next += 1;
+        let id = OrderId::new(self.next);
+        // Closes what it holds, opens when flat: the position stays
+        // inside the limit, so only a halt stops the sending.
+        let last = ctx.tick.last.0;
+        let intent = if ctx.position.0 > 0 {
+            match ctx.limit(id, Side::Sell, PriceTicks(last + 3), QtyLots(2)) {
+                Intent::Limit {
+                    instrument,
+                    id,
+                    side,
+                    price,
+                    qty,
+                    ..
+                } => Intent::Limit {
+                    instrument,
+                    id,
+                    side,
+                    price,
+                    qty,
+                    offset: oq_types::Offset::Close,
+                },
+                other => other,
+            }
+        } else {
+            ctx.limit(id, Side::Buy, PriceTicks(last - 3), QtyLots(2))
+        };
+        out.push(intent);
+        self.last = Some(id);
+    }
+
+    fn name(&self) -> &str {
+        "insistent"
+    }
+}
+
 fn dir(tag: &str, seed: u64) -> PathBuf {
     let d = std::env::temp_dir().join(format!("oq-dst-{tag}-{seed}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -86,6 +139,16 @@ fn simulate(tag: &str, seed: u64, minutes: i64) -> (Sim, ExitCode, Vec<u8>) {
 }
 
 fn simulate_with(tag: &str, seed: u64, minutes: i64, faults: Faults) -> (Sim, ExitCode, Vec<u8>) {
+    simulate_strategy(tag, seed, minutes, faults, false)
+}
+
+fn simulate_strategy(
+    tag: &str,
+    seed: u64,
+    minutes: i64,
+    faults: Faults,
+    insistent: bool,
+) -> (Sim, ExitCode, Vec<u8>) {
     let root = dir(tag, seed);
     let sim = Sim::new(SimConfig {
         seed,
@@ -123,16 +186,29 @@ fn simulate_with(tag: &str, seed: u64, minutes: i64, faults: Faults) -> (Sim, Ex
         },
     };
     let env = SimEnv::new(&sim);
-    let code = run_on(
-        sim.account(),
-        |_| Quoter {
-            next: 0,
-            resting: None,
-            ticks: 0,
-        },
-        &cfg,
-        &env,
-    );
+    let code = if insistent {
+        run_on(
+            sim.account(),
+            |_| Insistent {
+                next: 0,
+                last: None,
+                ticks: 0,
+            },
+            &cfg,
+            &env,
+        )
+    } else {
+        run_on(
+            sim.account(),
+            |_| Quoter {
+                next: 0,
+                resting: None,
+                ticks: 0,
+            },
+            &cfg,
+            &env,
+        )
+    };
     let bytes = std::fs::read(&journal).expect("a journal was written");
     (sim, code, bytes)
 }
@@ -240,9 +316,37 @@ fn a_misbehaving_venue_leaves_the_journal_true() {
         unknown_placement: 20_000,
         rate_limited: 20_000,
         partial_fill: 200_000,
+        silent_fill_after: None,
     };
     for seed in 1..=12 {
         let (sim, code, _) = simulate_with("faults", seed, 10, faults);
         assert_invariants("faults", seed, &sim, code);
     }
+}
+
+/// An account that moves with nothing to explain it is state the process
+/// does not know, and a process that does not know its state must stop
+/// sending orders. The venue fills an order silently five minutes in —
+/// no report, and nothing when asked — and from some point after it the
+/// venue must receive nothing new.
+#[test]
+fn an_account_that_moves_unexplained_stops_the_trading() {
+    let faults = Faults {
+        silent_fill_after: Some(Duration::from_secs(5 * 60)),
+        ..Faults::default()
+    };
+    let (sim, _code, _) = simulate_strategy("silent", 41, 40, faults, true);
+    let silent = sim.silent_at().expect("the silent fill happened");
+    let last = *sim.placed_at().last().expect("it traded");
+    eprintln!("silent fill at {silent:?}, last order sent at {last:?}");
+    assert!(
+        last <= silent + Duration::from_secs(20 * 60),
+        "still sending orders {:?} after the account moved unexplained",
+        last - silent
+    );
+    assert!(
+        sim.resting().is_empty(),
+        "left resting: {:?}",
+        sim.resting()
+    );
 }
