@@ -33,6 +33,7 @@ oq-parity — compare a run against a baseline
 
 USAGE:
     oq-parity <BASELINE.run> <CANDIDATE.run> [--pnl-tolerance FRACTION]
+    oq-parity markout <RUN.run> <TICKS.oqtk> [<OTHER.run>]
 
 Both files are written by oq_parity::wire. Each carries its own manifest,
 so a baseline cannot be separated from the experiment it describes.
@@ -55,6 +56,9 @@ fn main() -> ExitCode {
         } else {
             ExitCode::SUCCESS
         };
+    }
+    if args[0] == "markout" {
+        return markout(&args[1..]);
     }
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     if positional.len() != 2 {
@@ -164,6 +168,88 @@ fn main() -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
+
+/// Where the price went after each fill, at 1 s, 10 s and 60 s, against
+/// the traded price in a tick file — and, given a second run, how much
+/// better or worse its fills fared than the first's.
+///
+/// A diagnostic, and the exit code says only whether it could be read:
+/// `0` printed, `2` wrong arguments, `3` a file that would not read.
+fn markout(args: &[String]) -> ExitCode {
+    use oq_parity::markout::{DEFAULT_HORIZONS, Markout, Point, contrast, markout};
+    if !(2..=3).contains(&args.len()) {
+        eprintln!("oq-parity markout: needs a run, a tick file, and optionally a second run");
+        return ExitCode::from(2);
+    }
+    let load = |path: &str| -> Result<Run, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        Run::parse(&text).map_err(|e| format!("{path}: {e}"))
+    };
+    let measure = |run: &Run| -> Result<Vec<Markout>, String> {
+        let reader = oq_data::ticks::TickReader::open(std::path::Path::new(&args[1]))
+            .map_err(|e| format!("{}: {e}", args[1]))?;
+        let mut failed = None;
+        // Stops at the first bad record: a path that goes on past one is
+        // a path whose remaining prices have not been shown to be right.
+        let path = reader.map_while(|r| match r {
+            Ok(t) => Some(Point {
+                at: oq_parity::Nanos(t.stamp.exch.0),
+                price: t.last,
+            }),
+            Err(e) => {
+                failed = Some(e);
+                None
+            }
+        });
+        let out = markout(&run.output.fills, path, &DEFAULT_HORIZONS);
+        match failed {
+            Some(e) => Err(format!("{}: {e}", args[1])),
+            None => Ok(out),
+        }
+    };
+    let mut sets = Vec::new();
+    for path in std::iter::once(&args[0]).chain(args.get(2)) {
+        match load(path).and_then(|run| measure(&run)) {
+            Ok(m) => sets.push((path.clone(), m)),
+            Err(e) => {
+                eprintln!("oq-parity: {e}");
+                return ExitCode::from(3);
+            }
+        }
+    }
+    for (path, set) in &sets {
+        println!("markout          {path}");
+        for m in set {
+            let secs = m.horizon().0 / 1_000_000_000;
+            match m {
+                Markout::Measured(d) => println!(
+                    "  {secs:>3} s  {:>6} fills  mean {:+8.2} bp  median {:+8.2}  \
+                     p10 {:+8.2}  p90 {:+8.2}  adverse {:>5.1}%",
+                    d.samples,
+                    d.mean_bps,
+                    d.median_bps,
+                    d.p10_bps,
+                    d.p90_bps,
+                    d.adverse_share * 100.0
+                ),
+                Markout::TooFew { samples, .. } => {
+                    println!("  {secs:>3} s  {samples:>6} fills  too few to say anything")
+                }
+            }
+        }
+    }
+    if let [(a, first), (b, second)] = &sets[..] {
+        println!("contrast         {b} against {a}");
+        for (horizon, difference) in contrast(first, second) {
+            let secs = horizon.0 / 1_000_000_000;
+            match difference {
+                Some(d) => println!("  {secs:>3} s  {d:+8.2} bp"),
+                None => println!("  {secs:>3} s  cannot tell: too few fills on one side"),
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// The first twelve characters of a hash, which is what a person reads.

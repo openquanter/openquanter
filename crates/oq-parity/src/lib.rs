@@ -19,6 +19,7 @@
 pub mod attribution;
 pub mod diff;
 pub mod manifest;
+pub mod markout;
 pub mod record;
 pub mod wire;
 
