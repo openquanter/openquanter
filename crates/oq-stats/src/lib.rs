@@ -37,7 +37,8 @@ pub enum StatsError {
     ZeroVariance,
     /// A performance matrix was ragged or empty.
     MalformedMatrix(&'static str),
-    /// The number of CSCV splits must be even and at least 4.
+    /// The number of CSCV splits must be even, at least 4 and at most
+    /// [`pbo::MAX_BLOCKS`].
     InvalidSplitCount { got: usize },
     /// An input was NaN or infinite.
     NotFinite(&'static str),
@@ -52,7 +53,11 @@ impl core::fmt::Display for StatsError {
             Self::ZeroVariance => write!(f, "sample has zero variance; Sharpe ratio is undefined"),
             Self::MalformedMatrix(why) => write!(f, "malformed performance matrix: {why}"),
             Self::InvalidSplitCount { got } => {
-                write!(f, "split count must be even and at least 4, got {got}")
+                write!(
+                    f,
+                    "split count must be even, at least 4 and at most {}, got {got}",
+                    crate::pbo::MAX_BLOCKS
+                )
             }
             Self::NotFinite(what) => write!(f, "{what} must be finite"),
         }
