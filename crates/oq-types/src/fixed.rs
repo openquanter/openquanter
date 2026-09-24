@@ -96,8 +96,21 @@ impl Cash {
     /// differs from the venue's produces a slow drift that only shows up
     /// after thousands of fills.
     #[must_use]
+    ///
+    /// Saturating, as every other operation here is. The product fits in
+    /// `i128`, but the quotient need not fit back in `i64`, and `as`
+    /// wraps it: a large notional scaled by a large ratio — a funding
+    /// spike on a big position — came back with its sign flipped, a
+    /// charge that paid.
     pub const fn scaled(self, ratio: Ratio) -> Self {
-        Self((self.0 as i128 * ratio.0 as i128 / RATIO_SCALE as i128) as i64)
+        let v = self.0 as i128 * ratio.0 as i128 / RATIO_SCALE as i128;
+        Self(if v > i64::MAX as i128 {
+            i64::MAX
+        } else if v < i64::MIN as i128 {
+            i64::MIN
+        } else {
+            v as i64
+        })
     }
 
     /// Whole quote-currency units, for display only.
@@ -244,5 +257,23 @@ mod tests {
         let qty = QtyLots(100_000);
         let value = price.notional(qty, 100_000, 1_000_000);
         assert!(value.0 > 0, "notional must stay positive, got {value:?}");
+    }
+}
+
+#[cfg(test)]
+mod scaled_saturates {
+    use super::{Cash, Ratio};
+
+    /// A quotient past `i64` saturates rather than wrapping into the
+    /// opposite sign.
+    #[test]
+    fn a_scaled_amount_too_large_to_hold_saturates_with_its_sign() {
+        let huge = Cash(i64::MAX / 2);
+        assert_eq!(huge.scaled(Ratio::from_percent(1_000)), Cash(i64::MAX));
+        assert_eq!(
+            huge.neg().scaled(Ratio::from_percent(1_000)),
+            Cash(i64::MIN)
+        );
+        assert_eq!(Cash(1_000).scaled(Ratio::from_percent(50)), Cash(500));
     }
 }
