@@ -1404,6 +1404,35 @@ impl crate::account::Account for Binance {
         Ok(Some(oq_types::Cash(cash)))
     }
 
+    /// Seven days, the furthest one `startTime` reaches, paged.
+    fn trade_history(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<Vec<crate::account::AccountTrade>>, VenueError> {
+        const WEEK_MS: i64 = 7 * 24 * 3_600_000;
+        let since = now_ms() + self.clock_offset_ms() - WEEK_MS;
+        let mut trades: Vec<crate::account::AccountTrade> = self
+            .my_trades(symbol, Some(since))?
+            .into_iter()
+            .map(|t| crate::account::AccountTrade {
+                time_ms: t.time_ms,
+                trade_id: t.id,
+                order_id: t.order_id,
+                side: if t.side.eq_ignore_ascii_case("BUY") {
+                    Side::Buy
+                } else {
+                    Side::Sell
+                },
+                position_side: t.position_side,
+                qty: t.qty,
+                price: t.price,
+                maker: t.maker,
+            })
+            .collect();
+        trades.sort_by_key(|t| (t.time_ms, t.trade_id));
+        Ok(Some(trades))
+    }
+
     fn id(&self) -> &'static str {
         // Matches the market-data side's identifier for the same venue,
         // so a run's records and its archive file under one name.

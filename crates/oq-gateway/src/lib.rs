@@ -64,7 +64,7 @@ pub mod snapshot;
 pub mod stream;
 pub mod watch;
 
-pub use account::Account;
+pub use account::{Account, AccountTrade};
 pub use binance::parse_user_event;
 pub use binance::{
     AccountSnapshot, Binance, Dialect, OpenOrder, PositionSnapshot, Trade, VenueError,
