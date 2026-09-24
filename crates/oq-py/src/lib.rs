@@ -196,8 +196,16 @@ fn deflated_sharpe_ratio(
 
 #[pyfunction]
 #[pyo3(signature = (columns, n_blocks = 16))]
-fn probability_of_backtest_overfitting(columns: Vec<Vec<f64>>, n_blocks: usize) -> PyResult<f64> {
-    pure::probability_of_backtest_overfitting(&columns, n_blocks).map_err(to_py)
+fn probability_of_backtest_overfitting(
+    py: Python<'_>,
+    columns: Vec<Vec<f64>>,
+    n_blocks: usize,
+) -> PyResult<f64> {
+    // Without the interpreter lock, as `run` is: the work is every way
+    // of choosing half the blocks, and holding the lock through it froze
+    // every other Python thread and ignored Ctrl-C until it finished.
+    py.detach(|| pure::probability_of_backtest_overfitting(&columns, n_blocks))
+        .map_err(to_py)
 }
 
 #[pyfunction]
