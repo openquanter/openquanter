@@ -127,10 +127,15 @@ impl FundingSchedule {
     /// closed-closed interval produces is invisible in a summary and
     /// obvious only in the tail.
     #[must_use]
+    ///
+    /// An interval that runs backwards — a later timestamp followed by an
+    /// earlier one, which merged sources and exchange clock jitter both
+    /// produce — holds nothing. It used to slice out of bounds and end
+    /// the run.
     pub fn between(&self, from: Nanos, to: Nanos) -> &[FundingRate] {
         let start = self.rates.partition_point(|r| r.at <= from);
         let end = self.rates.partition_point(|r| r.at <= to);
-        &self.rates[start..end]
+        self.rates.get(start..end).unwrap_or(&[])
     }
 
     /// The same schedule with a multiplier applied over a window.
@@ -283,5 +288,22 @@ mod tests {
             s.accrue(BTC, QtyLots(10), Nanos::ZERO, Nanos::from_secs(86_400)),
             Cash::ZERO
         );
+    }
+}
+
+#[cfg(test)]
+mod backwards {
+    use super::{FundingRate, FundingSchedule};
+    use oq_types::{Nanos, PriceTicks, Ratio};
+
+    #[test]
+    fn an_interval_that_runs_backwards_holds_nothing() {
+        let s = FundingSchedule::new(vec![FundingRate {
+            at: Nanos(50),
+            rate: Ratio::from_percent(1),
+            mark: PriceTicks(1),
+        }]);
+        assert!(s.between(Nanos(100), Nanos(10)).is_empty());
+        assert_eq!(s.between(Nanos(10), Nanos(100)).len(), 1);
     }
 }
