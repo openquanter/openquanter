@@ -548,9 +548,18 @@ impl<E: Execution> Session<E> {
                     self.book.on_sent(&a.client_id);
                     Submission::Sent(a.client_id)
                 }
-                Ok(None) => Submission::Rejected(
-                    "the order never reached the venue; it may be sent again".to_string(),
-                ),
+                // Not found yet is not never landed. The request may
+                // still be queued behind the gateway that failed to
+                // answer; the venue's not having it *now* licenses
+                // nothing. Kept unresolved and asked again once the
+                // request's own recvWindow has certainly passed, after
+                // which the venue refuses it if it has not processed it.
+                Ok(None) => Submission::Unresolved {
+                    client_id: client_id.clone(),
+                    why: "the venue does not have it yet; asked again once the request \
+                          can no longer be accepted"
+                        .to_string(),
+                },
                 Err(e) => Submission::Unresolved {
                     client_id: client_id.clone(),
                     why: e.to_string(),

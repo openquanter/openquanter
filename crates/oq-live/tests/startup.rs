@@ -180,9 +180,11 @@ fn timed_out_entry_does_not_query_an_old_process_order() {
     .unwrap_or_else(|e| panic!("{e}"))
     .with_order_id_range(10_000..=20_000)
     .unwrap_or_else(|e| panic!("{e}"));
+    // Not found under its own id, so still unresolved; what matters here
+    // is which id was asked about.
     assert!(matches!(
         s.submit(buy(1), PriceTicks(6_000_000), Nanos(0)),
-        Submission::Rejected(_)
+        Submission::Unresolved { .. }
     ));
     assert_eq!(*s.venue().queried.borrow(), vec!["live-10000"]);
     assert_eq!(s.book().working(), 0);
@@ -319,7 +321,13 @@ fn what_the_gate_approved_is_what_gets_sent() {
 }
 
 #[test]
-fn an_unknown_placement_the_venue_never_saw_may_be_sent_again() {
+/// Not found at once is not never landed.
+///
+/// The request may still be queued behind the gateway that failed to
+/// answer. Reading the venue's not having it yet as a refusal licensed a
+/// resend, which is how one order becomes two. It stays unresolved and
+/// is asked about again once the request can no longer be accepted.
+fn an_unknown_placement_the_venue_does_not_have_yet_stays_unresolved() {
     let venue = Recording::answering(
         Placed::Unknown(oq_gateway::Unresolved {
             client_id: "live-1".into(),
@@ -329,7 +337,7 @@ fn an_unknown_placement_the_venue_never_saw_may_be_sent_again() {
     );
     let mut s = session(venue, &[], &[], &[]).expect("starts");
     match s.submit(buy(1), PriceTicks(6_000_000), Nanos(0)) {
-        Submission::Rejected(why) => assert!(why.contains("never reached"), "{why}"),
+        Submission::Unresolved { client_id, .. } => assert_eq!(client_id, "live-1"),
         other => panic!("{other:?}"),
     }
 }

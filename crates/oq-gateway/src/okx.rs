@@ -504,6 +504,13 @@ pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
     let order_code = datum.as_deref().and_then(|d| field_str(d, "sCode"));
 
     match (envelope_code(body).as_deref(), order_code.as_deref()) {
+        // "API endpoint request timeout (does not mean that the request
+        // was successful or failed, please check the request result)" —
+        // the venue's own words for 50004. Unknown, not refused.
+        (Some("50004"), _) | (_, Some("50004")) => Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!("request timed out at the venue: {}", truncate(body)),
+        }),
         // The only shape that means the order exists.
         (Some("0"), Some("0") | None) => ack_from(body, client_id),
         // The request was fine, the order was not. The per-order message
@@ -740,6 +747,15 @@ impl Execution for Okx {
     fn order_status(&self, symbol: &str, client_id: &str) -> Result<Option<OrderAck>, VenueError> {
         let path = format!("/api/v5/trade/order?instId={symbol}&clOrdId={client_id}");
         let text = self.send("GET", &path, "")?;
+        // An error envelope other than "does not exist" is the venue
+        // failing to answer, delivered as HTTP 200. Read as "no such
+        // order" it licensed a resend of an order that may be resting.
+        if let Some(code) = envelope_code(&text)
+            && code != "0"
+            && code != "51603"
+        {
+            return Err(malformed("order status", &text));
+        }
         Ok(order_from_query(&text, client_id))
     }
 }
@@ -2495,5 +2511,18 @@ mod tests {
         let body = r#"{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"oq0001","state":"mmp_canceled","accFillSz":"0"}]}"#;
         let ack = order_from_query(body, "oq0001").expect("exists");
         assert_eq!(ack.status, "mmp_canceled");
+    }
+
+    /// "Does not mean that the request was successful or failed" — the
+    /// venue's own description of 50004. Unknown, not refused.
+    #[test]
+    fn a_request_timeout_at_the_venue_is_unknown() {
+        for body in [
+            r#"{"code":"50004","msg":"API endpoint request timeout","data":[]}"#,
+            r#"{"code":"1","msg":"","data":[{"clOrdId":"oq0001","ordId":"","sCode":"50004","sMsg":"timeout"}]}"#,
+        ] {
+            let p = classify(200, body, "oq0001");
+            assert!(matches!(p, Placed::Unknown(_)), "{body}: got {p:?}");
+        }
     }
 }

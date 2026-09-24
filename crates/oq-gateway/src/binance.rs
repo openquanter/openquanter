@@ -839,6 +839,20 @@ pub fn classify(status: u16, body: &str, client_id: &str) -> Placed {
             reason: format!("venue returned {status}"),
         });
     }
+    // Codes the venue documents as "execution status unknown": the
+    // request timed out or the reply was lost somewhere behind the
+    // gateway, and the order may have reached the matching engine. A
+    // refusal would license a resend, which is how one order becomes two.
+    // -1007 arrives as HTTP 408, so the 5xx test above never saw it.
+    if let Some(code @ (-1006 | -1007)) = field_i64(body, "code") {
+        return Placed::Unknown(Unresolved {
+            client_id: client_id.to_string(),
+            reason: format!(
+                "venue returned {status} code {code}: {}",
+                field_str(body, "msg").unwrap_or_default()
+            ),
+        });
+    }
     // A 4xx carrying the venue's own error code is a decision: the
     // order does not exist, and an identical retry gets an identical
     // refusal.
@@ -1563,6 +1577,26 @@ mod order_entry {
                 assert_eq!(r.message, "Margin is insufficient.");
             }
             other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    /// The venue's own words for these: "execution status unknown". Read
+    /// as a refusal, the order may be resting while the strategy sends it
+    /// again. -1007 arrives as HTTP 408, which the 5xx test never saw.
+    #[test]
+    fn a_timeout_whose_execution_status_is_unknown_is_not_a_refusal() {
+        for (status, body) in [
+            (
+                408,
+                r#"{"code":-1007,"msg":"Timeout waiting for response from backend server. Send status unknown; execution status unknown."}"#,
+            ),
+            (
+                400,
+                r#"{"code":-1006,"msg":"An unexpected response was received from the message bus. Execution status unknown."}"#,
+            ),
+        ] {
+            let p = classify(status, body, "oq-1");
+            assert!(matches!(p, Placed::Unknown(_)), "{body}: got {p:?}");
         }
     }
 
