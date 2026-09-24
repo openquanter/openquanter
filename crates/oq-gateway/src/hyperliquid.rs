@@ -58,8 +58,6 @@
 //! reports it as a missing wallet. There is a guard for that below and
 //! it is written from someone else's incident, not from one here.
 
-use core::time::Duration;
-
 use k256::ecdsa::{RecoveryId, SigningKey, signature::hazmat::PrehashSigner};
 use sha3::{Digest, Keccak256};
 
@@ -517,11 +515,7 @@ impl Hyperliquid {
             account_address,
             acting_for: ActingFor::Unresolved,
             mainnet,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(45)))
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: crate::http::venue_agent(),
             universe: Vec::new(),
         })
     }

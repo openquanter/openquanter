@@ -50,8 +50,6 @@
 //! goes into the signature is written here as the one the venue's
 //! examples use, and a first real run is what confirms it.
 
-use core::time::Duration;
-
 use oq_hash::hmac::hmac_sha512;
 use oq_types::Instrument;
 
@@ -103,15 +101,11 @@ impl Kraken {
             .ok()
             .and_then(crate::b64::decode)
             .ok_or_else(|| "this venue's API secret is base64 and this one is not".to_string())?;
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(45)))
-            .http_status_as_error(false)
-            .build();
         Ok(Self {
             base: base.into(),
             creds,
             secret,
-            agent: config.into(),
+            agent: crate::http::venue_agent(),
         })
     }
 }
