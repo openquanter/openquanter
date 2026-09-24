@@ -113,7 +113,20 @@ impl Belief {
                     b.qty_scale = qty_scale;
                 }
                 Some(Record::Reconciled { legs, .. }) => {
+                    // The venue's whole position at a process's start, and
+                    // it already contains every fill before it. So it
+                    // replaces what the journal had built, rather than
+                    // adding to it: a journal a restarted process appended
+                    // to counted the first run's position twice. Nothing
+                    // earlier is resting either — a process starts only
+                    // with no order on the venue.
                     b.adopted = true;
+                    b.position_lots = 0;
+                    b.entry_ticks = 0;
+                    b.hedged = false;
+                    accepted.clear();
+                    filled.clear();
+                    withdrawn.clear();
                     let mut longs = false;
                     let mut shorts = false;
                     for (_symbol, side, lots, entry) in legs {
@@ -126,7 +139,7 @@ impl Belief {
                         };
                         b.apply(signed, entry);
                     }
-                    b.hedged |= longs && shorts;
+                    b.hedged = longs && shorts;
                 }
                 Some(Record::Submitted {
                     client_id,
