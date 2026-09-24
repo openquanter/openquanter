@@ -995,15 +995,24 @@ impl Kernel {
                         id: OrderId::new(0),
                         reason: RejectReason::UnroutableObservation,
                     });
-                } else if !self.state.holding().qty.is_zero() {
-                    let settlement = FundingRate::new(at, rate, mark)
-                        .settle(self.state.holding().contract, self.state.holding().qty);
-                    self.state.credit(settlement.amount);
-                    self.state.funding = self.state.funding.add(settlement.amount);
-                    self.outputs.push(Output::Funded {
-                        amount: settlement.amount,
-                        at,
-                    });
+                } else if !self.state.is_flat() {
+                    // Both legs settle. Under hedge accounting the short
+                    // is its own position in `short_qty`, and reading
+                    // only `qty` let a short-only account neither pay nor
+                    // receive: a strategy whose edge was collecting
+                    // funding on its shorts showed none of it, and one
+                    // paying it showed none of the cost.
+                    let rate_at = FundingRate::new(at, rate, mark);
+                    let holding = self.state.holding();
+                    let mut amount = Cash::ZERO;
+                    for qty in [holding.qty, holding.short_qty] {
+                        if !qty.is_zero() {
+                            amount = amount.add(rate_at.settle(holding.contract, qty).amount);
+                        }
+                    }
+                    self.state.credit(amount);
+                    self.state.funding = self.state.funding.add(amount);
+                    self.outputs.push(Output::Funded { amount, at });
                     // Funding can be what pushes a position over the
                     // edge, so the check runs here too rather than
                     // waiting for the next tick.
@@ -2240,5 +2249,58 @@ mod every_holding {
             }]
         ));
         assert_eq!(k.state().funding, Cash::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod hedged_funding {
+    use super::*;
+    use oq_types::Ratio;
+
+    fn hedged(long: i64, short: i64) -> Kernel {
+        let mut s = State::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(20_000),
+        )
+        .with_mode(PositionMode::Hedge);
+        s.holding_mut().qty = QtyLots(long);
+        s.holding_mut().entry = PriceTicks(6_000_000);
+        s.holding_mut().short_qty = QtyLots(short);
+        s.holding_mut().short_entry = PriceTicks(6_000_000);
+        s.holding_mut().mark = PriceTicks(6_000_000);
+        Kernel::new(s)
+    }
+
+    fn funded(k: &mut Kernel) -> Cash {
+        let out = k
+            .apply(&Event::Funding {
+                at: Nanos(1),
+                rate: Ratio(100_000),
+                mark: PriceTicks(6_000_000),
+            })
+            .to_vec();
+        match out.first() {
+            Some(Output::Funded { amount, .. }) => *amount,
+            other => panic!("expected a settlement, got {other:?}"),
+        }
+    }
+
+    /// A short-only hedged account receives a positive rate. It used to
+    /// neither pay nor receive: only the long leg was read.
+    #[test]
+    fn a_short_leg_receives_a_positive_rate() {
+        let mut k = hedged(0, -10);
+        let got = funded(&mut k);
+        assert!(got > Cash::ZERO, "{got:?}");
+        assert_eq!(k.state().funding, got);
+    }
+
+    /// Equal legs pay and receive the same amount, and net to nothing.
+    #[test]
+    fn equal_legs_net_to_nothing() {
+        let mut k = hedged(10, -10);
+        assert_eq!(funded(&mut k), Cash::ZERO);
     }
 }
