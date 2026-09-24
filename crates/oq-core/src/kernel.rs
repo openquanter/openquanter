@@ -616,7 +616,9 @@ impl State {
     /// Whether the account is flat on both legs.
     #[must_use]
     pub fn is_flat(&self) -> bool {
-        self.holding().qty.is_zero() && self.holding().short_qty.is_zero()
+        self.holdings
+            .iter()
+            .all(|h| h.qty.is_zero() && h.short_qty.is_zero())
     }
 
     /// Apply a fill to the position, realizing profit on the part that
@@ -648,7 +650,10 @@ impl State {
         if reduces {
             let closed = signed.0.abs().min(old.0.abs());
             let closed_signed = QtyLots(closed * if old.0 > 0 { 1 } else { -1 });
-            let pnl = self.holding().contract.unrealized(
+            // This holding's contract, not the first one's: two
+            // instruments with different multipliers realized one's
+            // profit at the other's size.
+            let pnl = self.holdings[h].contract.unrealized(
                 self.holdings[h].entry,
                 fill.price,
                 closed_signed,
@@ -742,8 +747,7 @@ impl State {
         }
         let closing = qty.0.min(held.0.abs());
         let signed_closed = QtyLots(closing * if held.0 > 0 { 1 } else { -1 });
-        let pnl = self
-            .holding()
+        let pnl = self.holdings[h]
             .contract
             .unrealized(entry, fill.price, signed_closed);
         self.realized = self.realized.add(pnl);
@@ -785,31 +789,63 @@ impl State {
     }
 
     /// Close the position at `price` because the venue liquidated it.
-    fn liquidate(&mut self, price: PriceTicks) -> Output {
+    ///
+    /// With several holdings on one balance — cross margin — the venue
+    /// closes every one of them, each at its own price. Closing only the
+    /// first, at the price of whichever instrument happened to tick,
+    /// left the rest open on an account the check had just found
+    /// insolvent. One output per holding closed.
+    fn liquidate(&mut self, price: PriceTicks) -> Vec<Output> {
+        if self.holdings.len() == 1 {
+            return vec![self.liquidate_holding(0, price)];
+        }
+        let open: Vec<usize> = (0..self.holdings.len())
+            .filter(|&h| !(self.holdings[h].qty.is_zero() && self.holdings[h].short_qty.is_zero()))
+            .collect();
+        open.into_iter()
+            .map(|h| {
+                // Its own last price. A holding with a position has been
+                // marked, because a position comes from a fill and a
+                // simulated fill from a tick; under venue matching a
+                // fill can come first, and then the entry is the only
+                // price there is.
+                let mark = self.holdings[h].mark;
+                let at = if mark.0 == 0 {
+                    self.holdings[h].entry
+                } else {
+                    mark
+                };
+                self.liquidate_holding(h, at)
+            })
+            .collect()
+    }
+
+    fn liquidate_holding(&mut self, h: usize, price: PriceTicks) -> Output {
         // Both legs close. A venue liquidating a hedged account does not
         // leave one side running, and reporting only the long would
         // understate what the account lost.
-        let pnl = self
-            .holding()
+        let holding = &self.holdings[h];
+        let pnl = holding
             .contract
-            .unrealized(self.holding().entry, price, self.holding().qty)
-            .add(self.holding().contract.unrealized(
-                self.holding().short_entry,
-                price,
-                self.holding().short_qty,
-            ));
+            .unrealized(holding.entry, price, holding.qty)
+            .add(
+                holding
+                    .contract
+                    .unrealized(holding.short_entry, price, holding.short_qty),
+            );
         self.realized = self.realized.add(pnl);
         self.credit(pnl);
         let equity = self.balance();
         // Reported as the net exposure that was closed out, which is the
         // number a reader compares against the position they thought
         // they had.
-        let qty = QtyLots(self.holding().qty.0 + self.holding().short_qty.0);
-        self.holding_mut().qty = QtyLots::ZERO;
-        self.holding_mut().entry = PriceTicks::ZERO;
-        self.holding_mut().short_qty = QtyLots::ZERO;
-        self.holding_mut().short_entry = PriceTicks::ZERO;
-        self.holding_mut().engine.cancel_all();
+        let qty = QtyLots(self.holdings[h].qty.0 + self.holdings[h].short_qty.0);
+        let holding = self.at(h);
+        holding.qty = QtyLots::ZERO;
+        holding.entry = PriceTicks::ZERO;
+        holding.short_qty = QtyLots::ZERO;
+        holding.short_entry = PriceTicks::ZERO;
+        holding.engine.cancel_all();
         Output::Liquidated {
             at: self.now,
             price,
@@ -950,7 +986,16 @@ impl Kernel {
             }
             Event::Funding { at, rate, mark } => {
                 self.state.now = at;
-                if !self.state.holding().qty.is_zero() {
+                // A funding event names no instrument, so it can only
+                // mean the one holding there is. With several it was
+                // charged to the first, whichever instrument its rate
+                // belonged to; refused instead, as an unnamed tick is.
+                if self.route(None).is_none() {
+                    self.outputs.push(Output::Rejected {
+                        id: OrderId::new(0),
+                        reason: RejectReason::UnroutableObservation,
+                    });
+                } else if !self.state.holding().qty.is_zero() {
                     let settlement = FundingRate::new(at, rate, mark)
                         .settle(self.state.holding().contract, self.state.holding().qty);
                     self.state.credit(settlement.amount);
@@ -1088,11 +1133,15 @@ impl Kernel {
         if !self.state.enforce_liquidation || self.state.is_flat() {
             return;
         }
-        let liquidatable = if matches!(self.state.mode, PositionMode::Hedge) {
-            // Equity against the sum of both legs' requirements. Netting
-            // them would let a hedged account carry exposure the venue
-            // charges twice for and this would not notice — which is the
-            // failure this mode exists to stop reporting as survival.
+        let liquidatable = if matches!(self.state.mode, PositionMode::Hedge)
+            || self.state.holdings().count() > 1
+        {
+            // Equity against the sum of every requirement, each holding
+            // at its own mark. Netting a hedged account's legs would let
+            // it carry exposure the venue charges twice for; and with
+            // several instruments on one balance, the first holding
+            // checked at whichever price just ticked was one position
+            // judged at another market's price.
             self.state.equity() < self.state.maintenance()
         } else {
             self.state
@@ -1102,7 +1151,7 @@ impl Kernel {
         if liquidatable {
             let out = self.state.liquidate(mark);
             self.working.clear();
-            self.outputs.push(out);
+            self.outputs.extend(out);
         }
     }
 
@@ -2062,5 +2111,134 @@ mod hedge_tests {
             opening,
             "a million euros does not make a USDT account solvent"
         );
+    }
+}
+
+#[cfg(test)]
+mod every_holding {
+    use super::*;
+    use oq_types::{Offset, Ratio, Stamp};
+
+    fn two(balance: i64, second_contract: Contract) -> (State, InstrumentId, InstrumentId) {
+        let mut s = State::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(balance),
+        );
+        let second = InstrumentId::new(2);
+        s.open_holding(second, second_contract, TierTable::example_btcusdt());
+        let first = s.holding().instrument;
+        (s, first, second)
+    }
+
+    fn tick(id: InstrumentId, at: i64, price: i64) -> Event {
+        Event::Tick {
+            instrument: Some(id),
+            tick: oq_engine::Tick::trades_only(Stamp::synthetic(at), price, 0, 0),
+        }
+    }
+
+    /// The second holding's profit is realized at its own multiplier.
+    #[test]
+    fn a_close_on_the_second_instrument_realizes_at_its_own_contract() {
+        let (mut s, _, second) = two(20_000, Contract::new(10));
+        {
+            let h = s.holding_of_mut(second).expect("opened");
+            h.qty = QtyLots(10);
+            h.entry = PriceTicks(1_000);
+            h.mark = PriceTicks(1_000);
+        }
+        let mut k = Kernel::new(s);
+        k.apply(&Event::Submit {
+            instrument: Some(second),
+            id: OrderId::new(1),
+            side: Side::Sell,
+            price: None,
+            qty: QtyLots(10),
+            offset: Offset::Close,
+            stamp: Stamp::synthetic(1),
+        });
+        k.apply(&tick(second, 2, 1_100));
+        let want = Contract::new(10).unrealized(PriceTicks(1_000), PriceTicks(1_100), QtyLots(10));
+        assert_eq!(k.state().realized, want);
+    }
+
+    /// One instrument's tick does not judge another's position at its
+    /// price. The first holding at 100_000 was liquidated when the second
+    /// ticked at 1_000.
+    #[test]
+    fn another_instruments_price_does_not_liquidate_this_one() {
+        // One unit covers this position's margin at its own price many
+        // times over, and is a small fraction of what it would lose if it
+        // were marked at the other instrument's.
+        let (mut s, first, second) = two(1, Contract::new(1_000));
+        s.holding_mut().qty = QtyLots(10);
+        s.holding_mut().entry = PriceTicks(100_000);
+        s.holding_mut().mark = PriceTicks(100_000);
+        let mut k = Kernel::new(s);
+        let out = k.apply(&tick(second, 1, 1_000)).to_vec();
+        assert!(
+            !out.iter().any(|o| matches!(o, Output::Liquidated { .. })),
+            "{out:?}"
+        );
+        assert_eq!(
+            k.state().holding_of(first).map(|h| h.qty),
+            Some(QtyLots(10))
+        );
+    }
+
+    /// Cross margin: an insolvent account loses every position, each at
+    /// its own price, not only the first.
+    #[test]
+    fn an_insolvent_cross_account_closes_every_holding_at_its_own_price() {
+        let (mut s, first, second) = two(10, Contract::new(1_000));
+        s.holding_mut().qty = QtyLots(10);
+        s.holding_mut().entry = PriceTicks(6_000_000);
+        s.holding_mut().mark = PriceTicks(6_000_000);
+        {
+            let h = s.holding_of_mut(second).expect("opened");
+            h.qty = QtyLots(4);
+            h.entry = PriceTicks(3_000_000);
+            h.mark = PriceTicks(3_000_000);
+        }
+        let mut k = Kernel::new(s);
+        let out = k.apply(&tick(first, 1, 3_000_000)).to_vec();
+        let prices: Vec<i64> = out
+            .iter()
+            .filter_map(|o| match o {
+                Output::Liquidated { price, .. } => Some(price.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prices, [3_000_000, 3_000_000], "{out:?}");
+        assert!(
+            k.state().is_flat(),
+            "no holding left open on an insolvent account"
+        );
+    }
+
+    /// A funding event names no instrument; with several holdings it is
+    /// refused rather than charged to the first.
+    #[test]
+    fn unnamed_funding_is_refused_when_there_is_more_than_one_holding() {
+        let (mut s, _, _) = two(20_000, Contract::new(1_000));
+        s.holding_mut().qty = QtyLots(10);
+        let mut k = Kernel::new(s);
+        let out = k
+            .apply(&Event::Funding {
+                at: Nanos(1),
+                rate: Ratio(100_000),
+                mark: PriceTicks(6_000_000),
+            })
+            .to_vec();
+        assert!(matches!(
+            out[..],
+            [Output::Rejected {
+                reason: RejectReason::UnroutableObservation,
+                ..
+            }]
+        ));
+        assert_eq!(k.state().funding, Cash::ZERO);
     }
 }
