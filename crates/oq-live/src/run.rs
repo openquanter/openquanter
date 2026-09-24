@@ -20,18 +20,16 @@ use std::process::ExitCode;
 
 use oq_gateway::account::Account;
 use oq_gateway::exec::Execution;
-use oq_gateway::{StreamOutcome, UserEvent, UserStreamReader};
+use oq_gateway::{StreamOutcome, UserEvent};
 use oq_ingest::Aggregator;
-use oq_l2feed::session::{install_signal_handlers, shutdown_requested};
 use oq_l2feed::venue::Deployment;
 use oq_risk::{Limits, RiskGate};
 use oq_strategy::{Context, Ending, Strategy};
 use oq_types::{Cash, Instrument, Nanos, OrderId, PriceTicks, QtyLots, Side};
 
-use crate::clock::{Clock, SystemClock};
-use crate::{
-    Action, MarketData, Outcome, Position, Session, SessionConfig, Supervisor, Timings, Trader,
-};
+use crate::clock::Clock;
+use crate::env::{Environment, Production, UserEvents};
+use crate::{Action, Outcome, Position, Session, SessionConfig, Supervisor, Timings, Trader};
 
 /// Everything the run needs that the command line used to supply.
 ///
@@ -210,24 +208,26 @@ where
     S: Strategy,
     F: FnOnce(&Instrument) -> S,
 {
-    run_on(venue, make_strategy, cfg, &SystemClock::new())
+    run_on(venue, make_strategy, cfg, &Production::new())
 }
 
-/// [`run`], reading time from `clock` rather than from the system.
+/// [`run`], in `env` rather than in the process's own world.
 ///
-/// Every decision the loop takes by the clock — a deadline, a backoff, a
-/// stale stream, a stamp on a record — reads it through here, so a test
-/// can drive the whole loop on a clock it moves by hand.
+/// Time, market data, the account stream, depth snapshots, the state
+/// directory and stop requests all arrive through `env`, and the venue's
+/// API through `venue`; nothing else reaches outside. A simulation of the
+/// whole process supplies both and runs this unchanged.
 pub fn run_on<S, F>(
     mut venue: Box<dyn Account>,
     make_strategy: F,
     cfg: &RunConfig,
-    clock: &dyn Clock,
+    env: &dyn Environment,
 ) -> ExitCode
 where
     S: Strategy,
     F: FnOnce(&Instrument) -> S,
 {
+    let clock = env.clock();
     // Bound locally so the body below is the code that was in `main`,
     // unchanged. Rewriting every use to `cfg.x` would have edited eight
     // hundred lines to move them, and a move that edits is not a move.
@@ -248,14 +248,13 @@ where
     // Market data first: connecting it before anything is sent means a
     // feed that will not open stops the run before it trades rather than
     // after. Its precision is not taken from here — see `scales` below.
-    let (mut market, feed_venue) =
-        match MarketData::open(venue.id(), deployment, &symbol, Duration::from_millis(200)) {
-            Ok(pair) => pair,
-            Err(e) => {
-                eprintln!("market data      FAILED: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let (mut market, feed_venue) = match env.market_data(venue.id(), deployment, &symbol) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("market data      FAILED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Precision *and* grid come from the deployment being traded, not
     // from the table compiled in. The tables exist so a replay gives
     // the same answer on any machine on any day; the question here is
@@ -402,12 +401,7 @@ where
     // Keep ownership stable, but never recycle a sequence from an earlier
     // process. A timed-out submit queried under a reused id can otherwise
     // resolve to an unrelated historical order, leaving an entry pending.
-    let state_root = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
-        });
-    let Some(state_root) = state_root else {
+    let Some(state_root) = env.state_root() else {
         eprintln!(
             "order ids        REFUSED: neither XDG_STATE_HOME nor HOME identifies durable state"
         );
@@ -708,7 +702,7 @@ where
             return ExitCode::FAILURE;
         }
     };
-    let mut reader = match UserStreamReader::connect(&stream, USER_STREAM_READ_TIMEOUT) {
+    let mut reader = match env.user_events(&stream) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("user stream      FAILED to connect: {e}");
@@ -809,7 +803,7 @@ where
     // into this one's attribution, which is the sort of number that
     // looks plausible and is somebody else's.
     let started_ms = clock.wall().0 / 1_000_000;
-    install_signal_handlers();
+    env.listen_for_shutdown();
     let deadline = match deadline_from(minutes, clock.elapsed()) {
         Ok(deadline) => deadline,
         Err(why) => {
@@ -852,7 +846,7 @@ where
     let mut recovered: std::collections::VecDeque<oq_gateway::OrderUpdate> =
         std::collections::VecDeque::new();
 
-    while deadline.is_none_or(|d| clock.elapsed() < d) && !shutdown_requested() {
+    while deadline.is_none_or(|d| clock.elapsed() < d) && !env.shutdown_requested() {
         let now = clock.wall();
 
         // Market data, drained rather than sampled.
@@ -1001,7 +995,8 @@ where
             && agg.buffered() > 0
             && snapshot_retry.due(clock.elapsed())
         {
-            let installed = oq_l2feed::ws::fetch_snapshot(url, SNAPSHOT_TIMEOUT)
+            let installed = env
+                .depth_snapshot(url, SNAPSHOT_TIMEOUT)
                 .map_err(|e| e.to_string())
                 .and_then(|body| {
                     feed_venue
@@ -1241,13 +1236,13 @@ where
                 if reconnect.due(now_instant) {
                     for action in supervisor.on_disconnect() {
                         if matches!(action, Action::Reconnect) {
-                            if reopen_user_stream(trader.venue().as_ref(), &mut reader) {
+                            if reopen_user_stream(trader.venue().as_ref(), &mut reader, env) {
                                 reconnect.succeeded();
                             } else {
                                 reconnect.failed(now_instant);
                             }
                         } else {
-                            settle(&action, &mut trader, &mut reader, &symbol);
+                            settle(&action, &mut trader, &mut reader, &symbol, env);
                         }
                     }
                 }
@@ -1266,7 +1261,7 @@ where
         while reported_unresolved < unresolved {
             reported_unresolved += 1;
             for action in supervisor.on_unresolved() {
-                settle(&action, &mut trader, &mut reader, &symbol);
+                settle(&action, &mut trader, &mut reader, &symbol, env);
             }
         }
 
@@ -1361,7 +1356,7 @@ where
                             // The comparison the zombie check exists for.
                             let streamed = streamed_legs(&books, &symbol, &instrument);
                             for verdict in supervisor.on_positions(&streamed, &venue) {
-                                settle(&verdict, &mut trader, &mut reader, &symbol);
+                                settle(&verdict, &mut trader, &mut reader, &symbol, env);
                             }
                         }
                         Err(e) => {
@@ -1374,7 +1369,7 @@ where
                             metrics.incomplete_reads += 1;
                             eprintln!("reconcile        FAILED: {e}");
                             for verdict in supervisor.on_read_failed() {
-                                settle(&verdict, &mut trader, &mut reader, &symbol);
+                                settle(&verdict, &mut trader, &mut reader, &symbol, env);
                             }
                         }
                     }
@@ -1753,6 +1748,7 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
                         .cloned()
                         .collect::<Vec<_>>();
                     if still_open.is_empty() {
+                        record_endings(self, symbol, &ids, clock);
                         return Ok(());
                     }
                     last_error = Some(format!("still resting: {}", still_open.join(", ")));
@@ -2001,12 +1997,13 @@ fn missed_reports<E: Execution + ?Sized>(
 fn settle<S: Strategy>(
     action: &Action,
     trader: &mut Trader<S, Box<dyn Account>>,
-    reader: &mut UserStreamReader,
+    reader: &mut Box<dyn UserEvents>,
     symbol: &str,
+    env: &dyn Environment,
 ) {
     match action {
         Action::Reconnect => {
-            reopen_user_stream(trader.venue().as_ref(), reader);
+            reopen_user_stream(trader.venue().as_ref(), reader, env);
         }
         other => act(other, trader, symbol),
     }
@@ -2017,10 +2014,50 @@ fn settle<S: Strategy>(
 /// A failure leaves the old reader in place deliberately. It is already
 /// condemned and will condemn itself again on its next read, which is a
 /// retry every read timeout rather than a process that gave up on the
+/// Write down how each withdrawn order ended, as the venue reports it.
+///
+/// The loop has stopped reading the account stream by now, so the
+/// venue's own reports of these endings would never reach the journal,
+/// and it would close with orders it believes are resting that the
+/// venue has retired — every one of them "unaccounted for" to the next
+/// start. Asked of the venue rather than assumed: an order that is no
+/// longer open may have been cancelled, or may have filled while the
+/// cancel was on its way, and only a cancellation is written as one.
+fn record_endings<S: Strategy>(
+    trader: &mut Trader<S, Box<dyn Account>>,
+    symbol: &str,
+    ids: &[String],
+    clock: &dyn Clock,
+) {
+    for id in ids {
+        match trader.session().venue().order_status(symbol, id) {
+            Ok(Some(ack))
+                if matches!(
+                    ack.status.as_str(),
+                    "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH"
+                ) =>
+            {
+                trader.session_mut().record_cancelled(clock.wall(), id);
+            }
+            Ok(Some(ack)) => eprintln!(
+                "shutdown         {id} ended {} rather than cancelled; its fills are not in \
+                 this journal and the next start's recovery asks the venue for them",
+                ack.status
+            ),
+            Ok(None) => eprintln!("shutdown         {id} is unknown to the venue"),
+            Err(e) => eprintln!("shutdown         {id}: could not ask how it ended: {e}"),
+        }
+    }
+}
+
 /// one attempt it happened to make during an outage.
-fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) -> bool {
+fn reopen_user_stream(
+    venue: &dyn Account,
+    reader: &mut Box<dyn UserEvents>,
+    env: &dyn Environment,
+) -> bool {
     match venue.open_user_stream() {
-        Ok(fresh) => match UserStreamReader::connect(&fresh, USER_STREAM_READ_TIMEOUT) {
+        Ok(fresh) => match env.user_events(&fresh) {
             Ok(r) => {
                 // Carries the staleness window `connect` gives every
                 // reader, so a stream replaced because it went silent
@@ -2177,16 +2214,6 @@ fn report(outcome: &Outcome) {
 /// the stream is empty, and this stops a burst on one stream from
 /// starving the other and the account stream behind it.
 const DRAIN_BUDGET: usize = 256;
-
-/// How long a read of the account stream may block before the loop goes
-/// on to its other work.
-///
-/// Short because the loop has market data to drain and a key to renew;
-/// a thread parked on a quiet account is a thread doing neither. Named
-/// rather than repeated, because the first connection and every
-/// reconnection have to agree about it — a reader replaced with a
-/// blockier one would stall the same loop this bounds.
-const USER_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// The smallest quantity whose notional clears the contract's floor.
 ///

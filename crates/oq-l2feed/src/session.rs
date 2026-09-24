@@ -287,6 +287,18 @@ pub trait MessageSource {
     }
 }
 
+/// A boxed source is a source, so a caller can hold sources of different
+/// kinds behind one type — a live websocket or a simulated feed.
+impl<M: MessageSource + ?Sized> MessageSource for Box<M> {
+    fn next_message(&mut self) -> io::Result<Vec<u8>> {
+        (**self).next_message()
+    }
+
+    fn silence_is_a_disconnect(&self) -> bool {
+        (**self).silence_is_a_disconnect()
+    }
+}
+
 /// Something that can open a [`MessageSource`].
 pub trait Connector {
     /// The source this connector produces.

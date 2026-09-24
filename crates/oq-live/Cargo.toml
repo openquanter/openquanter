@@ -17,6 +17,7 @@ oq-journal.workspace = true
 oq-l2feed.workspace = true
 oq-parity.workspace = true
 oq-risk.workspace = true
+oq-sim.workspace = true
 oq-strategy.workspace = true
 oq-types.workspace = true
 
@@ -26,7 +27,6 @@ oq-types.workspace = true
 # published crate cannot depend on it — and nothing that links `oq-live`
 # should inherit a catalogue of teaching material either.
 oq-examples = { path = "../oq-examples" }
-oq-sim.workspace = true
 
 [lints]
 workspace = true

@@ -30,8 +30,37 @@ use oq_l2feed::session::{Connector, MessageSource};
 use oq_l2feed::venue::{Deployment, Venue};
 use oq_l2feed::ws::WsConnector;
 
+/// A connector of any kind, behind one type.
+///
+/// The live loop reads market data from a websocket; a simulation of the
+/// whole process reads it from a scripted feed. Both are connectors, and
+/// holding either behind this lets the loop be the same code for both.
+pub struct AnyConnector(Box<dyn FnMut() -> io::Result<Box<dyn MessageSource>>>);
+
+impl AnyConnector {
+    pub fn new<C>(mut connector: C) -> Self
+    where
+        C: Connector + 'static,
+        C::Source: 'static,
+    {
+        Self(Box::new(move || {
+            connector
+                .connect()
+                .map(|s| Box::new(s) as Box<dyn MessageSource>)
+        }))
+    }
+}
+
+impl Connector for AnyConnector {
+    type Source = Box<dyn MessageSource>;
+
+    fn connect(&mut self) -> io::Result<Self::Source> {
+        (self.0)()
+    }
+}
+
 /// One market data stream, reconnecting as needed.
-pub struct Stream<C: Connector = WsConnector> {
+pub struct Stream<C: Connector = AnyConnector> {
     name: &'static str,
     connector: C,
     source: Option<C::Source>,
@@ -46,7 +75,7 @@ pub struct Stream<C: Connector = WsConnector> {
     stalls: u64,
 }
 
-impl Stream<WsConnector> {
+impl Stream<AnyConnector> {
     /// Open the venue's stream named `name` for `symbol`.
     ///
     /// # Errors
@@ -64,7 +93,7 @@ impl Stream<WsConnector> {
             .ok_or_else(|| format!("this venue publishes no stream called {name:?}"))?;
         Ok(Self {
             name,
-            connector: WsConnector::new(venue.transport(&spec), read_timeout),
+            connector: AnyConnector::new(WsConnector::new(venue.transport(&spec), read_timeout)),
             source: None,
             reconnects: 0,
             last_message: Duration::ZERO,
@@ -225,6 +254,13 @@ impl MarketData {
             trade: Stream::open(venue.as_ref(), symbol, "trade", read_timeout)?,
         };
         Ok((md, venue))
+    }
+
+    /// Market data from streams the caller built — a simulated feed, or
+    /// any connector that is not the venue's websocket.
+    #[must_use]
+    pub const fn from_streams(depth: Stream, trade: Stream) -> Self {
+        Self { depth, trade }
     }
 
     pub fn depth(&mut self) -> &mut Stream {
