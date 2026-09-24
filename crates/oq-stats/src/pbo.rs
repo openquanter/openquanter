@@ -127,14 +127,24 @@ impl PboReport {
     }
 }
 
+/// The largest split count accepted.
+///
+/// The work is every way of choosing half the blocks: 12,870 at the
+/// customary sixteen, 2.7 million at twenty-four, and 1.4 × 10¹¹ at
+/// forty — a call that looks like a parameter change and does not return.
+/// Past this the estimate is not measurably better and the run is hours.
+pub const MAX_BLOCKS: usize = 24;
+
 /// Estimate the probability of backtest overfitting.
 ///
-/// `n_blocks` is the number of disjoint time blocks; it must be even and
-/// at least 4. Sixteen is the usual choice, giving 12 870 splits.
+/// `n_blocks` is the number of disjoint time blocks; it must be even, at
+/// least 4 and at most [`MAX_BLOCKS`]. Sixteen is the usual choice,
+/// giving 12 870 splits.
 ///
 /// # Errors
 ///
-/// [`StatsError::InvalidSplitCount`] for an odd or too-small block count,
+/// [`StatsError::InvalidSplitCount`] for an odd, too-small or too-large
+/// block count,
 /// [`StatsError::TooFewObservations`] if the matrix cannot supply at
 /// least two periods per block or has fewer than two configurations, and
 /// [`StatsError::ZeroVariance`] if a block set has no dispersion at all.
@@ -142,7 +152,7 @@ pub fn probability_of_backtest_overfitting(
     matrix: &PerformanceMatrix,
     n_blocks: usize,
 ) -> Result<PboReport> {
-    if n_blocks < 4 || n_blocks % 2 != 0 {
+    if !(4..=MAX_BLOCKS).contains(&n_blocks) || n_blocks % 2 != 0 {
         return Err(StatsError::InvalidSplitCount { got: n_blocks });
     }
     if matrix.n_configs < 2 {
@@ -507,6 +517,15 @@ mod tests {
         assert_eq!(
             probability_of_backtest_overfitting(&matrix, 2).unwrap_err(),
             StatsError::InvalidSplitCount { got: 2 }
+        );
+        // Past the bound the call is refused rather than left to run for
+        // hours: forty blocks is 1.4e11 splits.
+        let long = noise_matrix(200, 5, 7);
+        assert_eq!(
+            probability_of_backtest_overfitting(&long, MAX_BLOCKS + 2).unwrap_err(),
+            StatsError::InvalidSplitCount {
+                got: MAX_BLOCKS + 2
+            }
         );
         let thin = noise_matrix(10, 5, 7);
         assert_eq!(
