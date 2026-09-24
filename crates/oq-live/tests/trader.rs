@@ -853,3 +853,28 @@ fn a_withdrawal_that_failed_is_tried_again() {
         "{second:?}"
     );
 }
+
+/// Resting after all, so registered as any accepted order is.
+///
+/// Telling the strategy used to be the whole of it. The order's fills
+/// then arrived under an id that translated to nothing, a halt could not
+/// withdraw it, and the shutdown sweep — which works from `resting()` —
+/// left it on the venue.
+#[test]
+fn an_order_found_resting_later_is_registered_like_any_other() {
+    let mut t = mute(true);
+    t.on_tick(&ctx(), Nanos(1));
+    assert!(t.resting().is_empty(), "not known to be resting yet");
+
+    *t.session().venue().answers.borrow_mut() = true;
+    assert_eq!(t.chase_unanswered(), vec![(OrderId(7), true)]);
+
+    let resting: Vec<String> = t.resting().into_iter().map(str::to_string).collect();
+    assert_eq!(resting.len(), 1, "the sweep and the halt can see it");
+    assert_eq!(
+        t.local_id(&resting[0]),
+        Some(OrderId(7)),
+        "its fills translate back to the strategy's own id"
+    );
+    assert_eq!(t.session().book().working(), 1, "and it counts as working");
+}
