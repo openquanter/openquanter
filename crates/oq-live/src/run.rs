@@ -928,6 +928,14 @@ where
                     Ok(None) => break,
                     Err(e) => {
                         eprintln!("{} stream lost: {e}", stream.name());
+                        // A lost depth stream leaves the book frozen at
+                        // the moment it went quiet, and every tick after
+                        // carried that as the market. Dropped, so the
+                        // top of book reads as unknown until updates
+                        // rebuild it.
+                        if which == 0 {
+                            agg.drop_book();
+                        }
                         break;
                     }
                 }

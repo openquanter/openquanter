@@ -217,6 +217,21 @@ impl Aggregator {
         closed
     }
 
+    /// Forget the book without closing a window.
+    ///
+    /// For a live feed whose depth stream has just been lost: whatever
+    /// the book says now is the market as it was when the stream went
+    /// quiet, and every window until it is rebuilt would have carried
+    /// that as the top of book. The same honest answer as a gap — no
+    /// quote rather than a stale one — without the window roll a gap
+    /// implies, because the trade stream may still be running.
+    pub fn drop_book(&mut self) {
+        self.book = Book::new();
+        self.bootstrapped = false;
+        self.bid = 0;
+        self.ask = 0;
+    }
+
     /// Close whatever window is open.
     ///
     /// For a replay this is the end of the data. For a live feed it is
@@ -370,6 +385,26 @@ mod tests {
         let second = a.flush().expect("closed");
         assert_eq!(first.volume, QtyLots(5));
         assert_eq!(second.volume, QtyLots(8), "cumulative, not per window");
+    }
+
+    /// A lost depth stream leaves no quote behind, and the window it
+    /// happened in is not closed by it.
+    #[test]
+    fn a_dropped_book_quotes_nothing_until_rebuilt() {
+        let mut a = Aggregator::new(SEC).expect("positive window");
+        let update = oq_l2feed::depth::DepthUpdate {
+            event_ms: 0,
+            first_id: 1,
+            final_id: 1,
+            prev_final_id: None,
+            bids: vec![oq_l2feed::depth::Level { price: 99, qty: 5 }],
+            asks: vec![oq_l2feed::depth::Level { price: 101, qty: 5 }],
+        };
+        a.on_depth(0, 0, &update);
+        a.on_trade(1, 1, &trade(100, 1));
+        a.drop_book();
+        let tick = a.flush().expect("the window is still open, and closes now");
+        assert_eq!((tick.bid, tick.ask), (PriceTicks(0), PriceTicks(0)));
     }
 
     #[test]
