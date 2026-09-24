@@ -27,7 +27,7 @@ use crate::json::{
     field_bool, field_i64, field_str, malformed, need_bool, need_f64, need_i64, need_str,
     object_containing, objects,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::creds::Credentials;
 use crate::exec::{
@@ -332,28 +332,11 @@ impl Binance {
     /// venue — [`Binance::speaking`] does, and nothing else can.
     #[must_use]
     pub fn new(base: impl Into<String>, creds: Credentials) -> Self {
-        // Generous, because the alternative is worse. A read that times
-        // out is indistinguishable from a read that failed, and a watch
-        // treats an unreadable answer as "nothing compared" — so a tight
-        // timeout on a slow link produces silence that looks like a
-        // quiet account. Measured on the link this runs over, the same
-        // request took 0.7 s and 4.4 s a second apart.
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(45)))
-            // A refusal is read as a response rather than raised as an
-            // error, because the error variant carries only the status
-            // and the body is the half that says why. `-2015 Invalid
-            // API-key, IP, or permissions for action` and `-1021
-            // Timestamp for this request is outside of the recvWindow`
-            // are both 401s, and the difference between them is an
-            // afternoon.
-            .http_status_as_error(false)
-            .build();
         Self {
             base: base.into(),
             dialect: Dialect::Binance,
             creds,
-            agent: config.into(),
+            agent: crate::http::venue_agent(),
             clock_offset_ms: core::sync::atomic::AtomicI64::new(0),
             round_trip_ms: core::sync::atomic::AtomicI64::new(0),
             banned_until_ms: core::sync::atomic::AtomicI64::new(0),

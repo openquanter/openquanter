@@ -59,8 +59,6 @@
 //! published OpenAPI specification, which is better evidence than most
 //! of the adapters here started with and is still not a placed order.
 
-use core::time::Duration;
-
 use ed25519_dalek::{Signer, SigningKey};
 use oq_types::Instrument;
 
@@ -112,11 +110,7 @@ impl Backpack {
             base: Self::HOST.to_string(),
             key: SigningKey::from_bytes(&seed),
             api_key: creds.key().to_string(),
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(45)))
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: crate::http::venue_agent(),
             window: 5_000,
         })
     }

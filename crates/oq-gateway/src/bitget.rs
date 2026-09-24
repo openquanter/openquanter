@@ -45,8 +45,6 @@
 //! tested against documented shapes, which is not the same as having
 //! placed an order.
 
-use core::time::Duration;
-
 use oq_hash::hmac::hmac_sha256;
 use oq_types::Instrument;
 
@@ -88,11 +86,7 @@ impl Bitget {
             demo: matches!(endpoint, Endpoint::Testnet),
             base: Self::HOST.to_string(),
             creds,
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(45)))
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: crate::http::venue_agent(),
             category: "USDT-FUTURES",
         }
     }
