@@ -546,7 +546,10 @@ where
     // trading system.
     let mut shadow = crate::shadow::Shadow::new(
         oq_types::InstrumentId::new(1),
-        oq_margin::Contract::new(10_000),
+        // The contract the books use, from the venue's own figures. A
+        // literal here was the constant this file's own comments call a
+        // mistake, and it priced the model's fills at another size.
+        contract,
         oq_margin::TierTable::example_btcusdt(),
         starting_balance,
     );
@@ -2010,6 +2013,13 @@ fn fill_of(
 ) -> Result<oq_types::Fill, &'static str> {
     let scaled = |text: &str, scale: u8| -> Option<i64> {
         let (int, frac) = text.split_once('.').unwrap_or((text, ""));
+        // Digits past the instrument's precision are refused unless they
+        // are zeros. Cut off, a fill of 0.0015 at three places booked as
+        // 0.001 — a position smaller than the account's, with nothing
+        // said. Refused, it is counted and reported as unbookable.
+        if frac.chars().skip(usize::from(scale)).any(|c| c != '0') {
+            return None;
+        }
         let mut digits = String::from(int.trim_start_matches('+'));
         let frac: String = frac.chars().take(usize::from(scale)).collect();
         digits.push_str(&frac);
@@ -2374,6 +2384,17 @@ mod unreadable_reports {
         let e = fill_of(&update("0", "0.001"), &Instrument::linear(2, 3), OrderId(1))
             .expect_err("must refuse");
         assert!(e.contains("price"), "{e}");
+    }
+
+    /// A quantity finer than the instrument is refused, not cut off:
+    /// 0.0015 at three places booked as 0.001 left the position smaller
+    /// than the account's, with nothing said. Trailing zeros are fine.
+    #[test]
+    fn a_quantity_finer_than_the_instrument_is_refused_not_truncated() {
+        let i = Instrument::linear(2, 3);
+        assert!(fill_of(&update("100.0", "0.0015"), &i, OrderId(1)).is_err());
+        let f = fill_of(&update("100.0", "0.00100"), &i, OrderId(1)).expect("zeros are exact");
+        assert_eq!(f.qty, oq_types::QtyLots(1));
     }
 
     #[test]
