@@ -584,11 +584,16 @@ impl<E: Execution> Session<E> {
     }
 
     /// Adopt the venue's own view after a reconciliation.
-    pub fn reconcile(&mut self, venue_positions: &[PositionSnapshot]) {
+    ///
+    /// # Errors
+    /// The venue reported a position that cannot be represented, which
+    /// the caller must halt on. The caller, not this: tripping the switch
+    /// here stopped new orders and left every resting opening order to go
+    /// on filling, because withdrawing them is the trader's to do and a
+    /// halt taken here never reached it.
+    pub fn reconcile(&mut self, venue_positions: &[PositionSnapshot]) -> Result<(), String> {
         if let Err(why) = validate_positions(venue_positions) {
-            self.gate.kill_switch().trip();
-            eprintln!("HALT             {why}");
-            return;
+            return Err(why.to_string());
         }
         self.book.adopt(
             venue_positions
@@ -601,6 +606,7 @@ impl<E: Execution> Session<E> {
                 })
                 .collect(),
         );
+        Ok(())
     }
 
     /// Apply a stream event.
