@@ -213,6 +213,28 @@ def main():
         return pull(cos, args)
 
 
+def local_path(dest, rel):
+    """Where object `rel` belongs under `dest`, or None if it would land
+    anywhere else.
+
+    Object keys come from the bucket, and anyone who can write to the
+    bucket chooses them -- the capture host holds those credentials. A key
+    of `../../.ssh/authorized_keys`, or an absolute one, joined onto the
+    destination as it was, wrote wherever it pointed as the user this runs
+    as. A key is data, never a path to trust.
+    """
+    if not rel or os.path.isabs(rel) or "\\" in rel:
+        return None
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return None
+    root = os.path.realpath(dest)
+    local = os.path.realpath(os.path.join(root, *parts))
+    if os.path.commonpath([root, local]) != root or local == root:
+        return None
+    return local
+
+
 def pull(cos, args):
     have = new = failed = 0
     bytes_pulled = 0
@@ -220,7 +242,13 @@ def pull(cos, args):
 
     for key, size, etag in sorted(objects):
         rel = key[len(args.prefix):] if key.startswith(args.prefix) else key
-        local = os.path.join(args.dest, rel)
+        rel = rel.lstrip("/") if key.startswith(args.prefix) and args.prefix else rel
+        local = local_path(args.dest, rel)
+        if local is None:
+            print(f"pull: refused {key!r}: it does not name a file inside the "
+                  "archive", file=sys.stderr)
+            failed += 1
+            continue
 
         if os.path.exists(local) and os.path.getsize(local) == size:
             have += 1
