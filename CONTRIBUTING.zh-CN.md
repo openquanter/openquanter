@@ -24,7 +24,7 @@
 
 ## 开发
 
-Rust 2024 edition；最低支持版本 1.85。
+Rust 2024 edition；最低支持版本 1.89。
 
 ```bash
 cargo build --workspace

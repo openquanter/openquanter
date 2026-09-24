@@ -4,7 +4,7 @@
 
 ## 1. Build
 
-Rust 2024 edition, minimum version 1.85. No services to run and no data
+Rust 2024 edition, minimum version 1.89. No services to run and no data
 to download — the examples generate their own market from a seed.
 
 Cargo fetches a dependency tree only for the crates that talk to a

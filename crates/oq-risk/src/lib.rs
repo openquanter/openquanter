@@ -284,12 +284,12 @@ impl RiskGate {
                 "quantity must be positive; direction is the side",
             ));
         }
-        if let Some(p) = order.limit_price {
-            if p.0 <= 0 {
-                return Decision::Refuse(Breach::Malformed(
-                    "a limit price of zero is an order to trade at nothing",
-                ));
-            }
+        if let Some(p) = order.limit_price
+            && p.0 <= 0
+        {
+            return Decision::Refuse(Breach::Malformed(
+                "a limit price of zero is an order to trade at nothing",
+            ));
         }
         // The per-order cap is about opening. It exists so a runaway
         // strategy cannot put one enormous order into the market, and

@@ -821,15 +821,15 @@ impl Iterator for TickReader {
         }
         let tick = self.pending.pop()?;
 
-        if let Some(prev) = self.previous {
-            if tick.stamp.exch < prev {
-                self.failed = true;
-                return Some(Err(Error::OutOfOrder {
-                    index: self.index,
-                    previous: prev.0,
-                    found: tick.stamp.exch.0,
-                }));
-            }
+        if let Some(prev) = self.previous
+            && tick.stamp.exch < prev
+        {
+            self.failed = true;
+            return Some(Err(Error::OutOfOrder {
+                index: self.index,
+                previous: prev.0,
+                found: tick.stamp.exch.0,
+            }));
         }
         self.previous = Some(tick.stamp.exch);
         self.index += 1;
