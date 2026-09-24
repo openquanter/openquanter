@@ -30,8 +30,8 @@ use std::time::Duration;
 use oq_gateway::account::{Account, AccountTrade};
 use oq_gateway::broker::IdRules;
 use oq_gateway::exec::{
-    Events, Execution, Initiator, NewOrder, OrderAck, OrderUpdate, Placed, Reject, UserEvent,
-    UserStream, decimal,
+    Events, Execution, Initiator, NewOrder, OrderAck, OrderUpdate, Placed, PositionSide, Reject,
+    UserEvent, UserStream, decimal,
 };
 use oq_gateway::klines::Kline;
 use oq_gateway::{AccountSnapshot, OpenOrder, PositionSnapshot, StreamOutcome, VenueError};
@@ -64,6 +64,9 @@ pub struct SimConfig {
     pub state_root: PathBuf,
     /// What goes wrong, and how often.
     pub faults: Faults,
+    /// Hedge mode: a long and a short leg held at once, each order
+    /// naming its leg. Off is one-way netting.
+    pub hedged: bool,
 }
 
 /// Failures the simulated venue injects, each in parts per million of
@@ -94,6 +97,8 @@ pub struct Faults {
 #[derive(Debug, Clone)]
 struct Resting {
     venue_id: u64,
+    /// `BOTH`, `LONG` or `SHORT`.
+    leg: &'static str,
     side: Side,
     price: i64,
     qty: i64,
@@ -125,9 +130,12 @@ struct Core {
     resting: BTreeMap<String, Resting>,
     finished: BTreeMap<String, Finished>,
     next_venue_id: u64,
-    /// Signed net position, in lots, and its average entry in ticks.
-    position: i64,
-    entry: f64,
+    /// Each leg's signed position, in lots, and its average entry in
+    /// ticks: `BOTH` one-way, `LONG` and `SHORT` hedged.
+    legs: BTreeMap<&'static str, (i64, f64)>,
+    /// The most legs held at once, for a test that has to know hedge
+    /// mode was exercised.
+    most_legs: usize,
     realized: f64,
     events: VecDeque<UserEvent>,
     /// Whether an account stream is connected; events sent while none is
@@ -159,8 +167,8 @@ impl Core {
             resting: BTreeMap::new(),
             finished: BTreeMap::new(),
             next_venue_id: 1,
-            position: 0,
-            entry: 0.0,
+            legs: BTreeMap::new(),
+            most_legs: 0,
             realized: 0.0,
             events: VecDeque::new(),
             connected: false,
@@ -234,7 +242,7 @@ impl Core {
             .collect();
         for id in reached {
             if let Some(o) = self.resting.remove(&id) {
-                self.fill(&id, o.venue_id, o.side, o.price, o.qty, true);
+                self.fill(&id, o.venue_id, o.leg, o.side, o.price, o.qty, true);
             }
         }
     }
@@ -262,35 +270,39 @@ impl Core {
     }
 
     /// The position and its average, moved by one fill.
-    fn book(&mut self, side: Side, price: i64, qty: i64) {
+    fn book(&mut self, leg: &'static str, side: Side, price: i64, qty: i64) {
         let signed = if side == Side::Buy { qty } else { -qty };
-        let before = self.position;
+        let (before, mut entry) = self.legs.get(leg).copied().unwrap_or((0, 0.0));
         let after = before + signed;
         if before == 0 || (before > 0) == (signed > 0) {
-            let total = self.entry * before.abs() as f64 + price as f64 * qty as f64;
-            self.entry = total / after.abs() as f64;
+            let total = entry * before.abs() as f64 + price as f64 * qty as f64;
+            entry = total / after.abs() as f64;
         } else {
             let closed = qty.min(before.abs());
             let per = if before > 0 {
-                price as f64 - self.entry
+                price as f64 - entry
             } else {
-                self.entry - price as f64
+                entry - price as f64
             };
             self.realized += per * closed as f64;
             if after != 0 && (after > 0) != (before > 0) {
-                self.entry = price as f64;
+                entry = price as f64;
             }
         }
-        self.position = after;
-        if self.position == 0 {
-            self.entry = 0.0;
+        if after == 0 {
+            entry = 0.0;
         }
+        self.legs.insert(leg, (after, entry));
+        let held = self.legs.values().filter(|(q, _)| *q != 0).count();
+        self.most_legs = self.most_legs.max(held);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill(
         &mut self,
         client_id: &str,
         venue_id: u64,
+        leg: &'static str,
         side: Side,
         price: i64,
         qty: i64,
@@ -299,7 +311,7 @@ impl Core {
         let now = self.clock.elapsed();
         if self.silent_at.is_none() && self.cfg.faults.silent_fill_after.is_some_and(|t| now >= t) {
             self.silent_at = Some(now);
-            self.book(side, price, qty);
+            self.book(leg, side, price, qty);
             self.finished.insert(
                 client_id.to_string(),
                 Finished {
@@ -320,7 +332,7 @@ impl Core {
         let mut cumulative = 0;
         let last = pieces.len() - 1;
         for (i, piece) in pieces.into_iter().enumerate() {
-            self.book(side, price, piece);
+            self.book(leg, side, price, piece);
             cumulative += piece;
             self.trade_id += 1;
             let update = OrderUpdate {
@@ -337,7 +349,7 @@ impl Core {
                 cumulative_qty: self.qty(cumulative),
                 last_price: self.px(price),
                 side: if side == Side::Buy { "BUY" } else { "SELL" }.into(),
-                position_side: "BOTH".into(),
+                position_side: leg.into(),
                 maker,
                 trade_id: Some(self.trade_id),
                 event_ms: self.now_ms(),
@@ -357,7 +369,14 @@ impl Core {
         );
     }
 
-    fn update(&self, client_id: &str, venue_id: u64, side: Side, status: &str) -> UserEvent {
+    fn update(
+        &self,
+        client_id: &str,
+        venue_id: u64,
+        leg: &'static str,
+        side: Side,
+        status: &str,
+    ) -> UserEvent {
         UserEvent::Order(OrderUpdate {
             symbol: self.cfg.symbol.clone(),
             client_id: client_id.to_string(),
@@ -367,7 +386,7 @@ impl Core {
             cumulative_qty: "0".into(),
             last_price: "0".into(),
             side: if side == Side::Buy { "BUY" } else { "SELL" }.into(),
-            position_side: "BOTH".into(),
+            position_side: leg.into(),
             maker: false,
             trade_id: None,
             event_ms: self.now_ms(),
@@ -421,10 +440,28 @@ impl Sim {
         self.0.borrow().resting.keys().cloned().collect()
     }
 
-    /// Net position in lots.
+    /// Net position in lots: every leg added, the short one negative.
     #[must_use]
     pub fn position(&self) -> i64 {
-        self.0.borrow().position
+        self.0.borrow().legs.values().map(|(q, _)| *q).sum()
+    }
+
+    /// The most legs held at the same time during the run.
+    #[must_use]
+    pub fn max_legs_held(&self) -> usize {
+        self.0.borrow().most_legs
+    }
+
+    /// Each leg's signed position in lots, by the venue's leg name.
+    #[must_use]
+    pub fn legs(&self) -> Vec<(&'static str, i64)> {
+        self.0
+            .borrow()
+            .legs
+            .iter()
+            .filter(|(_, (q, _))| *q != 0)
+            .map(|(leg, (q, _))| (*leg, *q))
+            .collect()
     }
 
     /// Simulated time elapsed.
@@ -666,7 +703,7 @@ impl Execution for SimAccount {
         match core.resting.remove(client_id) {
             Some(o) => {
                 let UserEvent::Order(report) =
-                    core.update(client_id, o.venue_id, o.side, "CANCELED")
+                    core.update(client_id, o.venue_id, o.leg, o.side, "CANCELED")
                 else {
                     unreachable!("update builds an order report");
                 };
@@ -727,6 +764,11 @@ impl Execution for SimAccount {
 
 /// Rest or fill an order the venue has decided to take.
 fn place_now(core: &mut Core, order: &NewOrder) -> Placed {
+    let leg = match order.position_side {
+        PositionSide::OneWay => "BOTH",
+        PositionSide::Long => "LONG",
+        PositionSide::Short => "SHORT",
+    };
     let venue_id = core.next_venue_id;
     core.next_venue_id += 1;
     let marketable = order.limit_price.is_none_or(|limit| match order.side {
@@ -738,6 +780,7 @@ fn place_now(core: &mut Core, order: &NewOrder) -> Placed {
         core.fill(
             &order.client_id,
             venue_id,
+            leg,
             order.side,
             price,
             order.qty.0,
@@ -750,12 +793,13 @@ fn place_now(core: &mut Core, order: &NewOrder) -> Placed {
         order.client_id.clone(),
         Resting {
             venue_id,
+            leg,
             side: order.side,
             price: limit,
             qty: order.qty.0,
         },
     );
-    let e = core.update(&order.client_id, venue_id, order.side, "NEW");
+    let e = core.update(&order.client_id, venue_id, leg, order.side, "NEW");
     core.send(e);
     accepted(&order.client_id, venue_id, "NEW")
 }
@@ -802,25 +846,29 @@ impl Account for SimAccount {
     }
 
     fn is_hedged(&self) -> Result<bool, VenueError> {
-        Ok(false)
+        Ok(self.0.0.borrow().cfg.hedged)
     }
 
     fn positions(&self, _symbol: &str) -> Result<Vec<PositionSnapshot>, VenueError> {
         let core = self.0.0.borrow();
-        if core.position == 0 {
-            return Ok(Vec::new());
-        }
-        let amount_text = decimal(core.position, core.instrument.qty_scale);
-        let entry = core.entry / 10f64.powi(i32::from(core.instrument.price_scale));
-        Ok(vec![PositionSnapshot {
-            symbol: core.cfg.symbol.clone(),
-            position_side: "BOTH".into(),
-            amount: amount_text.parse().unwrap_or(0.0),
-            amount_text,
-            entry_text: format!("{entry}"),
-            entry_price: entry,
-            unrealized: 0.0,
-        }])
+        let scale = 10f64.powi(i32::from(core.instrument.price_scale));
+        Ok(core
+            .legs
+            .iter()
+            .filter(|(_, (q, _))| *q != 0)
+            .map(|(leg, (q, entry))| {
+                let amount_text = decimal(*q, core.instrument.qty_scale);
+                PositionSnapshot {
+                    symbol: core.cfg.symbol.clone(),
+                    position_side: (*leg).into(),
+                    amount: amount_text.parse().unwrap_or(0.0),
+                    amount_text,
+                    entry_text: format!("{}", entry / scale),
+                    entry_price: entry / scale,
+                    unrealized: 0.0,
+                }
+            })
+            .collect())
     }
 
     fn balances(&self) -> Result<AccountSnapshot, VenueError> {
@@ -846,7 +894,7 @@ impl Account for SimAccount {
                 order_id: o.venue_id.to_string(),
                 client_order_id: id.clone(),
                 side: if o.side == Side::Buy { "BUY" } else { "SELL" }.into(),
-                position_side: "BOTH".into(),
+                position_side: o.leg.into(),
                 price: o.price as f64 / 10f64.powi(i32::from(core.instrument.price_scale)),
                 orig_qty: o.qty as f64 / 10f64.powi(i32::from(core.instrument.qty_scale)),
                 executed_qty: 0.0,

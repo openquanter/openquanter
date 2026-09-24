@@ -125,6 +125,72 @@ impl Strategy for Insistent {
     }
 }
 
+/// Holds a long and a short at once, the way a hedged ladder does: every
+/// twenty observations it withdraws everything and quotes an entry for
+/// each flat leg and an exit for each held one.
+struct Both {
+    next: u64,
+    ticks: u64,
+    both_held: bool,
+}
+
+impl Both {
+    fn order(&mut self, ctx: &Context, side: Side, price: i64, offset: oq_types::Offset) -> Intent {
+        self.next += 1;
+        match ctx.limit(OrderId::new(self.next), side, PriceTicks(price), QtyLots(2)) {
+            Intent::Limit {
+                instrument,
+                id,
+                side,
+                price,
+                qty,
+                ..
+            } => Intent::Limit {
+                instrument,
+                id,
+                side,
+                price,
+                qty,
+                offset,
+            },
+            other => other,
+        }
+    }
+}
+
+impl Strategy for Both {
+    fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+        self.ticks += 1;
+        let last = ctx.tick.last.0;
+        if last == 0 || self.ticks % 20 != 0 {
+            return;
+        }
+        self.both_held |= ctx.position.0 > 0 && ctx.short_position.0 < 0;
+        out.push(Intent::CancelAll);
+        use oq_types::Offset::{Close, Open};
+        let long = if ctx.position.0 > 0 {
+            self.order(ctx, Side::Sell, last + 3, Close)
+        } else {
+            self.order(ctx, Side::Buy, last - 3, Open)
+        };
+        let short = if ctx.short_position.0 < 0 {
+            self.order(ctx, Side::Buy, last - 3, Close)
+        } else {
+            self.order(ctx, Side::Sell, last + 3, Open)
+        };
+        out.push(long);
+        out.push(short);
+    }
+
+    fn waiting_on(&self) -> Vec<(&'static str, i64)> {
+        vec![("both_held", i64::from(self.both_held))]
+    }
+
+    fn name(&self) -> &str {
+        "both"
+    }
+}
+
 fn dir(tag: &str, seed: u64) -> PathBuf {
     let d = std::env::temp_dir().join(format!("oq-dst-{tag}-{seed}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -149,6 +215,34 @@ fn simulate_strategy(
     faults: Faults,
     insistent: bool,
 ) -> (Sim, ExitCode, Vec<u8>) {
+    run_kind(
+        tag,
+        seed,
+        minutes,
+        faults,
+        if insistent {
+            Kind::Insistent
+        } else {
+            Kind::Quoter
+        },
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Quoter,
+    Insistent,
+    Hedged,
+}
+
+fn run_kind(
+    tag: &str,
+    seed: u64,
+    minutes: i64,
+    faults: Faults,
+    kind: Kind,
+) -> (Sim, ExitCode, Vec<u8>) {
+    let hedged = kind == Kind::Hedged;
     let root = dir(tag, seed);
     let sim = Sim::new(SimConfig {
         seed,
@@ -160,6 +254,7 @@ fn simulate_strategy(
         balance: 10_000.0,
         state_root: root.clone(),
         faults,
+        hedged,
     });
     let journal = root.join("run.oqj");
     let cfg = RunConfig {
@@ -186,8 +281,8 @@ fn simulate_strategy(
         },
     };
     let env = SimEnv::new(&sim);
-    let code = if insistent {
-        run_on(
+    let code = match kind {
+        Kind::Insistent => run_on(
             sim.account(),
             |_| Insistent {
                 next: 0,
@@ -196,9 +291,8 @@ fn simulate_strategy(
             },
             &cfg,
             &env,
-        )
-    } else {
-        run_on(
+        ),
+        Kind::Quoter => run_on(
             sim.account(),
             |_| Quoter {
                 next: 0,
@@ -207,7 +301,17 @@ fn simulate_strategy(
             },
             &cfg,
             &env,
-        )
+        ),
+        Kind::Hedged => run_on(
+            sim.account(),
+            |_| Both {
+                next: 0,
+                ticks: 0,
+                both_held: false,
+            },
+            &cfg,
+            &env,
+        ),
     };
     let bytes = std::fs::read(&journal).expect("a journal was written");
     (sim, code, bytes)
@@ -348,5 +452,31 @@ fn an_account_that_moves_unexplained_stops_the_trading() {
         sim.resting().is_empty(),
         "left resting: {:?}",
         sim.resting()
+    );
+}
+
+/// Hedge mode: both legs held at once, through every fault, and the
+/// journal still agrees with the venue.
+#[test]
+fn a_hedged_account_stays_true_through_the_faults() {
+    let faults = Faults {
+        stream_drop: 300,
+        duplicate: 20_000,
+        unknown_placement: 20_000,
+        rate_limited: 20_000,
+        partial_fill: 200_000,
+        silent_fill_after: None,
+    };
+    let mut both = 0;
+    for seed in 1..=6 {
+        let (sim, code, _) = run_kind("hedged", seed, 15, faults, Kind::Hedged);
+        assert_invariants("hedged", seed, &sim, code);
+        if sim.legs().len() == 2 || sim.max_legs_held() == 2 {
+            both += 1;
+        }
+    }
+    assert!(
+        both > 0,
+        "no run held both legs at once, so hedge mode went untested"
     );
 }
