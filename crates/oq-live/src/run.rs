@@ -832,6 +832,7 @@ where
     // one level up.
     let mut refused = 0_u64;
     let mut unresolved = 0_u64;
+    let mut journal_halted = false;
     let mut reported_unresolved = 0_u64;
     let mut reconnect = Retry::default();
     let mut cancel_failed = 0_u64;
@@ -1270,6 +1271,15 @@ where
             }
         }
 
+        // A journal that stopped taking records has already stopped new
+        // orders inside the session. The halt is what withdraws the
+        // opening orders resting from before, which the session cannot
+        // reach; taken once, since the reason does not change.
+        if !journal_halted && let Some(why) = trader.journal_lost() {
+            journal_halted = true;
+            trader.halt(&format!("the journal can no longer be written: {why}"));
+        }
+
         // Upkeep that time makes due, whether or not anything arrived.
         for action in supervisor.due(now) {
             match action {
@@ -1663,6 +1673,8 @@ trait TraderLike {
     fn renew(&self);
     /// Stop trading, and withdraw what would add to the position.
     fn halt(&mut self, why: &str);
+    /// Why the journal stopped taking records, if it has.
+    fn journal_lost(&self) -> Option<String>;
 }
 
 impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
@@ -1784,6 +1796,9 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
         if let Err(e) = self.session().venue().keepalive_user_stream() {
             eprintln!("keepalive        FAILED: {e}");
         }
+    }
+    fn journal_lost(&self) -> Option<String> {
+        self.session().journal_lost().map(str::to_string)
     }
     fn halt(&mut self, why: &str) {
         eprintln!("HALT             {why}");

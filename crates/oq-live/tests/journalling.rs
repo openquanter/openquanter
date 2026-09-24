@@ -512,3 +512,76 @@ fn a_fill_is_recorded_with_the_id_the_strategy_knew_it_by() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A venue that counts placements, for proving none happened.
+#[derive(Default)]
+struct Counting {
+    placed: std::cell::Cell<u32>,
+}
+
+impl Execution for Counting {
+    fn place(&self, order: &NewOrder, _i: &Instrument) -> Placed {
+        self.placed.set(self.placed.get() + 1);
+        Placed::Accepted(OrderAck {
+            venue_id: "1".to_string(),
+            client_id: order.client_id.clone(),
+            status: "NEW".into(),
+            executed_qty: "0".into(),
+        })
+    }
+    fn cancel(&self, _s: &str, c: &str) -> Placed {
+        Placed::Accepted(OrderAck {
+            venue_id: "0".to_string(),
+            client_id: c.into(),
+            status: "CANCELED".into(),
+            executed_qty: "0".into(),
+        })
+    }
+    fn order_status(&self, _s: &str, _c: &str) -> Result<Option<OrderAck>, VenueError> {
+        Ok(None)
+    }
+}
+
+/// An order the journal cannot record is not sent.
+///
+/// Its client id would exist nowhere but in the venue, so a crash
+/// afterwards leaves a live order no restart can ask about — the case
+/// recording first exists to rule out. It used to be sent anyway, with a
+/// line on stderr. Withdrawals still go: they name orders the journal
+/// already holds, and refusing them would trap exposure.
+#[test]
+fn an_order_the_journal_cannot_record_is_not_sent() {
+    let path = temp("broken.oqj");
+    let _ = std::fs::remove_file(&path);
+    let mut journal = Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer");
+    journal.fail_from_here();
+    let mut s = Session::start(
+        Counting::default(),
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling(journal);
+
+    assert!(
+        s.journal_lost().is_some(),
+        "the failure is kept, not only printed"
+    );
+    for _ in 0..3 {
+        let result = s.submit(buy(), PriceTicks(6_000_000), Nanos(7));
+        assert!(
+            matches!(&result, oq_live::Submission::Rejected(why) if why.starts_with("not sent")),
+            "{result:?}"
+        );
+    }
+    assert_eq!(s.venue().placed.get(), 0, "nothing reached the venue");
+    assert!(matches!(s.cancel("oq-1"), oq_live::Submission::Sent(_)));
+}

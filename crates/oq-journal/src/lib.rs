@@ -80,6 +80,19 @@ pub enum JournalError {
         /// Whatever the holder wrote about itself, verbatim.
         held_by: String,
     },
+    /// An earlier write or flush failed, so this writer appends nothing
+    /// more.
+    ///
+    /// After a failure the bytes past the last whole record are unknown:
+    /// part of a frame may have reached the file, or all of it. A record
+    /// appended after that either follows garbage a reader stops at, or
+    /// repeats a sequence number already on disk. Reopening scans the
+    /// tail and starts again from a clean boundary; appending on does
+    /// not.
+    Broken,
+    /// A sequence number would pass `u64::MAX`. Unreachable by counting;
+    /// reachable by a file that says so.
+    SequenceExhausted,
 }
 
 impl From<io::Error> for JournalError {
@@ -104,6 +117,12 @@ impl core::fmt::Display for JournalError {
                  If that process is gone, remove the file.",
                 lock.display()
             ),
+            Self::Broken => write!(
+                f,
+                "an earlier write to this journal failed; nothing more is appended \
+                 until it is reopened"
+            ),
+            Self::SequenceExhausted => write!(f, "sequence number would pass u64::MAX"),
         }
     }
 }
@@ -113,7 +132,10 @@ impl core::error::Error for JournalError {
         match self {
             Self::Io(e) => Some(e),
             Self::Corrupt { cause, .. } => Some(cause),
-            Self::SequenceGap { .. } | Self::AlreadyOpen { .. } => None,
+            Self::SequenceGap { .. }
+            | Self::AlreadyOpen { .. }
+            | Self::Broken
+            | Self::SequenceExhausted => None,
         }
     }
 }
