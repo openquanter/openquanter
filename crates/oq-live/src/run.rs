@@ -17,18 +17,18 @@
 
 use core::time::Duration;
 use std::process::ExitCode;
-use std::time::Instant;
 
 use oq_gateway::account::Account;
 use oq_gateway::exec::Execution;
 use oq_gateway::{StreamOutcome, UserEvent, UserStreamReader};
 use oq_ingest::Aggregator;
-use oq_l2feed::session::{install_signal_handlers, now_ns, shutdown_requested};
+use oq_l2feed::session::{install_signal_handlers, shutdown_requested};
 use oq_l2feed::venue::Deployment;
 use oq_risk::{Limits, RiskGate};
 use oq_strategy::{Context, Ending, Strategy};
 use oq_types::{Cash, Instrument, Nanos, OrderId, PriceTicks, QtyLots, Side};
 
+use crate::clock::{Clock, SystemClock};
 use crate::{
     Action, MarketData, Outcome, Position, Session, SessionConfig, Supervisor, Timings, Trader,
 };
@@ -145,7 +145,7 @@ fn program() -> String {
 /// The expression this replaces multiplied and added without checking,
 /// so such a value ended the process with a panic during startup instead
 /// of a message.
-fn deadline_from(minutes: i64, now: Instant) -> Result<Option<Instant>, String> {
+fn deadline_from(minutes: i64, now: Duration) -> Result<Option<Duration>, String> {
     match minutes {
         0 => Ok(None),
         m if m < 0 => Err(format!(
@@ -164,19 +164,19 @@ fn deadline_from(minutes: i64, now: Instant) -> Result<Option<Instant>, String> 
 #[cfg(test)]
 mod deadline_tests {
     use super::deadline_from;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// The case this function exists for. A supervised run has no
     /// useful deadline to name, and every number it could name is one
     /// it will eventually reach for no reason.
     #[test]
     fn zero_is_no_deadline_rather_than_one_already_past() {
-        assert_eq!(deadline_from(0, Instant::now()), Ok(None));
+        assert_eq!(deadline_from(0, Duration::ZERO), Ok(None));
     }
 
     #[test]
     fn a_count_of_minutes_lands_that_many_minutes_ahead() {
-        let now = Instant::now();
+        let now = Duration::from_secs(7);
         assert_eq!(
             deadline_from(90, now),
             Ok(Some(now + Duration::from_secs(90 * 60)))
@@ -188,13 +188,13 @@ mod deadline_tests {
     /// a substitute nobody chose.
     #[test]
     fn a_negative_count_is_refused() {
-        assert!(deadline_from(-1, Instant::now()).is_err());
+        assert!(deadline_from(-1, Duration::ZERO).is_err());
     }
 
     /// This is the input that used to panic during startup.
     #[test]
     fn a_count_past_the_clock_is_refused_and_does_not_panic() {
-        assert!(deadline_from(i64::MAX, Instant::now()).is_err());
+        assert!(deadline_from(i64::MAX, Duration::ZERO).is_err());
     }
 }
 
@@ -205,7 +205,25 @@ mod deadline_tests {
 /// instrument is discovered here — precision and grid come from the
 /// deployment being traded, and a strategy that needs them cannot be
 /// constructed before this function has asked.
-pub fn run<S, F>(mut venue: Box<dyn Account>, make_strategy: F, cfg: &RunConfig) -> ExitCode
+pub fn run<S, F>(venue: Box<dyn Account>, make_strategy: F, cfg: &RunConfig) -> ExitCode
+where
+    S: Strategy,
+    F: FnOnce(&Instrument) -> S,
+{
+    run_on(venue, make_strategy, cfg, &SystemClock::new())
+}
+
+/// [`run`], reading time from `clock` rather than from the system.
+///
+/// Every decision the loop takes by the clock — a deadline, a backoff, a
+/// stale stream, a stamp on a record — reads it through here, so a test
+/// can drive the whole loop on a clock it moves by hand.
+pub fn run_on<S, F>(
+    mut venue: Box<dyn Account>,
+    make_strategy: F,
+    cfg: &RunConfig,
+    clock: &dyn Clock,
+) -> ExitCode
 where
     S: Strategy,
     F: FnOnce(&Instrument) -> S,
@@ -397,7 +415,7 @@ where
     };
     let id_range = match interlock.reserve_order_ids(
         &state_root.join("oq-live"),
-        u64::try_from(now_ns()).unwrap_or(0),
+        u64::try_from(clock.wall().0).unwrap_or(0),
     ) {
         Ok(range) => range,
         Err(e) => {
@@ -560,7 +578,7 @@ where
     // Conflating the two is what left this step invisible.
     let adopted = adopted_legs(&positions, &instrument, &symbol);
     for (side, lots, entry) in adopted_lots(&positions, &instrument) {
-        books.adopt(side, lots, entry, Nanos(now_ns()));
+        books.adopt(side, lots, entry, clock.wall());
         println!(
             "adopted          {} {} lots at {}",
             if side == Side::Buy { "long" } else { "short" },
@@ -658,7 +676,7 @@ where
     // reader rebuilding what this run believes it holds would have come
     // up short by exactly the positions that were migrated.
     let mut session = session;
-    session.record_reconciled(Nanos(now_ns()), adopted);
+    session.record_reconciled(clock.wall(), adopted);
 
     // Fetched while the session still owns the venue, replayed once the
     // trader exists. A strategy that has not seen its window cannot act,
@@ -790,9 +808,9 @@ where
     // this run. Asking for "everything" would sum a previous run's fees
     // into this one's attribution, which is the sort of number that
     // looks plausible and is somebody else's.
-    let started_ms = now_ns() / 1_000_000;
+    let started_ms = clock.wall().0 / 1_000_000;
     install_signal_handlers();
-    let deadline = match deadline_from(minutes, Instant::now()) {
+    let deadline = match deadline_from(minutes, clock.elapsed()) {
         Ok(deadline) => deadline,
         Err(why) => {
             eprintln!("running          REFUSED: {why}");
@@ -818,7 +836,7 @@ where
     let mut reported_unresolved = 0_u64;
     let mut reconnect = Retry::default();
     let mut cancel_failed = 0_u64;
-    let mut last_tick_report = Instant::now();
+    let mut last_tick_report = clock.elapsed();
     // The last observation, kept so a fill arriving between ticks can be
     // handed a context. A strategy sizing a ladder needs a price, and the
     // most recent one is the honest answer: the alternative is telling it
@@ -834,8 +852,8 @@ where
     let mut recovered: std::collections::VecDeque<oq_gateway::OrderUpdate> =
         std::collections::VecDeque::new();
 
-    while deadline.is_none_or(|d| Instant::now() < d) && !shutdown_requested() {
-        let now = Nanos(now_ns());
+    while deadline.is_none_or(|d| clock.elapsed() < d) && !shutdown_requested() {
+        let now = clock.wall();
 
         // Market data, drained rather than sampled.
         //
@@ -866,7 +884,7 @@ where
                 } else {
                     market.trade()
                 };
-                match stream.poll() {
+                match stream.poll(clock.elapsed()) {
                     Ok(Some(bytes)) => {
                         // Sampled per message, not per pass.
                         //
@@ -881,7 +899,7 @@ where
                         // the whole point of carrying both clocks is to
                         // tell delivery from timekeeping. A stamp that
                         // is really the pass's start tells neither.
-                        let seen = now_ns();
+                        let seen = clock.wall().0;
                         let at = event_time(&bytes).unwrap_or(seen);
                         let closed = if which == 0 {
                             match feed_venue.parse_depth(&bytes, scales) {
@@ -981,7 +999,7 @@ where
         if let Some(url) = &snapshot_url
             && agg.needs_snapshot()
             && agg.buffered() > 0
-            && snapshot_retry.due(Instant::now())
+            && snapshot_retry.due(clock.elapsed())
         {
             let installed = oq_l2feed::ws::fetch_snapshot(url, SNAPSHOT_TIMEOUT)
                 .map_err(|e| e.to_string())
@@ -1002,7 +1020,7 @@ where
                     println!("depth snapshot   installed at update {id}");
                 }
                 Err(e) => {
-                    snapshot_retry.failed(Instant::now());
+                    snapshot_retry.failed(clock.elapsed());
                     eprintln!("depth snapshot   not installed, asking again later: {e}");
                 }
             }
@@ -1034,7 +1052,7 @@ where
                 // association the translation depends on.
                 let local = trader.local_id(&u.client_id).unwrap_or(OrderId(0));
                 trader.apply(&u);
-                let parsed = fill_of(&u, &instrument, local);
+                let parsed = fill_of(&u, &instrument, local, clock.wall());
                 if let Err(why) = &parsed
                     && *why != NOT_A_FILL
                 {
@@ -1148,7 +1166,7 @@ where
                     // which a reader can only take as still resting.
                     trader
                         .session_mut()
-                        .record_cancelled(Nanos(now_ns()), &u.client_id);
+                        .record_cancelled(clock.wall(), &u.client_id);
                 }
                 // The end of the order, which is not the same event as
                 // its last fill and must not be inferred from one. A
@@ -1189,7 +1207,7 @@ where
                     act(&action, &mut trader, &symbol);
                 }
             }
-            StreamOutcome::Disconnected(why) if reconnect.due(Instant::now()) => {
+            StreamOutcome::Disconnected(why) if reconnect.due(clock.elapsed()) => {
                 metrics.disconnects += 1;
                 eprintln!("user stream      lost: {why}");
                 // Reconnect here, where the reader is. `act` cannot: it
@@ -1219,7 +1237,7 @@ where
                 // REST, with nothing between the attempts. That is the
                 // request pattern a venue answers with a ban, and a ban
                 // also blocks the cancels a halt needs.
-                let now_instant = Instant::now();
+                let now_instant = clock.elapsed();
                 if reconnect.due(now_instant) {
                     for action in supervisor.on_disconnect() {
                         if matches!(action, Action::Reconnect) {
@@ -1289,7 +1307,7 @@ where
                             // destroy the evidence of how they came to
                             // differ, which is the only thing that could
                             // explain it afterwards.
-                            if let Some(m) = books.reconcile(net, Nanos(now_ns())) {
+                            if let Some(m) = books.reconcile(net, clock.wall()) {
                                 // Ask before judging. A stream that
                                 // dropped does not replay what it missed,
                                 // and the commonest cause of this line is
@@ -1365,14 +1383,14 @@ where
             }
         }
 
-        if last_tick_report.elapsed() >= Duration::from_secs(30) {
-            last_tick_report = Instant::now();
+        if clock.elapsed().saturating_sub(last_tick_report) >= Duration::from_secs(30) {
+            last_tick_report = clock.elapsed();
             // Submissions the venue never answered, asked about again.
             // A round trip, so it belongs on the heartbeat and not on
             // the observation path. Each answer reaches the strategy
             // through `on_placed`, which is where it would have arrived
             // had the venue answered the first time.
-            let settled = trader.chase_unanswered(Nanos(now_ns()));
+            let settled = trader.chase_unanswered(clock.wall());
             for (local, resting) in &settled {
                 if *resting {
                     println!("resolved         {local:?} is resting after all");
@@ -1387,8 +1405,8 @@ where
             // Sampled and recorded together, so what a reader sees in
             // the terminal and what a replay sees in the journal are the
             // same observation rather than two that happen to agree.
-            let now_ns = Nanos(now_ns());
-            trader.record_waiting(now_ns);
+            let sampled_at = clock.wall();
+            trader.record_waiting(sampled_at);
             let waiting = trader.waiting_summary();
             let unanswered = trader.unanswered();
             let pending = if unanswered > 0 {
@@ -1450,7 +1468,7 @@ where
 
     println!();
     println!("stopping         cancelling anything still resting");
-    let shutdown_clean = match trader.cancel_all(&symbol) {
+    let shutdown_clean = match trader.cancel_all(&symbol, clock) {
         Ok(()) => true,
         Err(why) => {
             eprintln!("CANCEL FAILED    {why}");
@@ -1478,7 +1496,7 @@ where
             None
         }
     };
-    shadow.finish(Nanos(now_ns()));
+    shadow.finish(clock.wall());
     println!();
     let divergences = shadow.divergences();
     let flattering = shadow.flattering();
@@ -1639,7 +1657,7 @@ trait TraderLike {
     fn latency(&self) -> String;
     /// Withdraw every order owned by this process and verify through the
     /// venue's open-order view that none remains.
-    fn cancel_all(&mut self, symbol: &str) -> Result<(), String>;
+    fn cancel_all(&mut self, symbol: &str, clock: &dyn Clock) -> Result<(), String>;
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
     fn reconcile(&mut self, symbol: &str);
     fn renew(&self);
@@ -1697,7 +1715,7 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn latency(&self) -> String {
         self.session().submit_latency().summary()
     }
-    fn cancel_all(&mut self, symbol: &str) -> Result<(), String> {
+    fn cancel_all(&mut self, symbol: &str, clock: &dyn Clock) -> Result<(), String> {
         let ids = self
             .resting()
             .into_iter()
@@ -1742,7 +1760,7 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
                 Err(e) => last_error = Some(format!("could not verify open orders: {e}")),
             }
             if attempt < 4 {
-                std::thread::sleep(Duration::from_millis(200));
+                clock.sleep(Duration::from_millis(200));
             }
         }
 
@@ -2026,29 +2044,30 @@ fn reopen_user_stream(venue: &dyn Account, reader: &mut UserStreamReader) -> boo
     }
 }
 
+/// The most a depth snapshot may hold up the loop that also hears fills.
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The spacing between attempts to replace a lost account stream.
 ///
 /// A second after the first failure, doubling to a minute. Reset by a
 /// replacement that works, so a stream that drops once a day is not
 /// held to yesterday's interval.
-/// The most a depth snapshot may hold up the loop that also hears fills.
-const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
-
 #[derive(Debug, Default)]
 struct Retry {
     wait: Duration,
-    next: Option<Instant>,
+    /// On the clock's `elapsed` axis.
+    next: Option<Duration>,
 }
 
 impl Retry {
     const FIRST: Duration = Duration::from_secs(1);
     const LONGEST: Duration = Duration::from_secs(60);
 
-    fn due(&self, now: Instant) -> bool {
+    fn due(&self, now: Duration) -> bool {
         self.next.is_none_or(|next| now >= next)
     }
 
-    fn failed(&mut self, now: Instant) {
+    fn failed(&mut self, now: Duration) {
         self.wait = if self.next.is_none() {
             Self::FIRST
         } else {
@@ -2208,6 +2227,7 @@ fn fill_of(
     u: &oq_gateway::OrderUpdate,
     instrument: &Instrument,
     order: OrderId,
+    at: Nanos,
 ) -> Result<oq_types::Fill, &'static str> {
     let scaled = |text: &str, scale: u8| -> Option<i64> {
         let (int, frac) = text.split_once('.').unwrap_or((text, ""));
@@ -2250,7 +2270,7 @@ fn fill_of(
     }
 
     Ok(oq_types::Fill {
-        stamp: oq_types::Stamp::new(now_ns(), now_ns()),
+        stamp: oq_types::Stamp::new(at.0, at.0),
         instrument: oq_types::InstrumentId::new(1),
         // The strategy's own id, translated from the client id the venue
         // reports against. Zero when this process did not send the order
@@ -2580,8 +2600,13 @@ mod unreadable_reports {
     /// zero prices the position at nothing.
     #[test]
     fn a_zero_price_is_refused_by_name() {
-        let e = fill_of(&update("0", "0.001"), &Instrument::linear(2, 3), OrderId(1))
-            .expect_err("must refuse");
+        let e = fill_of(
+            &update("0", "0.001"),
+            &Instrument::linear(2, 3),
+            OrderId(1),
+            oq_types::Nanos(0),
+        )
+        .expect_err("must refuse");
         assert!(e.contains("price"), "{e}");
     }
 
@@ -2591,8 +2616,22 @@ mod unreadable_reports {
     #[test]
     fn a_quantity_finer_than_the_instrument_is_refused_not_truncated() {
         let i = Instrument::linear(2, 3);
-        assert!(fill_of(&update("100.0", "0.0015"), &i, OrderId(1)).is_err());
-        let f = fill_of(&update("100.0", "0.00100"), &i, OrderId(1)).expect("zeros are exact");
+        assert!(
+            fill_of(
+                &update("100.0", "0.0015"),
+                &i,
+                OrderId(1),
+                oq_types::Nanos(0)
+            )
+            .is_err()
+        );
+        let f = fill_of(
+            &update("100.0", "0.00100"),
+            &i,
+            OrderId(1),
+            oq_types::Nanos(0),
+        )
+        .expect("zeros are exact");
         assert_eq!(f.qty, oq_types::QtyLots(1));
     }
 
@@ -2602,7 +2641,8 @@ mod unreadable_reports {
             fill_of(
                 &update("-100.0", "0.001"),
                 &Instrument::linear(2, 3),
-                OrderId(1)
+                OrderId(1),
+                oq_types::Nanos(0),
             )
             .is_err()
         );
@@ -2617,8 +2657,13 @@ mod unreadable_reports {
     /// visible on a live run within seconds of the first order.
     #[test]
     fn an_acknowledgement_is_not_a_dropped_fill() {
-        let e = fill_of(&update("100.0", "0"), &Instrument::linear(2, 3), OrderId(1))
-            .expect_err("not a fill");
+        let e = fill_of(
+            &update("100.0", "0"),
+            &Instrument::linear(2, 3),
+            OrderId(1),
+            oq_types::Nanos(0),
+        )
+        .expect_err("not a fill");
         assert_eq!(e, super::NOT_A_FILL, "and it is distinguishable by name");
     }
 
@@ -2629,6 +2674,7 @@ mod unreadable_reports {
             &update("100.0", "-1"),
             &Instrument::linear(2, 3),
             OrderId(1),
+            oq_types::Nanos(0),
         )
         .expect_err("must refuse");
         assert!(e.contains("negative"), "{e}");
@@ -2642,7 +2688,8 @@ mod unreadable_reports {
             fill_of(
                 &update("not a number", "0.001"),
                 &Instrument::linear(2, 3),
-                OrderId(1)
+                OrderId(1),
+                oq_types::Nanos(0),
             )
             .is_err()
         );
@@ -2655,6 +2702,7 @@ mod unreadable_reports {
             &update("65432.10", "0.002"),
             &Instrument::linear(2, 3),
             OrderId(7),
+            oq_types::Nanos(0),
         )
         .expect("reads");
         assert_eq!(f.price.0, 6_543_210);
@@ -3119,11 +3167,10 @@ mod symbol_filter {
 mod reconnect_spacing {
     use super::Retry;
     use core::time::Duration;
-    use std::time::Instant;
 
     #[test]
     fn failures_space_attempts_out_to_a_minute_and_success_resets() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(100);
         let mut r = Retry::default();
         assert!(r.due(t0), "the first attempt is immediate");
 
