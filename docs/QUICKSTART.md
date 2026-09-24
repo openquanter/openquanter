@@ -269,6 +269,12 @@ cargo run --release -p oq-live --example grid_live -- \
   --symbol BTCUSDT --minutes 30
 ```
 
+Environment variables are for a shell. A process running as a service
+should get them as systemd credentials instead — `LoadCredential=OQ_VENUE_KEY:/path/to/file`,
+and the same for the secret — which are read first when present: an
+environment variable is readable in `/proc/<pid>/environ` by anything
+running as the same user, and is inherited by every child.
+
 That is a real strategy — the grid from §"Strategies you already know"
 — against a real order book, with the risk gate in front of it, the
 kernel keeping the account, the journal recording it, and the shadow
