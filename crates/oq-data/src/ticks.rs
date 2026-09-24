@@ -154,7 +154,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Header, Vec<Tick>), Error> {
     }
 
     let mut ticks = Vec::with_capacity(header.count as usize);
-    for chunk in body.chunks_exact(RECORD_LEN) {
+    for chunk in body.as_chunks::<RECORD_LEN>().0 {
         let at =
             |i: usize| i64::from_le_bytes(chunk[i * 8..i * 8 + 8].try_into().expect("8 bytes"));
         ticks.push(Tick {
@@ -226,7 +226,7 @@ pub fn read_file(path: &std::path::Path) -> Result<(Header, Vec<Tick>), Error> {
             available: HEADER_LEN + (header.count as usize - remaining) * RECORD_LEN,
         })?;
         crc.update(block);
-        for chunk in block.chunks_exact(RECORD_LEN) {
+        for chunk in block.as_chunks::<RECORD_LEN>().0 {
             let at =
                 |i: usize| i64::from_le_bytes(chunk[i * 8..i * 8 + 8].try_into().expect("8 bytes"));
             ticks.push(Tick {
@@ -771,7 +771,7 @@ impl TickReader {
         self.crc.update(block);
 
         self.pending.clear();
-        for chunk in block.chunks_exact(RECORD_LEN) {
+        for chunk in block.as_chunks::<RECORD_LEN>().0 {
             let at =
                 |i: usize| i64::from_le_bytes(chunk[i * 8..i * 8 + 8].try_into().expect("8 bytes"));
             self.pending.push(Tick {
