@@ -1084,9 +1084,29 @@ where
                             //
                             // After the books, so the context the
                             // strategy reads already contains this fill.
+                            //
+                            // Unless the venue placed the order itself. A
+                            // liquidation, a deleveraging or a settlement
+                            // is no strategy's order, and delivered as a
+                            // fill it reads as an execution of an order the
+                            // strategy does not know — which it counts and
+                            // ignores, and goes on managing a leg that has
+                            // gone.
+                            let closed = venue_closed_of(&u, &fill);
+                            if let Some(c) = &closed {
+                                metrics.venue_closed += 1;
+                                println!(
+                                    "venue closed     {:?} {:?} leg {} @ {} ({})",
+                                    c.reason, c.leg, c.qty.0, c.price.0, u.client_id
+                                );
+                            }
                             if let Some(t) = last_tick {
                                 let ctx = context_for(&books, t, trader.working());
-                                for outcome in trader.on_fill(&fill, &ctx, now) {
+                                let outcomes = match &closed {
+                                    Some(c) => trader.on_venue_closed(c, &ctx, now),
+                                    None => trader.on_fill(&fill, &ctx, now),
+                                };
+                                for outcome in outcomes {
                                     match &outcome {
                                         Outcome::Sent { .. } => sent += 1,
                                         Outcome::Cancelled { .. } => cancelled += 1,
@@ -1887,6 +1907,33 @@ fn legs_since_flat(
     (fills, unrecovered)
 }
 
+/// The fill of an order the venue placed itself, as what it closed.
+///
+/// `None` for an order someone on the account placed. Every one of these
+/// closes, so the leg is always the one opposite the fill: a sell closes
+/// the long. Read from the side rather than the offset, which a one-way
+/// account's `BOTH` cannot supply.
+fn venue_closed_of(
+    u: &oq_gateway::OrderUpdate,
+    fill: &oq_types::Fill,
+) -> Option<oq_strategy::VenueClosed> {
+    use oq_strategy::CloseReason;
+    let reason = match u.initiator {
+        oq_gateway::Initiator::Account => return None,
+        oq_gateway::Initiator::Liquidation => CloseReason::Liquidation,
+        oq_gateway::Initiator::Adl => CloseReason::Adl,
+        oq_gateway::Initiator::Settlement => CloseReason::Settlement,
+    };
+    Some(oq_strategy::VenueClosed {
+        instrument: fill.instrument,
+        reason,
+        leg: fill.side.opposite(),
+        qty: fill.qty,
+        price: fill.price,
+        at: fill.stamp.exch,
+    })
+}
+
 /// Whether an account-stream report is about the symbol this process
 /// trades. Case-insensitive because venues are not consistent about it
 /// and a case difference is not a different contract.
@@ -2519,6 +2566,7 @@ mod unreadable_reports {
             trade_id: Some(1),
             maker: false,
             event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
             symbol: "BTCUSDT".into(),
             venue_id: "0".to_string(),
         }
@@ -2970,6 +3018,7 @@ mod recovery {
             maker: true,
             trade_id,
             event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
         }
     }
 
@@ -3049,6 +3098,7 @@ mod symbol_filter {
             maker: false,
             trade_id: Some(9),
             event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
         }
     }
 
@@ -3247,5 +3297,72 @@ mod venue_history {
         );
         assert!(fills.is_empty());
         assert_eq!(unrecovered, ["SHORT"]);
+    }
+}
+
+#[cfg(test)]
+mod venue_closes {
+    use super::*;
+    use oq_gateway::Initiator;
+
+    fn update(initiator: Initiator) -> oq_gateway::OrderUpdate {
+        oq_gateway::OrderUpdate {
+            symbol: "BTCUSDT".into(),
+            client_id: "autoclose-1".into(),
+            venue_id: "9".into(),
+            status: "FILLED".into(),
+            last_qty: "0.006".into(),
+            cumulative_qty: "0.006".into(),
+            last_price: "80000".into(),
+            side: "SELL".into(),
+            position_side: "BOTH".into(),
+            maker: false,
+            trade_id: Some(7),
+            event_ms: 1,
+            initiator,
+        }
+    }
+
+    fn fill(side: Side, offset: oq_types::Offset) -> oq_types::Fill {
+        oq_types::Fill {
+            stamp: oq_types::Stamp::new(5, 6),
+            instrument: oq_types::InstrumentId::new(1),
+            order: OrderId(0),
+            trade: oq_types::TradeId(7),
+            side,
+            offset,
+            price: PriceTicks(8_000_000),
+            qty: oq_types::QtyLots(60),
+            liquidity: oq_types::Liquidity::Taker,
+        }
+    }
+
+    #[test]
+    fn an_account_order_is_not_a_venue_close() {
+        let f = fill(Side::Sell, oq_types::Offset::Close);
+        assert!(venue_closed_of(&update(Initiator::Account), &f).is_none());
+    }
+
+    /// The leg comes from the side, because a one-way account's `BOTH`
+    /// makes every fill read as an open.
+    #[test]
+    fn a_venue_order_closes_the_leg_opposite_its_side() {
+        for (initiator, reason) in [
+            (
+                Initiator::Liquidation,
+                oq_strategy::CloseReason::Liquidation,
+            ),
+            (Initiator::Adl, oq_strategy::CloseReason::Adl),
+            (Initiator::Settlement, oq_strategy::CloseReason::Settlement),
+        ] {
+            for offset in [oq_types::Offset::Open, oq_types::Offset::Close] {
+                let c = venue_closed_of(&update(initiator), &fill(Side::Sell, offset))
+                    .expect("a venue close");
+                assert_eq!(c.reason, reason);
+                assert_eq!(c.leg, Side::Buy, "a sell closes the long");
+                assert_eq!(c.qty, oq_types::QtyLots(60));
+                assert_eq!(c.at, Nanos(5));
+            }
+        }
     }
 }

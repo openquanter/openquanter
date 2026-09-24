@@ -71,8 +71,8 @@ pub use binance::{
 };
 pub use creds::Credentials;
 pub use exec::{
-    Endpoint, Events, Execution, Handshake, NewOrder, Opening, OrderAck, OrderUpdate, Placed,
-    PositionSide, Reject, Unresolved, UserEvent, UserStream,
+    Endpoint, Events, Execution, Handshake, Initiator, NewOrder, Opening, OrderAck, OrderUpdate,
+    Placed, PositionSide, Reject, Unresolved, UserEvent, UserStream,
 };
 pub use reconcile::{Divergence, Expectation, ExpectedLeg, Reconciliation, Tolerance, reconcile};
 pub use snapshot::{Part, Snapshot, SnapshotBuilder};
