@@ -122,9 +122,22 @@ pub fn read_header(bytes: &[u8]) -> Result<Header, Error> {
 /// # Errors
 /// [`Error::Truncated`] when the file is shorter than its header
 /// claims, [`Error::ChecksumMismatch`] when the records do not verify.
+/// How long a file holding `count` records is, or `None` when the count
+/// cannot describe a file on this machine.
+///
+/// Checked, because the count comes from the file: a corrupt header whose
+/// count multiplied past `usize` wrapped to a small length and passed the
+/// check it was supposed to fail.
+fn expected_len(count: u64) -> Option<usize> {
+    usize::try_from(count)
+        .ok()?
+        .checked_mul(RECORD_LEN)?
+        .checked_add(HEADER_LEN)
+}
+
 pub fn decode(bytes: &[u8]) -> Result<(Header, Vec<Tick>), Error> {
     let header = read_header(bytes)?;
-    let expected_len = HEADER_LEN + header.count as usize * RECORD_LEN;
+    let expected_len = expected_len(header.count).unwrap_or(usize::MAX);
     if bytes.len() < expected_len {
         return Err(Error::Truncated {
             needed: expected_len,
@@ -183,6 +196,21 @@ pub fn read_file(path: &std::path::Path) -> Result<(Header, Vec<Tick>), Error> {
         })?;
     let header = read_header(&header_bytes)?;
 
+    // The file's own length first, and only then the allocation. A
+    // corrupt count asked for terabytes before anything was checked, and
+    // the process aborted rather than reporting a truncated file —
+    // which TICK-FORMAT §2.4 says is detectable before allocating.
+    let expected = expected_len(header.count).unwrap_or(usize::MAX);
+    let on_disk = file
+        .metadata()
+        .map(|m| usize::try_from(m.len()).unwrap_or(usize::MAX))
+        .unwrap_or(0);
+    if on_disk < expected {
+        return Err(Error::Truncated {
+            needed: expected,
+            available: on_disk,
+        });
+    }
     let mut ticks = Vec::with_capacity(header.count as usize);
     let mut crc = crc32_streaming::Accumulator::new();
     // A block of whole records, so a decode never straddles a read.
@@ -194,7 +222,7 @@ pub fn read_file(path: &std::path::Path) -> Result<(Header, Vec<Tick>), Error> {
         let want = remaining.min(RECORDS_PER_BLOCK) * RECORD_LEN;
         let block = &mut buf[..want];
         file.read_exact(block).map_err(|_| Error::Truncated {
-            needed: HEADER_LEN + header.count as usize * RECORD_LEN,
+            needed: expected,
             available: HEADER_LEN + (header.count as usize - remaining) * RECORD_LEN,
         })?;
         crc.update(block);
@@ -603,6 +631,22 @@ mod streaming_tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// A corrupt count is a truncated file, not an allocation of
+    /// terabytes: the process aborted before anything was checked.
+    #[test]
+    fn a_corrupt_count_is_reported_before_anything_is_allocated() {
+        let path = temp_file("count");
+        let mut bytes = encode(1, &sample(10));
+        bytes[8..16].copy_from_slice(&(1_u64 << 40).to_le_bytes());
+        std::fs::write(&path, &bytes).expect("write");
+        assert!(matches!(read_file(&path), Err(Error::Truncated { .. })));
+        std::fs::remove_file(&path).ok();
+
+        // And a count whose length overflows is not wrapped into a small one.
+        bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(decode(&bytes), Err(Error::Truncated { .. })));
+    }
+
     #[test]
     fn a_truncated_file_is_reported_as_truncated() {
         let path = temp_file("short");
@@ -720,7 +764,7 @@ impl TickReader {
         let block = &mut self.buf[..want];
         if self.file.read_exact(block).is_err() {
             return Some(Err(Error::Truncated {
-                needed: HEADER_LEN + self.header.count as usize * RECORD_LEN,
+                needed: expected_len(self.header.count).unwrap_or(usize::MAX),
                 available: HEADER_LEN + (self.header.count as usize - self.remaining) * RECORD_LEN,
             }));
         }
