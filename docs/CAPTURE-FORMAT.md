@@ -65,15 +65,33 @@ drifts or the process restarts across midnight.
 ## 3. Record framing
 
 Length-prefixed binary frames, appended sequentially. Little-endian.
+Format version 2 writes this layout:
 
 | Offset | Size | Field | Meaning |
 |---|---|---|---|
 | 0 | 4 | `len` | Byte length of everything after this field |
-| 4 | 1 | `kind` | `0` = venue payload, `1` = control record |
+| 4 | 1 | `kind` | `2` = venue payload, `3` = control record |
 | 5 | 8 | `local_ts` | Local receive time, nanoseconds since the Unix epoch |
 | 13 | 8 | `exch_ts` | Exchange timestamp, nanoseconds; `i64::MIN` when the payload carries none |
-| 21 | 4 | `crc32` | CRC-32 of the payload bytes |
-| 25 | `len - 21` | `payload` | The venue's bytes, exactly as received |
+| 21 | 4 | `header_crc32` | CRC-32 of bytes 0–20: `len`, `kind` and both timestamps |
+| 25 | 4 | `crc32` | CRC-32 of the payload bytes |
+| 29 | `len - 25` | `payload` | The venue's bytes, exactly as received |
+
+`len` may not exceed 64 MiB (`MAX_FRAME_LEN`); a longer one is
+corruption.
+
+**Version 1 frames**, written before format version 2, have kinds `0`
+(payload) and `1` (control) and no `header_crc32`: the payload CRC sits
+at offset 21 and the payload at 25. Readers accept both, frame by frame,
+so a file whose writer was upgraded partway through the day reads across
+the seam. The kind byte is what tells them apart, which is why version 2
+took new kinds rather than reinterpreting the old ones.
+
+Version 1 protected only the payload. A damaged `len` there reads as a
+frame running past the end of the file, and a reader that treats that
+as a torn tail stops without an error — reproduced with one flipped bit,
+990 of 1,000 records lost silently. Version 2 checks the header before
+it believes the length.
 
 Framing rather than newline-delimited JSON: a length prefix holds any
 byte sequence without escaping, so the verbatim rule survives payloads
@@ -147,7 +165,7 @@ When rotation occurs, the completed day is sealed:
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "venue": "example",
   "symbol": "EXAMPLEUSDT",
   "stream": "depth",
@@ -245,12 +263,13 @@ ignore the alert that matters.
 ## 7. Crash safety
 
 The active file is append-only. A process that dies mid-write leaves a
-truncated final frame, detected by a short read or a CRC mismatch on the
-last record. Readers must:
+truncated final frame, detected by a short read. Readers must:
 
-1. Treat a torn final record as end-of-file rather than corruption.
-2. Treat a CRC failure anywhere earlier as corruption and refuse to
-   proceed silently.
+1. Treat a torn final record as end-of-file rather than corruption. A
+   version 2 frame is torn only if its header or its payload is cut
+   short; a complete header whose checksum fails is damage, never a tail.
+2. Treat a CRC failure anywhere else as corruption and refuse to proceed
+   silently.
 
 On restart, the capture process appends to the existing day file and
 emits a `session_start` control record, so the seam is visible in the
