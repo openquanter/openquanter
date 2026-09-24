@@ -254,5 +254,5 @@ fn markout(args: &[String]) -> ExitCode {
 
 /// The first twelve characters of a hash, which is what a person reads.
 fn short(hash: &str) -> &str {
-    &hash[..12.min(hash.len())]
+    oq_parity::abbreviate(hash, 12)
 }
