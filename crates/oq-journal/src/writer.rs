@@ -18,7 +18,7 @@
 
 use crate::{Frame, JournalError, Result};
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 /// When to force records to durable storage.
@@ -45,8 +45,9 @@ pub enum SyncPolicy {
 #[derive(Debug)]
 pub struct Writer {
     path: PathBuf,
-    /// Removed on drop. Its presence is what stops a second writer.
-    lock: PathBuf,
+    /// Holds the kernel lock that stops a second writer, for as long as
+    /// this writer lives. Released by closing, never by deleting.
+    _lock: File,
     file: BufWriter<File>,
     policy: SyncPolicy,
     next_seq: u64,
@@ -93,7 +94,7 @@ impl Writer {
 
         Ok(Self {
             path,
-            lock,
+            _lock: lock,
             file: BufWriter::with_capacity(1 << 16, file),
             policy,
             next_seq,
@@ -214,11 +215,10 @@ impl Drop for Writer {
         // returned from drop; callers that need the guarantee call
         // `sync` explicitly, which is why `sync` is public.
         let _ = self.file.flush();
-        // Best effort: a process killed outright leaves this behind, and
-        // the next start refuses until someone looks. That is the safe
-        // direction for a journal — a stale lock costs a human a minute,
-        // a shared journal costs the record.
-        let _ = std::fs::remove_file(&self.lock);
+        // The lock goes with the handle. The file is left in place:
+        // deleting it by name could remove one a successor has already
+        // locked, and a second writer would then lock a new file beside
+        // the first.
     }
 }
 
@@ -247,46 +247,54 @@ impl Writer {
 
 /// Claim exclusive use of a journal, or say who has it.
 ///
-/// `create_new` is the whole mechanism: the file system decides, once,
-/// which caller creates the file. No check-then-act, so no window
-/// between deciding it is free and taking it — which is the failure a
-/// `pgrep` in a start script cannot avoid, and the reason this lives
-/// here rather than in one.
-fn acquire(journal: &Path) -> Result<PathBuf> {
+/// A kernel lock on a file beside the journal, held until the writer is
+/// dropped. The kernel releases it when the holder exits however it
+/// exits, so a process killed outright leaves nothing that refuses the
+/// next start — the old lock, a file whose existence was the claim, did,
+/// until someone deleted it by hand. And no check-then-act: the kernel
+/// decides, once, which caller holds it, which is the failure a `pgrep`
+/// in a start script cannot avoid.
+///
+/// Beside the journal rather than on it: on Windows a lock on the
+/// journal itself would also stop other processes reading it.
+fn acquire(journal: &Path) -> Result<File> {
     let lock = journal.with_extension("lock");
-    match OpenOptions::new().write(true).create_new(true).open(&lock) {
-        Ok(mut f) => {
-            // Written for a human reading it after a crash. The pid is
-            // the useful part; the rest says which journal and when, so
-            // a stale file can be recognised as stale.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)?;
+    match file.try_lock() {
+        Ok(()) => {
+            // For a human wondering who holds it; the lock, not this
+            // text, is what refuses a second writer.
+            let _ = file.set_len(0);
             let _ = writeln!(
-                f,
-                "pid {} opened {} at {}",
+                file,
+                "pid {} writing {}",
                 std::process::id(),
-                journal.display(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
+                journal.display()
             );
-            let _ = f.sync_all();
-            Ok(lock)
+            let _ = file.sync_all();
+            Ok(file)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let held_by = std::fs::read_to_string(&lock)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+        Err(std::fs::TryLockError::WouldBlock) => {
+            // Read through the handle already open, not the path.
+            let mut text = String::new();
+            let _ = file.rewind();
+            let _ = Read::by_ref(&mut file).take(1024).read_to_string(&mut text);
+            let text = text.trim();
             Err(JournalError::AlreadyOpen {
                 lock,
-                held_by: if held_by.is_empty() {
+                held_by: if text.is_empty() {
                     "nothing about itself".to_string()
                 } else {
-                    held_by
+                    text.to_string()
                 },
             })
         }
-        Err(e) => Err(e.into()),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
 }
 
@@ -324,6 +332,13 @@ mod tests {
         // shutdown is not blocked by yesterday's lock.
         drop(first);
         let _second = Writer::open(&path, SyncPolicy::Never).expect("reopens after drop");
+        drop(_second);
+
+        // A lock file left by a process that died without dropping —
+        // killed, out of memory, power lost — holds no lock, and refuses
+        // nothing. The old lock was the file itself, and did.
+        std::fs::write(path.with_extension("lock"), "pid 1 writing a journal\n").expect("stale");
+        let _third = Writer::open(&path, SyncPolicy::Never).expect("a stale file is not a lock");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -113,8 +113,7 @@ impl core::fmt::Display for JournalError {
             }
             Self::AlreadyOpen { lock, held_by } => write!(
                 f,
-                "journal already open: {} says {held_by}. \
-                 If that process is gone, remove the file.",
+                "journal already open: {} is locked by {held_by}",
                 lock.display()
             ),
             Self::Broken => write!(
