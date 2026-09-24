@@ -168,6 +168,8 @@ pub struct Session<E: Execution> {
     /// is a choice a caller should have to make rather than a default it
     /// falls into. `oq-trade` opens one unless told not to.
     journal: Option<oq_journal::Writer>,
+    /// Why the journal stopped taking records, once it has.
+    journal_lost: Option<String>,
     venue: E,
     gate: RiskGate,
     book: Book,
@@ -246,6 +248,7 @@ impl<E: Execution> Session<E> {
         Ok(Self {
             submit_latency: Latency::new(),
             journal: None,
+            journal_lost: None,
             venue,
             gate,
             book,
@@ -316,26 +319,45 @@ impl<E: Execution> Session<E> {
 
     /// Append one record, if journalling, flushing before returning.
     ///
-    /// Failures are reported and do not stop the session. A journal that
-    /// cannot be written is a lost audit trail; refusing to trade
-    /// because of it would turn a recording problem into a trading
-    /// outage, and the venue does not care either way. The count of
-    /// failures is what a reader should look at.
-    fn write(&mut self, record: &Record) {
+    /// Whether the record is now in the file; always true without a
+    /// journal. A failure is kept, not just printed: the first one ends
+    /// the journal (see `oq_journal::JournalError::Broken`), and from
+    /// then on `send` places nothing — an order whose client id was
+    /// never written is one no restart can ask the venue about, which
+    /// is the one thing recording first exists to rule out. Withdrawals
+    /// still go: a cancel names an order the journal already holds, and
+    /// refusing it would trap exposure in order to protect a record.
+    fn write(&mut self, record: &Record) -> bool {
         let Some(journal) = self.journal.as_mut() else {
-            return;
+            return true;
         };
         let payload = record.encode();
-        if let Err(e) = journal.append(record.kind(), &payload) {
-            eprintln!("journal: could not append {:?}: {e}", record.kind());
-            return;
-        }
         // Flushed here rather than on drop: the whole point is that the
         // record exists before the order does, and a record sitting in a
         // buffer does not exist to anything that reads the file.
-        if let Err(e) = journal.flush() {
-            eprintln!("journal: could not flush: {e}");
+        let written = journal
+            .append(record.kind(), &payload)
+            .and_then(|_| journal.flush());
+        match written {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("journal: could not record {:?}: {e}", record.kind());
+                if self.journal_lost.is_none() {
+                    self.journal_lost = Some(e.to_string());
+                }
+                false
+            }
         }
+    }
+
+    /// Why the journal stopped taking records, if it has.
+    ///
+    /// Once set, no new order is sent. The caller should halt, which
+    /// withdraws the opening orders already resting; this cannot do that
+    /// itself, for the reason given on [`Session::reconcile`].
+    #[must_use]
+    pub fn journal_lost(&self) -> Option<&str> {
+        self.journal_lost.as_deref()
     }
 
     /// Positions this run took over from the venue at startup.
@@ -498,6 +520,11 @@ impl<E: Execution> Session<E> {
     /// Turn a permit into an order and send it.
     fn send(&mut self, permit: &Permit, now: Nanos) -> Submission {
         let approved = permit.order();
+        if let Some(why) = &self.journal_lost {
+            return Submission::Rejected(format!(
+                "not sent: the journal can no longer record orders ({why})"
+            ));
+        }
         if self.sequence >= self.sequence_end {
             return Submission::Rejected(
                 "reserved client order ids exhausted; restart with a new durable reservation"
@@ -526,7 +553,7 @@ impl<E: Execution> Session<E> {
         // measures how long the machine took, which decides nothing, and
         // a virtual clock would report zero for it every time.
         let journalled_at = std::time::Instant::now();
-        self.write(&Record::Submitted {
+        let recorded = self.write(&Record::Submitted {
             at: now,
             client_id: client_id.clone(),
             side: order.side,
@@ -534,6 +561,11 @@ impl<E: Execution> Session<E> {
             qty: order.qty,
             reduce_only: order.reduce_only,
         });
+        if !recorded {
+            return Submission::Rejected(format!(
+                "not sent: the journal could not record {client_id}"
+            ));
+        }
         // Measured here: everything this process did between the record
         // being durable and the client being handed the order.
         self.submit_latency

@@ -123,7 +123,12 @@ impl Reader {
                             found: frame.seq,
                         });
                     }
-                    expected_seq = Some(frame.seq + 1);
+                    expected_seq = Some(
+                        frame
+                            .seq
+                            .checked_add(1)
+                            .ok_or(JournalError::SequenceExhausted)?,
+                    );
                     frames.push(frame);
                     offset += used;
                 }
@@ -185,6 +190,23 @@ mod tests {
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         p
+    }
+
+    /// A file whose last sequence number is `u64::MAX` has no next one.
+    /// Refused, not wrapped to zero — which would hand the next writer
+    /// the number of the first record in the file.
+    #[test]
+    fn a_sequence_at_the_top_of_the_range_is_refused() {
+        let path = temp_path("exhausted");
+        let mut bytes = Vec::new();
+        Frame::new(u64::MAX, 1, b"last".to_vec()).encode_into(&mut bytes);
+        std::fs::write(&path, &bytes).expect("write");
+        let err = Reader::open(&path)
+            .expect("open")
+            .replay()
+            .expect_err("refused");
+        assert!(matches!(err, JournalError::SequenceExhausted), "{err}");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

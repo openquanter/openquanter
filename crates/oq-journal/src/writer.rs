@@ -52,6 +52,8 @@ pub struct Writer {
     next_seq: u64,
     bytes_written: u64,
     scratch: Vec<u8>,
+    /// Set by the first failed write or flush; see [`JournalError::Broken`].
+    broken: bool,
 }
 
 impl Writer {
@@ -95,6 +97,7 @@ impl Writer {
             next_seq,
             bytes_written: clean_len,
             scratch: Vec::with_capacity(1024),
+            broken: false,
         })
     }
 
@@ -125,22 +128,48 @@ impl Writer {
     /// # Errors
     /// I/O failures.
     pub fn append(&mut self, kind: u16, payload: &[u8]) -> Result<u64> {
+        if self.broken {
+            return Err(JournalError::Broken);
+        }
         let seq = self.next_seq;
+        let next = seq.checked_add(1).ok_or(JournalError::SequenceExhausted)?;
         self.scratch.clear();
         Frame::new(seq, kind, payload.to_vec()).encode_into(&mut self.scratch);
-        self.file.write_all(&self.scratch)?;
-        self.bytes_written += self.scratch.len() as u64;
-        self.next_seq += 1;
-
-        match self.policy {
-            SyncPolicy::EveryRecord => {
-                self.file.flush()?;
-                self.file.get_ref().sync_data()?;
+        self.guard(|w| {
+            w.file.write_all(&w.scratch)?;
+            match w.policy {
+                SyncPolicy::EveryRecord => {
+                    w.file.flush()?;
+                    w.file.get_ref().sync_data()
+                }
+                SyncPolicy::EveryRecordNoFsync => w.file.flush(),
+                SyncPolicy::Never => Ok(()),
             }
-            SyncPolicy::EveryRecordNoFsync => self.file.flush()?,
-            SyncPolicy::Never => {}
-        }
+        })?;
+        self.bytes_written += self.scratch.len() as u64;
+        self.next_seq = next;
         Ok(seq)
+    }
+
+    /// Run one I/O step, and stop appending for good if it fails.
+    fn guard(&mut self, step: impl FnOnce(&mut Self) -> std::io::Result<()>) -> Result<()> {
+        if self.broken {
+            return Err(JournalError::Broken);
+        }
+        step(self).map_err(|e| {
+            self.broken = true;
+            JournalError::Io(e)
+        })
+    }
+
+    /// Behave from here on as though a write had just failed.
+    ///
+    /// For testing what a caller does when its journal stops accepting
+    /// records: a real failure — a full disk, a vanished device — is not
+    /// something a test can arrange portably.
+    #[doc(hidden)]
+    pub fn fail_from_here(&mut self) {
+        self.broken = true;
     }
 
     /// Flush buffered records to the OS.
@@ -148,8 +177,7 @@ impl Writer {
     /// # Errors
     /// I/O failures.
     pub fn flush(&mut self) -> Result<()> {
-        self.file.flush()?;
-        Ok(())
+        self.guard(|w| w.file.flush())
     }
 
     /// Flush and fsync, whatever the policy.
@@ -157,9 +185,10 @@ impl Writer {
     /// # Errors
     /// I/O failures.
     pub fn sync(&mut self) -> Result<()> {
-        self.file.flush()?;
-        self.file.get_ref().sync_data()?;
-        Ok(())
+        self.guard(|w| {
+            w.file.flush()?;
+            w.file.get_ref().sync_data()
+        })
     }
 }
 
@@ -323,6 +352,45 @@ mod tests {
         }
         let w = Writer::open(&path, SyncPolicy::Never).expect("reopen");
         assert_eq!(w.next_seq(), 2, "must not restart numbering");
+        drop(w);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// After one failed write the writer appends nothing more, and a
+    /// reopen starts from the last whole record.
+    ///
+    /// The failure is real: the file underneath is swapped for a
+    /// read-only handle, so the flush fails the way a full disk does.
+    #[test]
+    fn a_failed_write_stops_every_later_append() {
+        let path = temp_path("broken");
+        {
+            let mut w = Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("open");
+            w.append(1, b"kept").expect("append");
+            w.file = BufWriter::new(File::open(&path).expect("read-only handle"));
+
+            assert!(matches!(w.append(1, b"lost"), Err(JournalError::Io(_))));
+            assert!(matches!(w.append(1, b"after"), Err(JournalError::Broken)));
+            assert!(matches!(w.flush(), Err(JournalError::Broken)));
+            assert!(matches!(w.sync(), Err(JournalError::Broken)));
+            assert_eq!(w.next_seq(), 1, "a failed append assigns no number");
+        }
+        let w = Writer::open(&path, SyncPolicy::Never).expect("reopen");
+        assert_eq!(
+            w.next_seq(),
+            1,
+            "the journal holds exactly the record that was written"
+        );
+        drop(w);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn the_test_hook_breaks_a_writer_the_same_way() {
+        let path = temp_path("hook");
+        let mut w = Writer::open(&path, SyncPolicy::Never).expect("open");
+        w.fail_from_here();
+        assert!(matches!(w.append(1, b"x"), Err(JournalError::Broken)));
         drop(w);
         std::fs::remove_file(&path).ok();
     }
