@@ -471,6 +471,15 @@ impl<E: Execution> Session<E> {
         self.send(&permit, now)
     }
 
+    /// Record that an order whose placement went unanswered turned out
+    /// to be resting, as a later question to the venue established.
+    ///
+    /// The same bookkeeping an accepted placement gets at once: it is
+    /// counted against the bound on working orders from now.
+    pub fn confirm_resting(&mut self, client_id: &str) {
+        self.book.on_sent(client_id);
+    }
+
     /// Turn a permit into an order and send it.
     fn send(&mut self, permit: &Permit, now: Nanos) -> Submission {
         let approved = permit.order();

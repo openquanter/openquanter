@@ -304,8 +304,20 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         let mut still_open = Vec::new();
         for (local, client_id) in core::mem::take(&mut self.unanswered) {
             match self.session.venue().order_status(&symbol, &client_id) {
-                Ok(Some(_)) => settled.push((local, true)),
-                Ok(None) => settled.push((local, false)),
+                // Resting after all, so it is registered as any accepted
+                // order is. Telling the strategy was once the whole of
+                // this: its fills then arrived under an id that
+                // translated to nothing, a halt's withdrawal could not
+                // see it, and the shutdown sweep left it on the venue.
+                Ok(Some(_)) => {
+                    self.session.confirm_resting(&client_id);
+                    self.live.insert(local.0, client_id);
+                    settled.push((local, true));
+                }
+                Ok(None) => {
+                    self.closing.remove(&local.0);
+                    settled.push((local, false));
+                }
                 // Still no answer. Kept, not guessed at.
                 Err(_) => still_open.push((local, client_id)),
             }
@@ -482,11 +494,19 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 why: format!("{b:?}"),
             },
             Submission::Rejected(why) => Outcome::Refused { local, why },
-            Submission::Unresolved { client_id, why } => Outcome::Unresolved {
-                local,
-                client_id,
-                why,
-            },
+            Submission::Unresolved { client_id, why } => {
+                // Remembered now, while it is known, in case a later
+                // question finds the order resting: a take-profit that
+                // landed must still be kept by a halt.
+                if closing {
+                    self.closing.insert(local.0);
+                }
+                Outcome::Unresolved {
+                    local,
+                    client_id,
+                    why,
+                }
+            }
         }
     }
 }
