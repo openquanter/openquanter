@@ -91,8 +91,21 @@ impl Book {
 
     /// Whether an event names an order this process issued.
     #[must_use]
+    ///
+    /// The prefix must end where an id this process composes would put
+    /// the sequence: at a `-`, or at the digits themselves on a venue
+    /// with no punctuation. A bare `starts_with` claimed `oq1…` for a
+    /// process whose prefix is `oq`, and another system's orders then
+    /// counted against this one's limits and could be withdrawn by it.
     pub fn is_ours(&self, client_id: &str) -> bool {
-        self.prefix.is_empty() || client_id.starts_with(&self.prefix)
+        if self.prefix.is_empty() {
+            return true;
+        }
+        let Some(rest) = client_id.strip_prefix(&self.prefix) else {
+            return false;
+        };
+        let sequence = rest.strip_prefix('-').unwrap_or(rest);
+        !sequence.is_empty() && sequence.bytes().all(|b| b.is_ascii_digit())
     }
 
     /// Events discarded as belonging to another system.
@@ -427,6 +440,17 @@ mod ownership {
         assert!(!b.apply(&update("x-brokerref-4471", "NEW", None)));
         assert_eq!(b.working(), 0, "not ours, not counted");
         assert_eq!(b.foreign(), 1, "counted as foreign rather than ignored");
+    }
+
+    /// A longer prefix that begins with ours is not ours.
+    #[test]
+    fn a_prefix_that_merely_begins_with_ours_is_not_ours() {
+        let b = Book::owning("oq");
+        assert!(b.is_ours("oq-17"), "hyphenated, as on Binance");
+        assert!(b.is_ours("oq17"), "bare digits, as on OKX");
+        assert!(!b.is_ours("oq1abc"));
+        assert!(!b.is_ours("oq1-5"), "another system whose prefix is oq1");
+        assert!(!b.is_ours("oq"), "no sequence at all");
     }
 
     #[test]
