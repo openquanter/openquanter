@@ -237,6 +237,28 @@ impl Venue for BinancePerp {
     fn parse_depth(&self, payload: &[u8], scales: Scales) -> Result<DepthUpdate, ParseError> {
         crate::depth::parse_depth(payload, scales)
     }
+
+    /// The venue's documented starting point for its diff stream.
+    ///
+    /// On this deployment's host, not a fixed one: a test run whose
+    /// book came from production would be trading one market against
+    /// another's prices. A thousand levels costs a request weight of 20,
+    /// asked once per connection and once per break in the chain.
+    fn depth_snapshot_url(&self, symbol: &str) -> Option<String> {
+        Some(format!(
+            "{}/fapi/v1/depth?symbol={}&limit=1000",
+            self.rest_host(),
+            symbol.to_uppercase()
+        ))
+    }
+
+    fn parse_depth_snapshot(
+        &self,
+        payload: &[u8],
+        scales: Scales,
+    ) -> Result<crate::depth::DepthSnapshot, ParseError> {
+        crate::depth::parse_snapshot(payload, scales)
+    }
 }
 
 /// Read a bare JSON `true`/`false` following `key`.
@@ -305,18 +327,25 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// The REST snapshot that re-establishes book state after a reconnect.
-#[must_use]
-pub fn snapshot_url(symbol: &str, limit: u32) -> String {
-    format!(
-        "https://fapi.binance.com/fapi/v1/depth?symbol={}&limit={limit}",
-        symbol.to_uppercase()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The snapshot comes from the deployment being traded. The helper
+    /// this replaced named production's host whatever it was asked for.
+    #[test]
+    fn the_depth_snapshot_is_asked_of_the_deployment_being_traded() {
+        let live = BinancePerp::at(Deployment::Live).depth_snapshot_url("btcusdt");
+        let test = BinancePerp::at(Deployment::Testnet).depth_snapshot_url("btcusdt");
+        assert_eq!(
+            live.as_deref(),
+            Some("https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000")
+        );
+        assert_eq!(
+            test.as_deref(),
+            Some("https://testnet.binancefuture.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000")
+        );
+    }
 
     #[test]
     fn event_time_is_read_from_the_e_field() {

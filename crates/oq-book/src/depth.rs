@@ -178,6 +178,38 @@ pub fn parse_depth(payload: &[u8], scales: Scales) -> Result<DepthUpdate, ParseE
     })
 }
 
+/// A full book as the venue's REST endpoint returns it.
+///
+/// The starting point an incremental stream is applied to. Without one a
+/// live book is assembled from whichever levels happen to change after
+/// connecting, and a side that has not changed yet is a side that is not
+/// there — a best bid read from it is a price nobody is bidding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthSnapshot {
+    /// The last update id reflected in the snapshot.
+    pub last_update_id: u64,
+    /// Bid levels.
+    pub bids: Vec<Level>,
+    /// Ask levels.
+    pub asks: Vec<Level>,
+}
+
+/// Parse a REST depth snapshot: `lastUpdateId` and the two sides.
+///
+/// # Errors
+///
+/// See [`ParseError`]. A payload without `lastUpdateId` is refused as
+/// not a snapshot — an error body parses as nothing else either.
+pub fn parse_snapshot(payload: &[u8], scales: Scales) -> Result<DepthSnapshot, ParseError> {
+    let text = core::str::from_utf8(payload).map_err(|_| ParseError::NotDepth)?;
+    let last_update_id = int_field(text, "\"lastUpdateId\":").ok_or(ParseError::NotDepth)?;
+    Ok(DepthSnapshot {
+        last_update_id,
+        bids: levels(text, "\"bids\":", scales)?,
+        asks: levels(text, "\"asks\":", scales)?,
+    })
+}
+
 /// Read an unsigned integer that follows `key`.
 fn int_field(text: &str, key: &str) -> Option<u64> {
     let mut from = 0usize;
@@ -251,6 +283,37 @@ fn levels(text: &str, key: &str, scales: Scales) -> Result<Vec<Level>, ParseErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rest_snapshot_parses_into_both_sides() {
+        let payload = br#"{"lastUpdateId":1027024,"E":1589436922972,"T":1589436922959,"bids":[["4.00000000","431.00000000"],["3.99","1"]],"asks":[["4.00000200","12.00000000"]]}"#;
+        let s = parse_snapshot(payload, Scales { price: 8, qty: 8 }).expect("parses");
+        assert_eq!(s.last_update_id, 1_027_024);
+        assert_eq!(s.bids.len(), 2);
+        assert_eq!(
+            s.bids[0],
+            Level {
+                price: 400_000_000,
+                qty: 43_100_000_000
+            }
+        );
+        assert_eq!(
+            s.asks,
+            vec![Level {
+                price: 400_000_200,
+                qty: 1_200_000_000
+            }]
+        );
+    }
+
+    #[test]
+    fn an_error_body_is_not_a_snapshot() {
+        let payload = br#"{"code":-1121,"msg":"Invalid symbol."}"#;
+        assert_eq!(
+            parse_snapshot(payload, Scales::default()),
+            Err(ParseError::NotDepth)
+        );
+    }
 
     #[test]
     fn parses_decimals_exactly() {

@@ -414,17 +414,22 @@ impl Connector for PollConnector {
     }
 }
 
-/// Fetch an order book snapshot over REST.
+/// Fetch an order book snapshot over REST, bounded by `timeout`.
 ///
-/// Called after every reconnect: the incremental stream only makes sense
-/// against a known starting book, and a gap without a following snapshot
-/// leaves the archive unable to reconstruct one.
+/// The incremental stream only makes sense against a known starting
+/// book. Bounded by the caller rather than by [`HTTP_TIMEOUT`]: a live
+/// loop that also reads the account stream cannot give a snapshot thirty
+/// seconds of its attention.
 ///
 /// # Errors
 ///
-/// Any transport or HTTP failure.
-pub fn fetch_snapshot(url: &str) -> io::Result<Vec<u8>> {
-    let mut response = http_agent().get(url).call().map_err(io::Error::other)?;
+/// Any transport or HTTP failure, including a non-2xx status.
+pub fn fetch_snapshot(url: &str, timeout: Duration) -> io::Result<Vec<u8>> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build()
+        .new_agent();
+    let mut response = agent.get(url).call().map_err(io::Error::other)?;
     response.body_mut().read_to_vec().map_err(io::Error::other)
 }
 
