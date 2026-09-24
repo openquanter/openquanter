@@ -47,12 +47,13 @@ present.
   crossed book after matching, non-negative margin usage — are encoded
   as tests beside the code they constrain. Never weaken an invariant to
   make a test pass.
-- These are hand-written cases today, not generated ones. `proptest` is
-  the intended vehicle and is **not yet a dependency**; adopting it is a
-  decision to make deliberately, because the engine crates hold a
-  zero-dependency budget (`scripts/check-composability.sh`). Until then,
-  a new invariant means new explicit cases, including the adversarial
-  ones a generator would have found.
+- `oq-engine` and `oq-margin` also check their invariants with
+  generated cases (`proptest`, a **dev-dependency** only:
+  `tests/matching_invariants.rs`, `tests/invariants.rs`). The engine
+  crates' zero-dependency budget (`scripts/check-composability.sh`)
+  covers what they ship, not what their tests use; keep it that way.
+  Elsewhere a new invariant still means new explicit cases, including
+  the adversarial ones a generator would have found.
 - Golden tests replay sample data and compare full output. Golden baselines
   may only be regenerated with explicit human confirmation in the PR.
 

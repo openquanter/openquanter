@@ -158,6 +158,13 @@ impl Shards {
 /// That makes a cancel unroutable across shards, which is a real limit
 /// and is stated as one: a host holding several shards has to know which
 /// it placed an order through, and it does, because it placed it.
+///
+/// It is not the only one. `Funding`, `Time`, `MarginDeposit` and
+/// `VenueFill` name no instrument either, so with more than one shard
+/// they are refused as unroutable too rather than guessed at. A host
+/// delivers them to the shard they concern through `shard_mut`, and has
+/// to: a funding rate or a deposit applied to the wrong shard is a wrong
+/// balance, not a missing one.
 const fn instrument_of(event: &Event) -> Option<InstrumentId> {
     match event {
         Event::Tick { instrument, .. } | Event::Submit { instrument, .. } => *instrument,
