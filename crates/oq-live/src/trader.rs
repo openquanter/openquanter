@@ -19,7 +19,7 @@
 //! when the venue says the order has ended, and a cancel for an id that
 //! is not in it is reported rather than swallowed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use oq_gateway::Execution;
 use oq_risk::ProposedOrder;
@@ -92,18 +92,25 @@ pub struct Trader<S: Strategy, E: Execution> {
     strategy: S,
     session: Session<E>,
     /// Strategy id to the client id the venue knows.
-    live: HashMap<u64, String>,
+    ///
+    /// Ordered, and by the strategy's own ids, which is the order the
+    /// orders were sent in. A hash map here iterated differently on every
+    /// run, so a shutdown, a halt or a cancel-all withdrew the same orders
+    /// in a different order each time, and wrote the journal that way: the
+    /// same inputs made a different run. The whole-process simulation
+    /// found it, as two runs of one seed writing different journals.
+    live: BTreeMap<u64, String>,
     /// The live orders that were sent to reduce a position.
     ///
     /// Kept so a halt can tell them apart: stopping withdraws what would
     /// add exposure and leaves what would take it off. A halted process
     /// that also pulled its take-profits would leave a position with no
     /// exit at all, managed by nothing, for as long as the halt lasts.
-    closing: HashSet<u64>,
+    closing: BTreeSet<u64>,
     /// Opening orders a halt has already withdrawn, so a halt repeated
     /// every few minutes does not send the same cancel again. One whose
     /// cancel did not go through stays out of this set and is tried again.
-    withdrawn: HashSet<u64>,
+    withdrawn: BTreeSet<u64>,
     intents: Vec<Intent>,
     /// Submissions the venue has not answered, and the id it was given.
     unanswered: Vec<(OrderId, String, Nanos)>,
@@ -131,9 +138,9 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         Self {
             strategy,
             session,
-            live: HashMap::new(),
-            closing: HashSet::new(),
-            withdrawn: HashSet::new(),
+            live: BTreeMap::new(),
+            closing: BTreeSet::new(),
+            withdrawn: BTreeSet::new(),
             intents: Vec::new(),
             unanswered: Vec::new(),
         }

@@ -480,3 +480,14 @@ fn a_hedged_account_stays_true_through_the_faults() {
         "no run held both legs at once, so hedge mode went untested"
     );
 }
+
+/// With several orders resting at once — a cancel-all every twenty
+/// observations and a shutdown sweep — a seed still names one run. The
+/// order ids were held in a hash map and withdrawn in whatever order it
+/// iterated in, which differed between two runs of one seed.
+#[test]
+fn a_seed_names_one_run_with_many_orders_resting() {
+    let (_, _, a) = run_kind("many", 13, 10, Faults::default(), Kind::Hedged);
+    let (_, _, b) = run_kind("many", 13, 10, Faults::default(), Kind::Hedged);
+    assert!(a == b, "two runs of one seed wrote different journals");
+}
