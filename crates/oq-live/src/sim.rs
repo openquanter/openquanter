@@ -62,6 +62,27 @@ pub struct SimConfig {
     pub balance: f64,
     /// Where durable state goes; a fresh directory per run.
     pub state_root: PathBuf,
+    /// What goes wrong, and how often.
+    pub faults: Faults,
+}
+
+/// Failures the simulated venue injects, each in parts per million of
+/// the occasions it could happen on. All zero is a venue that never
+/// fails, which is what the default is.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Faults {
+    /// Per read of the account stream: the connection drops, and every
+    /// event the venue sends until it is reopened is lost.
+    pub stream_drop: u32,
+    /// Per event: the venue sends it twice.
+    pub duplicate: u32,
+    /// Per placement: the answer never comes back (-1007). Half of these
+    /// were placed anyway.
+    pub unknown_placement: u32,
+    /// Per placement: refused for the request rate (-1003).
+    pub rate_limited: u32,
+    /// Per fill of two lots or more: it arrives in two pieces.
+    pub partial_fill: u32,
 }
 
 /// An order resting at the simulated venue.
@@ -79,6 +100,9 @@ struct Finished {
     venue_id: u64,
     status: &'static str,
     filled: i64,
+    /// Everything the account stream said about it, for a caller that
+    /// missed it.
+    reports: Vec<OrderUpdate>,
 }
 
 #[derive(Debug)]
@@ -101,6 +125,12 @@ struct Core {
     entry: f64,
     realized: f64,
     events: VecDeque<UserEvent>,
+    /// Whether an account stream is connected; events sent while none is
+    /// are lost, as a venue's are.
+    connected: bool,
+    /// Bumped by every connection, so a reader from before a drop reads
+    /// as dropped.
+    generation: u64,
     /// Every client id ever sent, in order, for the invariants.
     placed: Vec<String>,
 }
@@ -126,6 +156,8 @@ impl Core {
             entry: 0.0,
             realized: 0.0,
             events: VecDeque::new(),
+            connected: false,
+            generation: 0,
             placed: Vec::new(),
             cfg,
         }
@@ -199,15 +231,30 @@ impl Core {
         }
     }
 
-    fn fill(
-        &mut self,
-        client_id: &str,
-        venue_id: u64,
-        side: Side,
-        price: i64,
-        qty: i64,
-        maker: bool,
-    ) {
+    /// Whether the fault `pick` names happens this time.
+    fn fault(&mut self, pick: fn(&Faults) -> u32) -> bool {
+        let ppm = pick(&self.cfg.faults);
+        self.chance(ppm)
+    }
+
+    fn chance(&mut self, ppm: u32) -> bool {
+        ppm > 0 && self.rng.chance(u64::from(ppm), 1_000_000)
+    }
+
+    /// Send an account event, if anyone is listening — twice, sometimes.
+    fn send(&mut self, event: UserEvent) {
+        if !self.connected {
+            return;
+        }
+        let twice = self.chance(self.cfg.faults.duplicate);
+        if twice {
+            self.events.push_back(event.clone());
+        }
+        self.events.push_back(event);
+    }
+
+    /// The position and its average, moved by one fill.
+    fn book(&mut self, side: Side, price: i64, qty: i64) {
         let signed = if side == Side::Buy { qty } else { -qty };
         let before = self.position;
         let after = before + signed;
@@ -230,30 +277,61 @@ impl Core {
         if self.position == 0 {
             self.entry = 0.0;
         }
-        self.trade_id += 1;
+    }
+
+    fn fill(
+        &mut self,
+        client_id: &str,
+        venue_id: u64,
+        side: Side,
+        price: i64,
+        qty: i64,
+        maker: bool,
+    ) {
+        let pieces = if qty >= 2 && self.chance(self.cfg.faults.partial_fill) {
+            vec![qty / 2, qty - qty / 2]
+        } else {
+            vec![qty]
+        };
+        let mut reports = Vec::new();
+        let mut cumulative = 0;
+        let last = pieces.len() - 1;
+        for (i, piece) in pieces.into_iter().enumerate() {
+            self.book(side, price, piece);
+            cumulative += piece;
+            self.trade_id += 1;
+            let update = OrderUpdate {
+                symbol: self.cfg.symbol.clone(),
+                client_id: client_id.to_string(),
+                venue_id: venue_id.to_string(),
+                status: if i == last {
+                    "FILLED"
+                } else {
+                    "PARTIALLY_FILLED"
+                }
+                .into(),
+                last_qty: self.qty(piece),
+                cumulative_qty: self.qty(cumulative),
+                last_price: self.px(price),
+                side: if side == Side::Buy { "BUY" } else { "SELL" }.into(),
+                position_side: "BOTH".into(),
+                maker,
+                trade_id: Some(self.trade_id),
+                event_ms: self.now_ms(),
+                initiator: Initiator::Account,
+            };
+            reports.push(update.clone());
+            self.send(UserEvent::Order(update));
+        }
         self.finished.insert(
             client_id.to_string(),
             Finished {
                 venue_id,
                 status: "FILLED",
                 filled: qty,
+                reports,
             },
         );
-        self.events.push_back(UserEvent::Order(OrderUpdate {
-            symbol: self.cfg.symbol.clone(),
-            client_id: client_id.to_string(),
-            venue_id: venue_id.to_string(),
-            status: "FILLED".into(),
-            last_qty: self.qty(qty),
-            cumulative_qty: self.qty(qty),
-            last_price: self.px(price),
-            side: if side == Side::Buy { "BUY" } else { "SELL" }.into(),
-            position_side: "BOTH".into(),
-            maker,
-            trade_id: Some(self.trade_id),
-            event_ms: self.now_ms(),
-            initiator: Initiator::Account,
-        }));
     }
 
     fn update(&self, client_id: &str, venue_id: u64, side: Side, status: &str) -> UserEvent {
@@ -401,16 +479,32 @@ impl Connector for FeedConnector {
     }
 }
 
-struct SimUserEvents(Sim);
+struct SimUserEvents {
+    sim: Sim,
+    generation: u64,
+}
 
 impl UserEvents for SimUserEvents {
     fn next(&mut self) -> StreamOutcome {
-        let mut core = self.0.0.borrow_mut();
+        let mut core = self.sim.0.borrow_mut();
+        let step = core.cfg.idle_step;
+        // A reader from before a drop stays dropped, and time passes for
+        // it as for any read that found nothing: a loop spinning on a
+        // dead reader at a standstill would wait forever for a backoff.
+        if !core.connected || core.generation != self.generation {
+            core.clock.advance(step);
+            core.advance();
+            return StreamOutcome::Disconnected("sim: the connection is gone".into());
+        }
+        if core.fault(|f| f.stream_drop) {
+            core.connected = false;
+            core.events.clear();
+            return StreamOutcome::Disconnected("sim: connection reset".into());
+        }
         if let Some(e) = core.events.pop_front() {
             return StreamOutcome::Event(e);
         }
         // Nothing to read: this is where time passes.
-        let step = core.cfg.idle_step;
         core.clock.advance(step);
         core.advance();
         StreamOutcome::Idle
@@ -460,7 +554,13 @@ impl Environment for SimEnv {
     }
 
     fn user_events(&self, _stream: &UserStream) -> Result<Box<dyn UserEvents>, VenueError> {
-        Ok(Box::new(SimUserEvents(self.sim.clone())))
+        let mut core = self.sim.0.borrow_mut();
+        core.connected = true;
+        core.generation += 1;
+        Ok(Box::new(SimUserEvents {
+            sim: self.sim.clone(),
+            generation: core.generation,
+        }))
     }
 
     fn depth_snapshot(&self, _url: &str, _timeout: Duration) -> io::Result<Vec<u8>> {
@@ -501,64 +601,44 @@ impl Execution for SimAccount {
                 message: "ClientOrderId is duplicated".into(),
             });
         }
-        let venue_id = core.next_venue_id;
-        core.next_venue_id += 1;
-        let Some(limit) = order.limit_price else {
-            let price = core.price;
-            core.fill(
-                &order.client_id,
-                venue_id,
-                order.side,
-                price,
-                order.qty.0,
-                false,
-            );
-            return accepted(&order.client_id, venue_id, "FILLED");
-        };
-        let marketable = match order.side {
-            Side::Buy => limit.0 >= core.price,
-            Side::Sell => limit.0 <= core.price,
-        };
-        if marketable {
-            let price = core.price;
-            core.fill(
-                &order.client_id,
-                venue_id,
-                order.side,
-                price,
-                order.qty.0,
-                false,
-            );
-            return accepted(&order.client_id, venue_id, "FILLED");
+        if core.fault(|f| f.rate_limited) {
+            return Placed::Rejected(Reject {
+                code: Some(-1003),
+                message: "Too many requests.".into(),
+            });
         }
-        core.resting.insert(
-            order.client_id.clone(),
-            Resting {
-                venue_id,
-                side: order.side,
-                price: limit.0,
-                qty: order.qty.0,
-            },
-        );
-        let e = core.update(&order.client_id, venue_id, order.side, "NEW");
-        core.events.push_back(e);
-        accepted(&order.client_id, venue_id, "NEW")
+        // The answer is lost. Whether the order was placed is decided
+        // here, and only the venue's later answers say which.
+        let unanswered = core.fault(|f| f.unknown_placement);
+        if unanswered && core.rng.chance(1, 2) {
+            return unknown(&order.client_id);
+        }
+        let placed = place_now(&mut core, order);
+        if unanswered {
+            return unknown(&order.client_id);
+        }
+        placed
     }
 
     fn cancel(&self, _symbol: &str, client_id: &str) -> Placed {
         let mut core = self.0.0.borrow_mut();
         match core.resting.remove(client_id) {
             Some(o) => {
+                let UserEvent::Order(report) =
+                    core.update(client_id, o.venue_id, o.side, "CANCELED")
+                else {
+                    unreachable!("update builds an order report");
+                };
                 core.finished.insert(
                     client_id.to_string(),
                     Finished {
                         venue_id: o.venue_id,
                         status: "CANCELED",
                         filled: 0,
+                        reports: vec![report.clone()],
                     },
                 );
-                let e = core.update(client_id, o.venue_id, o.side, "CANCELED");
-                core.events.push_back(e);
+                core.send(UserEvent::Order(report));
                 accepted(client_id, o.venue_id, "CANCELED")
             }
             None => Placed::Rejected(Reject {
@@ -566,6 +646,22 @@ impl Execution for SimAccount {
                 message: "Unknown order sent.".into(),
             }),
         }
+    }
+
+    /// What the account stream said about an order, for a caller that
+    /// missed it — the reports a dropped connection lost.
+    fn recover_order(
+        &self,
+        _symbol: &str,
+        client_id: &str,
+    ) -> Result<Option<Vec<OrderUpdate>>, VenueError> {
+        let core = self.0.0.borrow();
+        Ok(Some(
+            core.finished
+                .get(client_id)
+                .map(|f| f.reports.clone())
+                .unwrap_or_default(),
+        ))
     }
 
     fn order_status(&self, _symbol: &str, client_id: &str) -> Result<Option<OrderAck>, VenueError> {
@@ -586,6 +682,48 @@ impl Execution for SimAccount {
             })
         })
     }
+}
+
+/// Rest or fill an order the venue has decided to take.
+fn place_now(core: &mut Core, order: &NewOrder) -> Placed {
+    let venue_id = core.next_venue_id;
+    core.next_venue_id += 1;
+    let marketable = order.limit_price.is_none_or(|limit| match order.side {
+        Side::Buy => limit.0 >= core.price,
+        Side::Sell => limit.0 <= core.price,
+    });
+    if marketable {
+        let price = core.price;
+        core.fill(
+            &order.client_id,
+            venue_id,
+            order.side,
+            price,
+            order.qty.0,
+            false,
+        );
+        return accepted(&order.client_id, venue_id, "FILLED");
+    }
+    let limit = order.limit_price.map_or(core.price, |p| p.0);
+    core.resting.insert(
+        order.client_id.clone(),
+        Resting {
+            venue_id,
+            side: order.side,
+            price: limit,
+            qty: order.qty.0,
+        },
+    );
+    let e = core.update(&order.client_id, venue_id, order.side, "NEW");
+    core.send(e);
+    accepted(&order.client_id, venue_id, "NEW")
+}
+
+fn unknown(client_id: &str) -> Placed {
+    Placed::Unknown(oq_gateway::exec::Unresolved {
+        client_id: client_id.to_string(),
+        reason: "sim: -1007 Timeout waiting for response from backend server".into(),
+    })
 }
 
 fn accepted(client_id: &str, venue_id: u64, status: &str) -> Placed {
