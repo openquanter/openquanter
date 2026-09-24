@@ -135,6 +135,17 @@ impl Matcher {
         }
     }
 
+    /// Fills the matcher made and has not yet released, taken out of it.
+    ///
+    /// Empty at L0, which has no response latency to hold one behind.
+    pub fn drain_unreported(&mut self) -> Vec<L0Fill> {
+        match self {
+            Self::L0(_) => Vec::new(),
+            Self::L1(e) => e.drain_unreported(),
+            Self::L2(e) => e.drain_unreported(),
+        }
+    }
+
     /// Orders resting in the book.
     ///
     /// **Not every order the matcher holds** above L0: one in flight or

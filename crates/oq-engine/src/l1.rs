@@ -603,8 +603,15 @@ impl L1Engine {
             .collect();
 
         // 5. Response latency holds a fill back from the strategy. The
-        //    fill has happened; the account has it; the strategy does
-        //    not yet know.
+        //    fill has happened at the venue; the strategy does not yet
+        //    know, and neither does the account a host books from this
+        //    engine's output, because that account is also what the
+        //    strategy reads its position from. Booking it now would hand
+        //    the strategy the fill before the latency it is modelling
+        //    allows. So margin, funding and liquidation see it late, by
+        //    at most the response latency; and at the end of a run
+        //    `drain_unreported` hands over whatever is still held, so no
+        //    fill is lost from the result.
         self.released.clear();
         if !self.policy.latency.response.is_zero() {
             for fill in adjusted {
@@ -651,6 +658,18 @@ impl L1Engine {
     #[must_use]
     pub fn unreported(&self) -> usize {
         self.delayed.len()
+    }
+
+    /// Hand over every fill still held back, in the order the strategy
+    /// would have learned of them.
+    ///
+    /// For the end of a run. A fill made inside the last response
+    /// latency happened at the venue, and a result that never releases
+    /// it leaves the account missing a trade it made.
+    pub fn drain_unreported(&mut self) -> Vec<L0Fill> {
+        let mut held = std::mem::take(&mut self.delayed);
+        held.sort_by_key(|d| d.known_at.0);
+        held.into_iter().map(|d| d.fill).collect()
     }
 
     /// Put an order into the book, or into a queue in front of it.

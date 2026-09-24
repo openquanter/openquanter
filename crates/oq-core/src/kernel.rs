@@ -984,18 +984,27 @@ impl Kernel {
                     self.outputs.push(Output::Cancelled(id));
                 }
             }
-            Event::Funding { at, rate, mark } => {
+            Event::Funding {
+                instrument,
+                at,
+                rate,
+                mark,
+            } => {
                 self.state.now = at;
-                // A funding event names no instrument, so it can only
-                // mean the one holding there is. With several it was
-                // charged to the first, whichever instrument its rate
-                // belonged to; refused instead, as an unnamed tick is.
-                if self.route(None).is_none() {
+                // Settled on the holding whose rate it is. An unnamed
+                // one can only mean the only holding; with several it
+                // was charged to the first, whichever instrument its rate
+                // belonged to, and is refused instead, as an unnamed
+                // tick is.
+                let Some(h) = self.route(instrument) else {
                     self.outputs.push(Output::Rejected {
                         id: OrderId::new(0),
                         reason: RejectReason::UnroutableObservation,
                     });
-                } else if !self.state.is_flat() {
+                    return &self.outputs;
+                };
+                let holding = self.state.holdings_at(h);
+                if !(holding.qty.is_zero() && holding.short_qty.is_zero()) {
                     // Both legs settle. Under hedge accounting the short
                     // is its own position in `short_qty`, and reading
                     // only `qty` let a short-only account neither pay nor
@@ -1003,7 +1012,6 @@ impl Kernel {
                     // funding on its shorts showed none of it, and one
                     // paying it showed none of the cost.
                     let rate_at = FundingRate::new(at, rate, mark);
-                    let holding = self.state.holding();
                     let mut amount = Cash::ZERO;
                     for qty in [holding.qty, holding.short_qty] {
                         if !qty.is_zero() {
@@ -1113,8 +1121,13 @@ impl Kernel {
             .iter()
             .map(|f| f.fill)
             .collect();
+        self.book_fills(h, &fills);
+        self.check_liquidation(tick.last);
+    }
 
-        for fill in &fills {
+    /// Book fills a holding's matcher released: fee, position, output.
+    fn book_fills(&mut self, h: usize, fills: &[Fill]) {
+        for fill in fills {
             // Charged before the position update so the fee is computed
             // against the fill that incurred it, not against whatever
             // the position became afterwards.
@@ -1128,8 +1141,31 @@ impl Kernel {
             self.working.retain(|w| *w != fill.order);
             self.outputs.push(Output::Filled(*fill));
         }
+    }
 
-        self.check_liquidation(tick.last);
+    /// Book every fill a matcher is still holding back, for the end of a
+    /// run.
+    ///
+    /// Response latency delays when a fill is released, and the account
+    /// books it on release so the strategy cannot read it early. A run
+    /// that ends inside that delay would otherwise leave those fills out
+    /// of the result altogether — trades the venue made, missing from the
+    /// equity. Not an event: nothing in a journal replays "the run
+    /// ended", and a host calls this once, after its last one.
+    pub fn settle_unreported(&mut self) -> &[Output] {
+        self.outputs.clear();
+        for h in 0..self.state.holdings().count() {
+            let fills: Vec<Fill> = self
+                .state
+                .at(h)
+                .engine
+                .drain_unreported()
+                .iter()
+                .map(|f| f.fill)
+                .collect();
+            self.book_fills(h, &fills);
+        }
+        &self.outputs
     }
 
     /// Close the position if the venue would have.
@@ -1544,6 +1580,7 @@ mod tests {
         k.apply(&tick(2, 1_000_000));
         let before = k.summary().balance;
         k.apply(&Event::Funding {
+            instrument: None,
             at: Nanos::from_secs(28_800),
             rate: Ratio::from_ppm(100),
             mark: PriceTicks(1_000_000),
@@ -1597,6 +1634,7 @@ mod tests {
         // 1_150 USDT of notional at 10% is more than the whole balance.
         let outs = k
             .apply(&Event::Funding {
+                instrument: None,
                 at: Nanos::from_secs(28_800),
                 rate: Ratio::from_percent(10), // a squeeze
                 mark: PriceTicks(1_150_000),
@@ -2236,6 +2274,7 @@ mod every_holding {
         let mut k = Kernel::new(s);
         let out = k
             .apply(&Event::Funding {
+                instrument: None,
                 at: Nanos(1),
                 rate: Ratio(100_000),
                 mark: PriceTicks(6_000_000),
@@ -2249,6 +2288,67 @@ mod every_holding {
             }]
         ));
         assert_eq!(k.state().funding, Cash::ZERO);
+    }
+
+    fn funding_on(id: InstrumentId) -> Event {
+        Event::Funding {
+            instrument: Some(id),
+            at: Nanos(1),
+            rate: Ratio(100_000),
+            mark: PriceTicks(6_000_000),
+        }
+    }
+
+    /// A named settlement is charged to the holding whose rate it is,
+    /// with that holding's contract, and to no other.
+    #[test]
+    fn named_funding_settles_the_holding_it_names() {
+        let (mut s, first, second) = two(20_000, Contract::new(10));
+        s.holding_mut().qty = QtyLots(10);
+        s.holding_of_mut(second).expect("opened").qty = QtyLots(10);
+        let mut k = Kernel::new(s);
+
+        let on_first = match k.apply(&funding_on(first)).to_vec()[..] {
+            [Output::Funded { amount, .. }] => amount,
+            ref other => panic!("{other:?}"),
+        };
+        let on_second = match k.apply(&funding_on(second)).to_vec()[..] {
+            [Output::Funded { amount, .. }] => amount,
+            ref other => panic!("{other:?}"),
+        };
+        assert!(on_first < Cash::ZERO, "a long pays a positive rate");
+        assert_eq!(
+            on_first.0,
+            on_second.0 * 100,
+            "each at its own multiplier: 1,000 against 10"
+        );
+        assert_eq!(k.state().funding, on_first.add(on_second));
+    }
+
+    /// A holding that is flat pays nothing, whatever the other holds.
+    /// The account-wide flatness this used to ask about charged nothing
+    /// only when every holding was flat.
+    #[test]
+    fn named_funding_on_a_flat_holding_charges_nothing() {
+        let (mut s, _, second) = two(20_000, Contract::new(10));
+        s.holding_mut().qty = QtyLots(10);
+        let mut k = Kernel::new(s);
+        assert!(k.apply(&funding_on(second)).is_empty());
+        assert_eq!(k.state().funding, Cash::ZERO);
+    }
+
+    /// An instrument the account does not hold is refused.
+    #[test]
+    fn named_funding_for_an_instrument_not_held_is_refused() {
+        let (s, _, _) = two(20_000, Contract::new(10));
+        let mut k = Kernel::new(s);
+        assert!(matches!(
+            k.apply(&funding_on(InstrumentId::new(9)))[..],
+            [Output::Rejected {
+                reason: RejectReason::UnroutableObservation,
+                ..
+            }]
+        ));
     }
 }
 
@@ -2276,6 +2376,7 @@ mod hedged_funding {
     fn funded(k: &mut Kernel) -> Cash {
         let out = k
             .apply(&Event::Funding {
+                instrument: None,
                 at: Nanos(1),
                 rate: Ratio(100_000),
                 mark: PriceTicks(6_000_000),
@@ -2302,5 +2403,86 @@ mod hedged_funding {
     fn equal_legs_net_to_nothing() {
         let mut k = hedged(10, -10);
         assert_eq!(funded(&mut k), Cash::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod unreported_at_the_end {
+    use super::*;
+    use oq_engine::l1::{Delay, Impact, L1Engine, Latency, Policy, QueueAhead};
+    use oq_types::{Offset, Stamp};
+
+    fn delayed_kernel(response_ns: i64) -> Kernel {
+        let mut s = State::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(20_000),
+        );
+        s.holding_mut().engine = Matcher::L1(Box::new(L1Engine::new(
+            InstrumentId::new(1),
+            Policy {
+                queue: QueueAhead::None,
+                latency: Latency {
+                    entry: Delay::Fixed(Nanos(0)),
+                    response: Delay::Fixed(Nanos(response_ns)),
+                },
+                impact: Impact { coefficient: 0 },
+            },
+        )));
+        Kernel::new(s)
+    }
+
+    fn buy_and_cross(k: &mut Kernel) -> Vec<Output> {
+        k.apply(&Event::Submit {
+            instrument: None,
+            id: OrderId::new(1),
+            side: Side::Buy,
+            price: Some(PriceTicks(6_000_000)),
+            qty: QtyLots(10),
+            offset: Offset::Open,
+            stamp: Stamp::synthetic(0),
+        });
+        k.apply(&Event::Tick {
+            instrument: None,
+            tick: oq_engine::Tick::trades_only(Stamp::synthetic(1), 5_990_000, 1, 1),
+        })
+        .to_vec()
+    }
+
+    /// Held back from the account while the strategy is not yet told,
+    /// so the position it reads cannot run ahead of the latency.
+    #[test]
+    fn a_fill_inside_the_response_latency_is_not_yet_booked() {
+        let mut k = delayed_kernel(1_000_000_000);
+        let out = buy_and_cross(&mut k);
+        assert!(
+            !out.iter().any(|o| matches!(o, Output::Filled(_))),
+            "{out:?}"
+        );
+        assert!(k.summary().qty.is_zero());
+    }
+
+    /// And booked when the run ends, rather than lost from its result.
+    #[test]
+    fn the_end_of_a_run_books_what_the_latency_still_held() {
+        let mut k = delayed_kernel(1_000_000_000);
+        buy_and_cross(&mut k);
+        let out = k.settle_unreported().to_vec();
+        assert!(
+            matches!(out[..], [Output::Filled(f)] if f.qty == QtyLots(10)),
+            "{out:?}"
+        );
+        assert_eq!(k.summary().qty, QtyLots(10));
+        assert!(k.settle_unreported().is_empty(), "and only once");
+    }
+
+    /// Nothing held, nothing booked.
+    #[test]
+    fn with_no_response_latency_there_is_nothing_to_settle() {
+        let mut k = delayed_kernel(0);
+        let out = buy_and_cross(&mut k);
+        assert!(out.iter().any(|o| matches!(o, Output::Filled(_))));
+        assert!(k.settle_unreported().is_empty());
     }
 }

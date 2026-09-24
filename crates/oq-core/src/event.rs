@@ -71,6 +71,13 @@ pub mod kind {
     /// [`TICK_ON`], so the shorter payload is a prefix of the longer and
     /// one decoder reads both.
     pub const SUBMIT_ON: u16 = 11;
+    /// A funding settlement that names its instrument.
+    ///
+    /// [`FUNDING`] is the same settlement without one, which is all an
+    /// account holding several instruments could not use: the rate
+    /// belongs to one of them, and charging it to "the only holding" is
+    /// a refusal once there are two. Appended like [`TICK_ON`].
+    pub const FUNDING_ON: u16 = 12;
 }
 
 /// An input to the core.
@@ -126,6 +133,11 @@ pub enum Event {
     Cancel { id: OrderId, stamp: Stamp },
     /// A funding settlement.
     Funding {
+        /// Which instrument's rate this is.
+        ///
+        /// `None` means "the account's only one", as for a tick, and is
+        /// what every journal written before this field says.
+        instrument: Option<InstrumentId>,
         at: Nanos,
         rate: Ratio,
         mark: PriceTicks,
@@ -173,7 +185,10 @@ impl Event {
             } => kind::SUBMIT,
             Self::Submit { .. } => kind::SUBMIT_ON,
             Self::Cancel { .. } => kind::CANCEL,
-            Self::Funding { .. } => kind::FUNDING,
+            Self::Funding {
+                instrument: None, ..
+            } => kind::FUNDING,
+            Self::Funding { .. } => kind::FUNDING_ON,
             Self::Time(_) => kind::TIME,
             Self::MarginDeposit { .. } => kind::MARGIN_DEPOSIT,
             Self::VenueFill(_) => kind::VENUE_FILL,
@@ -296,10 +311,18 @@ impl Event {
                 put_i64(&mut out, stamp.exch.0);
                 put_i64(&mut out, stamp.local.0);
             }
-            Self::Funding { at, rate, mark } => {
+            Self::Funding {
+                instrument,
+                at,
+                rate,
+                mark,
+            } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, rate.0);
                 put_i64(&mut out, mark.0);
+                if let Some(id) = instrument {
+                    out.extend_from_slice(&id.0.to_le_bytes());
+                }
             }
             Self::Time(at) => put_i64(&mut out, at.0),
             Self::VenueFill(f) => {
@@ -436,11 +459,20 @@ impl Event {
                     stamp: Stamp::new(i64_at(rest, 0)?, i64_at(rest, 1)?),
                 })
             }
-            kind::FUNDING => {
-                if payload.len() != 24 {
+            kind::FUNDING | kind::FUNDING_ON => {
+                let named = kind == kind::FUNDING_ON;
+                if payload.len() != if named { 28 } else { 24 } {
                     return None;
                 }
+                let instrument = if named {
+                    Some(InstrumentId(u32::from_le_bytes(
+                        payload[24..28].try_into().expect("4 bytes"),
+                    )))
+                } else {
+                    None
+                };
                 Some(Self::Funding {
+                    instrument,
                     at: Nanos(i64_at(payload, 0)?),
                     rate: Ratio(i64_at(payload, 1)?),
                     mark: PriceTicks(i64_at(payload, 2)?),
@@ -612,9 +644,16 @@ mod tests {
                 stamp: Stamp::new(50, 51),
             },
             Event::Funding {
+                instrument: None,
                 at: Nanos(60),
                 rate: Ratio::from_ppm(100),
                 mark: PriceTicks(1000),
+            },
+            Event::Funding {
+                instrument: Some(InstrumentId::new(3)),
+                at: Nanos(65),
+                rate: Ratio::from_ppm(-40),
+                mark: PriceTicks(2000),
             },
             Event::Time(Nanos(70)),
             Event::MarginDeposit {

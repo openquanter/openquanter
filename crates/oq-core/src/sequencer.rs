@@ -259,6 +259,7 @@ mod tests {
                 tick: Tick::trades_only(Stamp::synthetic(2), 985_000, 1_000_000, 980_000),
             },
             Event::Funding {
+                instrument: None,
                 at: Nanos::from_secs(28_800),
                 rate: Ratio::from_ppm(100),
                 mark: PriceTicks(985_000),
@@ -388,6 +389,7 @@ mod tests {
                 }
                 5 => {
                     events.push(Event::Funding {
+                        instrument: None,
                         at: Nanos(i as i64),
                         rate: Ratio::from_ppm(rng.below(400) as i64 - 200),
                         mark: PriceTicks(price),
