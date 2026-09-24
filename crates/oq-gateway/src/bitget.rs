@@ -66,6 +66,13 @@ pub struct Bitget {
     /// silent choice between USDT- and coin-margined contracts, which
     /// settle in different assets.
     category: &'static str,
+    /// Whether this client trades Bitget's demo account.
+    ///
+    /// Bitget's demo shares the production host and is selected per
+    /// request by a header. `Endpoint` was dropped here, so a client asked
+    /// for the test deployment sent every order to the real account — the
+    /// one thing `Endpoint` exists to prevent.
+    demo: bool,
 }
 
 impl Bitget {
@@ -75,12 +82,10 @@ impl Bitget {
     /// USDT-margined perpetuals.
     #[must_use]
     pub fn at(endpoint: Endpoint, creds: Credentials) -> Self {
-        // Recorded rather than silently ignored: this venue has no demo
-        // deployment reachable by a different host, so `Endpoint` cannot
-        // protect a caller here the way it does elsewhere. A caller that
-        // wants a test account makes one and keeps its keys apart.
-        let _ = endpoint;
+        // No separate demo host: the test deployment is the same host
+        // with `paptrading: 1` on every private request, and demo keys.
         Self {
+            demo: matches!(endpoint, Endpoint::Testnet),
             base: Self::HOST.to_string(),
             creds,
             agent: ureq::Agent::config_builder()
@@ -106,6 +111,31 @@ impl Bitget {
 pub fn sign(secret: &[u8], timestamp: &str, method: &str, path: &str, body: &str) -> String {
     let message = format!("{timestamp}{method}{path}{body}");
     crate::b64::encode(&hmac_sha256(secret, message.as_bytes()))
+}
+
+/// The headers a private request carries.
+///
+/// `demo` adds `paptrading: 1`, which is how Bitget tells its demo
+/// account from the real one on a shared host.
+#[must_use]
+pub fn headers<'a>(
+    key: &'a str,
+    signature: &'a str,
+    timestamp: &'a str,
+    passphrase: &'a str,
+    demo: bool,
+) -> Vec<(&'static str, &'a str)> {
+    let mut h = vec![
+        ("ACCESS-KEY", key),
+        ("ACCESS-SIGN", signature),
+        ("ACCESS-TIMESTAMP", timestamp),
+        ("ACCESS-PASSPHRASE", passphrase),
+        ("Content-Type", "application/json"),
+    ];
+    if demo {
+        h.push(("paptrading", "1"));
+    }
+    h
 }
 
 /// The body for a new order.
@@ -231,13 +261,13 @@ impl Bitget {
         // One header list for both verbs, for the reason the OKX
         // adapter states: writing them twice is how one path ends up
         // missing one.
-        let headers: [(&str, &str); 5] = [
-            ("ACCESS-KEY", self.creds.key()),
-            ("ACCESS-SIGN", &signature),
-            ("ACCESS-TIMESTAMP", &timestamp),
-            ("ACCESS-PASSPHRASE", passphrase),
-            ("Content-Type", "application/json"),
-        ];
+        let headers = headers(
+            self.creds.key(),
+            &signature,
+            &timestamp,
+            passphrase,
+            self.demo,
+        );
         let sent = if method == "POST" {
             let mut r = self.agent.post(&url);
             for (k, v) in &headers {
@@ -445,5 +475,21 @@ mod tests {
         let body = order_body(&market, &instrument, "USDT-FUTURES");
         assert!(body.contains(r#""orderType":"market""#), "{body}");
         assert!(!body.contains("price"), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod demo {
+    use super::headers;
+
+    /// The test deployment is chosen by a header on the shared host.
+    /// Without it, a client asked for the test deployment traded the real
+    /// account.
+    #[test]
+    fn a_demo_client_marks_every_private_request() {
+        let demo = headers("k", "s", "1", "p", true);
+        assert!(demo.contains(&("paptrading", "1")));
+        let real = headers("k", "s", "1", "p", false);
+        assert!(!real.iter().any(|(k, _)| *k == "paptrading"));
     }
 }
