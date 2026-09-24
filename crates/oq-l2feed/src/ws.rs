@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
-use tungstenite::{Message, connect};
+use tungstenite::Message;
 
 use crate::session::{Connector, MessageSource};
 use crate::venue::{AckPolicy, Transport};
@@ -175,7 +175,8 @@ impl Connector for WsConnector {
     type Source = WsSource;
 
     fn connect(&mut self) -> io::Result<Self::Source> {
-        let (mut socket, _response) = connect(&self.transport.url).map_err(io::Error::other)?;
+        let mut socket =
+            connect_bounded(&self.transport.url, HANDSHAKE_TIMEOUT).map_err(io::Error::other)?;
 
         for frame in &self.transport.subscribe {
             let text = String::from_utf8(frame.clone())
@@ -362,7 +363,10 @@ impl MessageSource for PollSource {
         }
         self.next_due = std::time::Instant::now() + self.interval;
 
-        let mut response = ureq::get(&self.url).call().map_err(io::Error::other)?;
+        let mut response = http_agent()
+            .get(&self.url)
+            .call()
+            .map_err(io::Error::other)?;
         let body = response
             .body_mut()
             .read_to_vec()
@@ -414,9 +418,25 @@ impl Connector for PollConnector {
 ///
 /// Any transport or HTTP failure.
 pub fn fetch_snapshot(url: &str) -> io::Result<Vec<u8>> {
-    let mut response = ureq::get(url).call().map_err(io::Error::other)?;
+    let mut response = http_agent().get(url).call().map_err(io::Error::other)?;
     response.body_mut().read_to_vec().map_err(io::Error::other)
 }
+
+/// An HTTP client whose every request is bounded.
+///
+/// `ureq`'s defaults bound nothing — connect, response and body are all
+/// unlimited — so a poll against a server that accepted the connection
+/// and never answered held the capture loop forever, the failure the
+/// WebSocket side had in its handshake.
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(HTTP_TIMEOUT))
+        .build()
+        .new_agent()
+}
+
+/// The bound on one REST poll or snapshot, end to end.
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod tests {
@@ -506,5 +526,143 @@ mod tests {
         assert!(!contains(b"payload", b""));
         assert!(contains(b"payload", b"loa"));
         assert!(!contains(b"pay", b"payload"));
+    }
+}
+
+/// How long opening a WebSocket may take, from the TCP connect to the
+/// server's `101`.
+///
+/// `tungstenite::connect` sets no timeout on any of it. A peer that
+/// completes the TCP handshake and then says nothing — or goes away
+/// after the TLS hello — holds the calling thread in a read forever, and
+/// with the signal handler restarting interrupted reads, SIGTERM cannot
+/// end it either. A capture process sat in exactly that state for 29
+/// hours with an ESTABLISHED socket and an empty file.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Open a WebSocket with every step bounded by `timeout`.
+///
+/// The TCP connect uses `connect_timeout` per resolved address, and the
+/// socket's read and write timeouts are set *before* the TLS and HTTP
+/// handshakes rather than after them, which is where the unbounded wait
+/// was. The caller sets its own read timeout for the data phase; the
+/// write timeout stays, so a send cannot block forever either.
+///
+/// Name resolution is not bounded: the standard library offers no way
+/// to, and a resolver that hangs is a different failure from a peer
+/// that does.
+///
+/// # Errors
+/// Anything the connect or the handshake reports, a handshake that did
+/// not finish within `timeout` included.
+pub fn connect_bounded(
+    url: &str,
+    timeout: Duration,
+) -> Result<
+    tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    tungstenite::Error,
+> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use tungstenite::client::{IntoClientRequest, uri_mode};
+    use tungstenite::stream::Mode;
+
+    let request = url.into_client_request()?;
+    let mode = uri_mode(request.uri())?;
+    let host = request
+        .uri()
+        .host()
+        .ok_or(tungstenite::Error::Url(
+            tungstenite::error::UrlError::NoHostName,
+        ))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let port = request.uri().port_u16().unwrap_or(match mode {
+        Mode::Plain => 80,
+        Mode::Tls => 443,
+    });
+
+    let mut last = None;
+    let mut stream = None;
+    for addr in (host.as_str(), port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        tungstenite::Error::Io(last.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{host} resolved to nothing"),
+            )
+        }))
+    })?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let _ = stream.set_nodelay(true);
+
+    match tungstenite::client_tls(request, stream) {
+        Ok((socket, _response)) => Ok(socket),
+        Err(tungstenite::HandshakeError::Failure(e)) => Err(e),
+        // A blocking socket interrupts the handshake only when a read or
+        // write timed out.
+        Err(tungstenite::HandshakeError::Interrupted(_)) => {
+            Err(tungstenite::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("the WebSocket handshake did not complete within {timeout:?}"),
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounded_connect {
+    use super::connect_bounded;
+    use core::time::Duration;
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    /// A peer that completes the TCP handshake and then says nothing:
+    /// the state a capture process sat in for 29 hours.
+    fn silent_peer() -> (TcpListener, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        (listener, port)
+    }
+
+    #[test]
+    fn a_silent_peer_ends_the_plain_handshake_within_the_bound() {
+        let (_held, port) = silent_peer();
+        let started = Instant::now();
+        let r = connect_bounded(
+            &format!("ws://127.0.0.1:{port}/"),
+            Duration::from_millis(300),
+        );
+        assert!(r.is_err(), "a peer that never answers is not a connection");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_silent_peer_ends_the_tls_handshake_within_the_bound() {
+        let (_held, port) = silent_peer();
+        let started = Instant::now();
+        let r = connect_bounded(
+            &format!("wss://localhost:{port}/"),
+            Duration::from_millis(300),
+        );
+        assert!(r.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
