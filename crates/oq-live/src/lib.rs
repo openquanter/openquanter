@@ -42,6 +42,7 @@ pub mod belief;
 pub mod book;
 pub mod books;
 pub mod clock;
+pub mod env;
 pub mod feed;
 pub mod interlock;
 pub mod latency;
@@ -52,6 +53,7 @@ pub mod recovery;
 pub mod run;
 pub mod session;
 pub mod shadow;
+pub mod sim;
 pub mod supervisor;
 pub mod trader;
 
