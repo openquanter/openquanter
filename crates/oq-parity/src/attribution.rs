@@ -271,7 +271,7 @@ impl Attribution {
         let _ = writeln!(
             out,
             "code                {}",
-            &self.manifest.code_commit[..12.min(self.manifest.code_commit.len())]
+            crate::abbreviate(&self.manifest.code_commit, 12)
         );
         let _ = writeln!(out, "Backtest expected   {}", money(self.model_pnl));
         let _ = writeln!(out, "Live actual         {}", money(self.live_pnl));

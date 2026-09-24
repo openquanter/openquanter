@@ -108,8 +108,8 @@ impl core::fmt::Display for ReadError {
             Self::Corrupt { declared, actual } => write!(
                 f,
                 "the body hashes to {} and the file declares {}; it was truncated or edited",
-                &actual[..16.min(actual.len())],
-                &declared[..16.min(declared.len())]
+                crate::abbreviate(actual, 16),
+                crate::abbreviate(declared, 16)
             ),
             Self::Truncated => write!(
                 f,
@@ -424,6 +424,20 @@ mod tests {
     fn an_edited_body_is_refused() {
         let text = run().render().replace("pnl 123.456", "pnl 999.999");
         assert!(matches!(Run::parse(&text), Err(ReadError::Corrupt { .. })));
+    }
+
+    /// A declared hash that is not hex — here, multi-byte characters
+    /// straddling the point the message shortens it at — is reported as
+    /// corrupt, not a panic while saying so.
+    #[test]
+    fn a_declared_hash_of_any_characters_is_reported_not_crashed_on() {
+        let text = run().render();
+        let (header, rest) = text.split_once("body-sha256 ").expect("header");
+        let (_, body) = rest.split_once('\n').expect("body");
+        let edited = format!("{header}body-sha256 0123456789abcde哈希哈希\n{body}");
+        let err = Run::parse(&edited).expect_err("must refuse");
+        assert!(matches!(err, ReadError::Corrupt { .. }));
+        assert!(err.to_string().contains("0123456789abcde哈"), "{err}");
     }
 
     /// The identity triple is the point of D13. A run missing any part
