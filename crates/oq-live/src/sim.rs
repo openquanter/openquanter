@@ -231,6 +231,12 @@ impl Core {
         }
     }
 
+    /// Whether the fault `pick` names happens this time.
+    fn fault(&mut self, pick: fn(&Faults) -> u32) -> bool {
+        let ppm = pick(&self.cfg.faults);
+        self.chance(ppm)
+    }
+
     fn chance(&mut self, ppm: u32) -> bool {
         ppm > 0 && self.rng.chance(u64::from(ppm), 1_000_000)
     }
@@ -490,10 +496,7 @@ impl UserEvents for SimUserEvents {
             core.advance();
             return StreamOutcome::Disconnected("sim: the connection is gone".into());
         }
-        if {
-            let ppm = core.cfg.faults.stream_drop;
-            core.chance(ppm)
-        } {
+        if core.fault(|f| f.stream_drop) {
             core.connected = false;
             core.events.clear();
             return StreamOutcome::Disconnected("sim: connection reset".into());
@@ -598,10 +601,7 @@ impl Execution for SimAccount {
                 message: "ClientOrderId is duplicated".into(),
             });
         }
-        if {
-            let ppm = core.cfg.faults.rate_limited;
-            core.chance(ppm)
-        } {
+        if core.fault(|f| f.rate_limited) {
             return Placed::Rejected(Reject {
                 code: Some(-1003),
                 message: "Too many requests.".into(),
@@ -609,10 +609,7 @@ impl Execution for SimAccount {
         }
         // The answer is lost. Whether the order was placed is decided
         // here, and only the venue's later answers say which.
-        let unanswered = {
-            let ppm = core.cfg.faults.unknown_placement;
-            core.chance(ppm)
-        };
+        let unanswered = core.fault(|f| f.unknown_placement);
         if unanswered && core.rng.chance(1, 2) {
             return unknown(&order.client_id);
         }
