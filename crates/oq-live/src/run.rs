@@ -1410,7 +1410,7 @@ where
         // says so rather than answering zero — either way `attribution`
         // renders the component honestly and the residual carries what
         // is missing.
-        &shadow.evidence(None, venue_fees.map(|v| (v, shadow_fees))),
+        &shadow.evidence(None, venue_fees.map(|v| fee_evidence(v, shadow_fees))),
     );
     print!("{}", attribution.render());
 
@@ -1691,6 +1691,16 @@ fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
         Action::Reconnect => {}
         Action::Halt(why) => trader.halt(why),
     }
+}
+
+/// Fees as attribution reads them: effects on profit, so negative.
+///
+/// Both numbers arrive as amounts charged — the venue's trade records and
+/// the kernel's fee total are positive. Passed as they were, a venue that
+/// charged ten more than the model showed a fee line of +10 and a
+/// residual of −20 where both should have said −10 and zero.
+fn fee_evidence(venue_charged: Cash, model_charged: Cash) -> (Cash, Cash) {
+    (Cash(-venue_charged.0), Cash(-model_charged.0))
 }
 
 /// Whether an account-stream report is about the symbol this process
@@ -2877,5 +2887,30 @@ mod reconnect_spacing {
             Duration::from_secs(1),
             "a stream that recovered starts over"
         );
+    }
+}
+
+#[cfg(test)]
+mod fee_sign {
+    use super::fee_evidence;
+    use oq_types::Cash;
+
+    /// The venue charged ten more than the model: the fee component is
+    /// −10 and, with nothing else different, the residual is zero.
+    #[test]
+    fn fees_charged_are_costs_to_the_attribution() {
+        let evidence = oq_parity::attribution::Evidence {
+            fees: Some(fee_evidence(Cash(13), Cash(3))),
+            funding: Some((Cash(0), Cash(0))),
+            ..oq_parity::attribution::Evidence::default()
+        };
+        let a = oq_parity::attribution::attribute(
+            oq_parity::RunManifest::from_content("abc123", b"ticks", b"cfg", "session-1"),
+            &oq_types::Instrument::linear(2, 3),
+            Cash(-10),
+            Cash(0),
+            &evidence,
+        );
+        assert_eq!(a.residual, Some(Cash(0)), "{}", a.render());
     }
 }
