@@ -123,6 +123,13 @@ jobs:
       - name: Dependency claims in prose match Cargo.toml
         run: scripts/check-doc-claims.py
 
+      # The archive scripts run unattended on the capture host and the NAS,
+      # and their two worst failures — deleting data that was never
+      # uploaded, writing outside the archive — are silent where they
+      # happen. Standard library only; Linux runs the /proc checks.
+      - name: Capture archive scripts
+        run: python3 -m unittest discover -s scripts/tests -v
+
       # Six defects in two days had one shape: one half present, the
       # other absent, and the absent half silent. Every one had passing
       # tests, because the unit was right and nothing invoked it. This
