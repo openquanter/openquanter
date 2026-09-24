@@ -1203,8 +1203,8 @@ where
                                 let resting: Vec<String> =
                                     trader.resting().into_iter().map(str::to_string).collect();
                                 let missed =
-                                    missed_reports(trader.venue(), &symbol, &resting, |t| {
-                                        books.has_booked(t)
+                                    missed_reports(trader.venue(), &symbol, &resting, |t, side| {
+                                        books.has_booked(t, side)
                                     });
                                 if !missed.is_empty() {
                                     eprintln!(
@@ -1710,6 +1710,16 @@ fn fee_evidence(venue_charged: Cash, model_charged: Cash) -> (Cash, Cash) {
     (Cash(-venue_charged.0), Cash(-model_charged.0))
 }
 
+/// A venue's side word as a side. Anything but a buy is a sell, as
+/// `fill_of` reads it.
+fn side_of(word: &str) -> Side {
+    if word.eq_ignore_ascii_case("BUY") {
+        Side::Buy
+    } else {
+        Side::Sell
+    }
+}
+
 /// Whether an account-stream report is about the symbol this process
 /// trades. Case-insensitive because venues are not consistent about it
 /// and a case difference is not a different contract.
@@ -1733,13 +1743,13 @@ fn missed_reports<E: Execution + ?Sized>(
     venue: &E,
     symbol: &str,
     resting: &[String],
-    booked: impl Fn(u64) -> bool,
+    booked: impl Fn(u64, Side) -> bool,
 ) -> Vec<oq_gateway::OrderUpdate> {
     let mut out = Vec::new();
     for client_id in resting {
         match venue.recover_order(symbol, client_id) {
             Ok(Some(reports)) => out.extend(reports.into_iter().filter(|u| match u.trade_id {
-                Some(t) => !booked(t.unsigned_abs()),
+                Some(t) => !booked(t.unsigned_abs(), side_of(&u.side)),
                 None => ending_of(&u.status).is_some(),
             })),
             Ok(None) => {}
@@ -2789,7 +2799,9 @@ mod recovery {
             "tp".to_string(),
             Ok(Some(vec![report("tp", "FILLED", Some(7))])),
         )]));
-        let got = missed_reports(&venue, "BTCUSDT", &["tp".into(), "rung".into()], |_| false);
+        let got = missed_reports(&venue, "BTCUSDT", &["tp".into(), "rung".into()], |_, _| {
+            false
+        });
         assert_eq!(ids(&got), [("tp", "FILLED", Some(7))]);
     }
 
@@ -2804,7 +2816,7 @@ mod recovery {
                 report("tp", "PARTIALLY_FILLED", Some(8)),
             ])),
         )]));
-        let got = missed_reports(&venue, "BTCUSDT", &["tp".into()], |t| t == 7);
+        let got = missed_reports(&venue, "BTCUSDT", &["tp".into()], |t, _| t == 7);
         assert_eq!(ids(&got), [("tp", "PARTIALLY_FILLED", Some(8))]);
     }
 
@@ -2814,7 +2826,7 @@ mod recovery {
             "rung".to_string(),
             Ok(Some(vec![report("rung", "CANCELED", None)])),
         )]));
-        let got = missed_reports(&venue, "BTCUSDT", &["rung".into()], |_| false);
+        let got = missed_reports(&venue, "BTCUSDT", &["rung".into()], |_, _| false);
         assert_eq!(ids(&got), [("rung", "CANCELED", None)]);
     }
 
@@ -2826,7 +2838,7 @@ mod recovery {
             ("a".to_string(), Ok(None)),
             ("b".to_string(), Err(())),
         ]));
-        let got = missed_reports(&venue, "BTCUSDT", &["a".into(), "b".into()], |_| false);
+        let got = missed_reports(&venue, "BTCUSDT", &["a".into(), "b".into()], |_, _| false);
         assert!(got.is_empty());
     }
 }
