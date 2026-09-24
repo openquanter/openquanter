@@ -140,6 +140,9 @@ pub struct Trade {
     pub qty: f64,
     pub realized_pnl: f64,
     pub commission: f64,
+    /// What the commission was paid in. Not always the settlement
+    /// currency: an account paying fees in BNB is charged in BNB.
+    pub commission_asset: String,
     pub time_ms: i64,
     pub maker: bool,
 }
@@ -539,29 +542,41 @@ impl Binance {
     /// # Errors
     /// Anything the request reports.
     pub fn my_trades(&self, symbol: &str, since_ms: Option<i64>) -> Result<Vec<Trade>, VenueError> {
-        let mut query = format!("symbol={symbol}&limit=1000");
+        // Paged. One call returns at most a thousand, and a run that
+        // traded more than that read the first thousand as all of them —
+        // fees undercounted by exactly the trades it never asked for. The
+        // venue will not take `fromId` beside `startTime`, so the first
+        // page is by time and every later one by id.
+        const PAGE: usize = 1000;
+        // A bound on the walk, so a runaway history cannot turn one call
+        // into a request storm: a hundred thousand trades is far past any
+        // run this is asked about.
+        const MAX_PAGES: usize = 100;
+        let mut out: Vec<Trade> = Vec::new();
+        let mut query = format!("symbol={symbol}&limit={PAGE}");
         if let Some(t) = since_ms {
             query.push_str(&format!("&startTime={t}"));
         }
-        let body = self.get_signed(self.dialect.wire().user_trades, &query)?;
-        objects(&body)
-            .into_iter()
-            .map(|o| {
-                Ok(Trade {
-                    symbol: need_str(&o, "symbol")?,
-                    id: need_i64(&o, "id")?,
-                    order_id: need_i64(&o, "orderId")?,
-                    side: need_str(&o, "side")?,
-                    position_side: field_str(&o, "positionSide").unwrap_or_else(|| "BOTH".into()),
-                    price: need_f64(&o, "price")?,
-                    qty: need_f64(&o, "qty")?,
-                    realized_pnl: need_f64(&o, "realizedPnl")?,
-                    commission: need_f64(&o, "commission")?,
-                    time_ms: need_i64(&o, "time")?,
-                    maker: need_bool(&o, "maker")?,
-                })
-            })
-            .collect()
+        for _ in 0..MAX_PAGES {
+            let body = self.get_signed(self.dialect.wire().user_trades, &query)?;
+            let page = parse_trades(&body)?;
+            let full = page.len() >= PAGE;
+            let next = page.iter().map(|t| t.id).max();
+            out.extend(page);
+            match (full, next) {
+                (true, Some(last)) => {
+                    query = format!("symbol={symbol}&limit={PAGE}&fromId={}", last + 1);
+                }
+                _ => return Ok(out),
+            }
+        }
+        Err(VenueError::Malformed {
+            what: "trade history longer than the paging bound",
+            body: format!(
+                "{} trades read in {MAX_PAGES} pages and more remain",
+                out.len()
+            ),
+        })
     }
 
     fn get_public(&self, path: &str, query: &str) -> Result<String, VenueError> {
@@ -713,6 +728,49 @@ impl Binance {
             Err(e) => Err(VenueError::Transport(e.to_string())),
         }
     }
+}
+
+/// One page of `userTrades`.
+fn parse_trades(body: &str) -> Result<Vec<Trade>, VenueError> {
+    objects(body)
+        .into_iter()
+        .map(|o| {
+            Ok(Trade {
+                symbol: need_str(&o, "symbol")?,
+                id: need_i64(&o, "id")?,
+                order_id: need_i64(&o, "orderId")?,
+                side: need_str(&o, "side")?,
+                position_side: field_str(&o, "positionSide").unwrap_or_else(|| "BOTH".into()),
+                price: need_f64(&o, "price")?,
+                qty: need_f64(&o, "qty")?,
+                realized_pnl: need_f64(&o, "realizedPnl")?,
+                commission: need_f64(&o, "commission")?,
+                commission_asset: field_str(&o, "commissionAsset").unwrap_or_default(),
+                time_ms: need_i64(&o, "time")?,
+                maker: need_bool(&o, "maker")?,
+            })
+        })
+        .collect()
+}
+
+/// Commission summed in the settlement currency, or why it cannot be.
+///
+/// A fee paid in another asset — BNB, for an account set to pay that way
+/// — is a different number in a different unit. Summed as if it were
+/// the settlement currency, a 0.0002 BNB fee read as 0.0002 USDT and the
+/// fee component of attribution showed the tier as cheaper than it was.
+/// Refused instead, so attribution renders the component unavailable.
+fn settlement_commission(symbol: &str, trades: &[Trade]) -> Result<f64, VenueError> {
+    if let Some(t) = trades
+        .iter()
+        .find(|t| !t.commission_asset.is_empty() && !symbol.ends_with(t.commission_asset.as_str()))
+    {
+        return Err(VenueError::Malformed {
+            what: "commission paid in an asset other than the settlement currency",
+            body: format!("{} paid in {}", t.commission, t.commission_asset),
+        });
+    }
+    Ok(trades.iter().map(|t| t.commission).sum())
 }
 
 /// Build the full signed URL.
@@ -1340,7 +1398,7 @@ impl crate::account::Account for Binance {
         since_ms: i64,
     ) -> Result<Option<oq_types::Cash>, VenueError> {
         let trades = self.my_trades(symbol, Some(since_ms))?;
-        let total: f64 = trades.iter().map(|t| t.commission).sum();
+        let total = settlement_commission(symbol, &trades)?;
         #[allow(clippy::cast_possible_truncation)]
         let cash = (total * oq_types::CASH_SCALE as f64).round() as i64;
         Ok(Some(oq_types::Cash(cash)))
@@ -2617,5 +2675,42 @@ mod recovery {
         assert_eq!(add_decimal("0.1", "0.2").as_deref(), Some("0.3"));
         assert_eq!(add_decimal("0.0005", "0.0015").as_deref(), Some("0.0020"));
         assert_eq!(add_decimal("5", "3").as_deref(), Some("8"));
+    }
+}
+
+#[cfg(test)]
+mod commission {
+    use super::{Trade, settlement_commission};
+
+    fn paid(amount: f64, asset: &str) -> Trade {
+        Trade {
+            symbol: "BTCUSDT".into(),
+            id: 1,
+            order_id: 1,
+            side: "BUY".into(),
+            position_side: "LONG".into(),
+            price: 1.0,
+            qty: 1.0,
+            realized_pnl: 0.0,
+            commission: amount,
+            commission_asset: asset.into(),
+            time_ms: 0,
+            maker: true,
+        }
+    }
+
+    #[test]
+    fn commission_in_the_settlement_currency_is_summed() {
+        let total = settlement_commission("BTCUSDT", &[paid(0.5, "USDT"), paid(0.25, "USDT")])
+            .expect("one currency");
+        assert!((total - 0.75).abs() < 1e-12);
+    }
+
+    /// A fee paid in BNB is not that many USDT.
+    #[test]
+    fn commission_in_another_asset_is_refused_rather_than_added() {
+        assert!(
+            settlement_commission("BTCUSDT", &[paid(0.5, "USDT"), paid(0.0002, "BNB")]).is_err()
+        );
     }
 }
