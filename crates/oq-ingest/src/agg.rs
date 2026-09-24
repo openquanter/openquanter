@@ -22,8 +22,10 @@
 //!   window reported an unknown quote for every other one.
 
 use oq_engine::Tick;
-use oq_l2feed::book::Book;
-use oq_l2feed::depth::DepthUpdate;
+use std::collections::VecDeque;
+
+use oq_l2feed::book::{Applied, Book, SequenceError};
+use oq_l2feed::depth::{DepthSnapshot, DepthUpdate};
 use oq_l2feed::venue::Trade;
 use oq_types::{Nanos, PriceTicks, QtyLots, Stamp};
 
@@ -48,7 +50,19 @@ pub struct Counts {
     /// large is one whose feed is worth looking at before its numbers
     /// are believed.
     pub out_of_order: u64,
+    /// Snapshots installed as the starting book.
+    pub snapshots: u64,
+    /// Breaks in the update chain that sent the book back to waiting for
+    /// a snapshot.
+    pub resyncs: u64,
 }
+
+/// Updates held while a snapshot is fetched, at most.
+///
+/// Oldest dropped first: a snapshot fetched after them reflects them
+/// anyway. At the coalesced stream's ten a second this is over a quarter
+/// of an hour, far past any fetch that is going to succeed.
+const MAX_PENDING: usize = 10_000;
 
 /// Folds venue events into ticks of a fixed width.
 #[derive(Debug)]
@@ -82,6 +96,11 @@ pub struct Aggregator {
     high_water: i64,
     open: Option<Window>,
     counts: Counts,
+    /// Whether the starting book comes from a snapshot the host supplies
+    /// rather than from nothing.
+    snapshots: bool,
+    /// Updates received while waiting for that snapshot.
+    pending: VecDeque<DepthUpdate>,
 }
 
 impl Aggregator {
@@ -102,6 +121,8 @@ impl Aggregator {
             high_water: i64::MIN,
             open: None,
             counts: Counts::default(),
+            snapshots: false,
+            pending: VecDeque::new(),
         })
     }
 
@@ -164,9 +185,104 @@ impl Aggregator {
         closed
     }
 
+    /// Take the starting book from a snapshot rather than from nothing.
+    ///
+    /// For a live feed whose depth stream is incremental only. Without a
+    /// snapshot the book is whatever levels changed since connecting: a
+    /// side that has not changed yet is missing, and a best bid read from
+    /// it is a price nobody is bidding. In this mode updates are held
+    /// until [`Aggregator::install_snapshot`], the top of book reads as
+    /// unknown until then, and any break in the chain returns here rather
+    /// than restarting from an empty book.
+    ///
+    /// A replay does not call this: a capture has no snapshots, and the
+    /// empty start is the one it has always had.
+    pub fn expect_snapshots(&mut self) {
+        self.snapshots = true;
+        if !self.bootstrapped {
+            self.book = Book::new();
+        }
+    }
+
+    /// Whether the book is waiting for a snapshot.
+    #[must_use]
+    pub fn needs_snapshot(&self) -> bool {
+        self.snapshots && !self.bootstrapped
+    }
+
+    /// Updates held for the snapshot.
+    ///
+    /// A host fetches only once this is above zero. The venue's procedure
+    /// is stream first, snapshot second: a snapshot taken before the
+    /// first buffered update may be older than all of them, and then
+    /// nothing joins it to the stream.
+    #[must_use]
+    pub fn buffered(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Install the starting book and apply what arrived while it was
+    /// fetched.
+    ///
+    /// # Errors
+    /// The snapshot does not join the held updates: it is older than the
+    /// first of them, or the held ones have a break of their own. The
+    /// book keeps waiting, holding the updates from the break on, and the
+    /// host fetches another.
+    pub fn install_snapshot(&mut self, snapshot: &DepthSnapshot) -> Result<(), SequenceError> {
+        self.book
+            .install_snapshot(snapshot.last_update_id, &snapshot.bids, &snapshot.asks);
+        while let Some(update) = self.pending.front() {
+            match self.book.apply(update) {
+                Ok(Applied::Updated) => self.counts.depth_applied += 1,
+                // Older than the snapshot, which already reflects it.
+                Ok(Applied::AlreadyInSnapshot) => {}
+                Err(e) => {
+                    self.book = Book::new();
+                    return Err(e);
+                }
+            }
+            self.pending.pop_front();
+        }
+        self.bootstrapped = true;
+        self.counts.snapshots += 1;
+        self.read_top();
+        Ok(())
+    }
+
+    fn read_top(&mut self) {
+        self.bid = self.book.bids().best().map_or(0, |l| l.price);
+        self.ask = self.book.asks().best().map_or(0, |l| l.price);
+    }
+
+    /// Hold an update for the snapshot, oldest dropped first.
+    fn hold(&mut self, update: &DepthUpdate) {
+        if self.pending.len() == MAX_PENDING {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(update.clone());
+    }
+
     /// Apply a depth update.
     pub fn on_depth(&mut self, at: i64, local: i64, update: &DepthUpdate) -> Option<Tick> {
         let closed = self.roll(at, local);
+        if self.snapshots {
+            if !self.bootstrapped {
+                self.hold(update);
+                return closed;
+            }
+            if self.book.apply(update).is_err() {
+                // A break: the book is wrong from here on. Back to
+                // waiting, with this update as the first one held.
+                self.counts.resyncs += 1;
+                self.drop_book();
+                self.hold(update);
+                return closed;
+            }
+            self.counts.depth_applied += 1;
+            self.read_top();
+            return closed;
+        }
         if !self.bootstrapped {
             self.book
                 .install_snapshot(update.first_id.saturating_sub(1), &[], &[]);
@@ -182,8 +298,7 @@ impl Aggregator {
             let _ = self.book.apply(update);
         }
         self.counts.depth_applied += 1;
-        self.bid = self.book.bids().best().map_or(0, |l| l.price);
-        self.ask = self.book.asks().best().map_or(0, |l| l.price);
+        self.read_top();
         closed
     }
 
@@ -210,10 +325,7 @@ impl Aggregator {
     /// back to trades, while it reads a stale quote as a quote.
     pub fn on_gap(&mut self, at: i64, local: i64) -> Option<Tick> {
         let closed = self.roll(at, local);
-        self.book = Book::new();
-        self.bootstrapped = false;
-        self.bid = 0;
-        self.ask = 0;
+        self.drop_book();
         closed
     }
 
@@ -225,8 +337,12 @@ impl Aggregator {
     /// that as the top of book. The same honest answer as a gap — no
     /// quote rather than a stale one — without the window roll a gap
     /// implies, because the trade stream may still be running.
+    ///
+    /// Updates held for a snapshot go with it: they belong to the chain
+    /// that just broke.
     pub fn drop_book(&mut self) {
         self.book = Book::new();
+        self.pending.clear();
         self.bootstrapped = false;
         self.bid = 0;
         self.ask = 0;
@@ -615,5 +731,195 @@ mod carried_price {
             "the late trade was folded in, not discarded"
         );
         assert_eq!(next.stamp.exch, Nanos(3 * SEC), "and the clock stood still");
+    }
+}
+
+#[cfg(test)]
+mod snapshots {
+    use super::*;
+    use oq_l2feed::depth::Level;
+
+    const SEC: i64 = 1_000_000_000;
+
+    fn update(
+        first: u64,
+        last: u64,
+        prev: u64,
+        bids: &[(i64, i64)],
+        asks: &[(i64, i64)],
+    ) -> DepthUpdate {
+        let side = |v: &[(i64, i64)]| v.iter().map(|&(price, qty)| Level { price, qty }).collect();
+        DepthUpdate {
+            event_ms: 0,
+            first_id: first,
+            final_id: last,
+            prev_final_id: Some(prev),
+            bids: side(bids),
+            asks: side(asks),
+        }
+    }
+
+    fn snapshot(id: u64) -> DepthSnapshot {
+        DepthSnapshot {
+            last_update_id: id,
+            bids: vec![Level { price: 99, qty: 5 }, Level { price: 98, qty: 5 }],
+            asks: vec![Level { price: 101, qty: 5 }, Level { price: 102, qty: 5 }],
+        }
+    }
+
+    /// A window's top of book, closed by a trade in the next one.
+    fn top(a: &mut Aggregator, at: i64) -> (PriceTicks, PriceTicks) {
+        let t = a
+            .on_trade(
+                at,
+                at,
+                &Trade {
+                    price: 100,
+                    qty: 1,
+                    aggressor: None,
+                },
+            )
+            .expect("a window closed");
+        (t.bid, t.ask)
+    }
+
+    /// The defect this exists for: a book built from nothing has only
+    /// the sides that changed since connecting. Here only an ask moved,
+    /// so the old start published a quote with no bid at all.
+    #[test]
+    fn a_book_that_waits_for_its_snapshot_has_both_sides() {
+        let mut replay = Aggregator::new(SEC).expect("window");
+        let mut live = Aggregator::new(SEC).expect("window");
+        live.expect_snapshots();
+        let u = update(11, 12, 10, &[], &[(101, 7)]);
+        replay.on_trade(
+            0,
+            0,
+            &Trade {
+                price: 100,
+                qty: 1,
+                aggressor: None,
+            },
+        );
+        live.on_trade(
+            0,
+            0,
+            &Trade {
+                price: 100,
+                qty: 1,
+                aggressor: None,
+            },
+        );
+        replay.on_depth(1, 1, &u);
+        live.on_depth(1, 1, &u);
+        assert_eq!(
+            top(&mut replay, SEC).0,
+            PriceTicks(0),
+            "the old start: no bid"
+        );
+
+        assert!(live.needs_snapshot());
+        assert_eq!(live.buffered(), 1);
+        assert_eq!(
+            top(&mut live, SEC),
+            (PriceTicks(0), PriceTicks(0)),
+            "unknown, not half a quote"
+        );
+        live.install_snapshot(&snapshot(11)).expect("joins");
+        assert!(!live.needs_snapshot());
+        assert_eq!(live.buffered(), 0);
+        assert_eq!(top(&mut live, 2 * SEC), (PriceTicks(99), PriceTicks(101)));
+        assert_eq!(live.counts().snapshots, 1);
+    }
+
+    /// Updates the snapshot already reflects are skipped, and the one
+    /// that straddles it is applied.
+    #[test]
+    fn held_updates_older_than_the_snapshot_are_skipped() {
+        let mut a = Aggregator::new(SEC).expect("window");
+        a.expect_snapshots();
+        a.on_depth(0, 0, &update(5, 8, 4, &[(99, 1)], &[]));
+        a.on_depth(0, 0, &update(9, 12, 8, &[(97, 3)], &[]));
+        a.install_snapshot(&snapshot(10))
+            .expect("the second straddles 10");
+        assert_eq!(
+            a.counts().depth_applied,
+            1,
+            "only the straddling one is applied"
+        );
+        a.on_depth(0, 0, &update(13, 13, 12, &[(100, 2)], &[]));
+        a.on_trade(
+            0,
+            0,
+            &Trade {
+                price: 100,
+                qty: 1,
+                aggressor: None,
+            },
+        );
+        assert_eq!(top(&mut a, SEC).0, PriceTicks(100));
+    }
+
+    /// A snapshot older than everything held cannot be joined to it:
+    /// refused, and the book keeps waiting with what it holds.
+    #[test]
+    fn a_snapshot_older_than_the_stream_is_refused() {
+        let mut a = Aggregator::new(SEC).expect("window");
+        a.expect_snapshots();
+        a.on_depth(0, 0, &update(50, 52, 49, &[], &[(101, 1)]));
+        assert!(a.install_snapshot(&snapshot(10)).is_err());
+        assert!(a.needs_snapshot());
+        assert_eq!(a.buffered(), 1, "kept for the next snapshot");
+        a.install_snapshot(&snapshot(51))
+            .expect("a newer one joins");
+    }
+
+    /// A break after the snapshot sends the book back to waiting rather
+    /// than on from an empty one.
+    #[test]
+    fn a_break_in_the_chain_waits_for_a_new_snapshot() {
+        let mut a = Aggregator::new(SEC).expect("window");
+        a.expect_snapshots();
+        a.on_depth(0, 0, &update(11, 12, 10, &[], &[]));
+        a.install_snapshot(&snapshot(11)).expect("joins");
+        a.on_trade(
+            0,
+            0,
+            &Trade {
+                price: 100,
+                qty: 1,
+                aggressor: None,
+            },
+        );
+        // 13..=20 lost; this one says its predecessor was 20.
+        a.on_depth(1, 1, &update(21, 22, 20, &[(100, 1)], &[]));
+        assert!(a.needs_snapshot());
+        assert_eq!(a.counts().resyncs, 1);
+        assert_eq!(a.buffered(), 1, "the update after the break is held");
+        assert_eq!(top(&mut a, SEC), (PriceTicks(0), PriceTicks(0)));
+    }
+
+    /// A lost stream takes what was held with it.
+    #[test]
+    fn dropping_the_book_forgets_what_was_held() {
+        let mut a = Aggregator::new(SEC).expect("window");
+        a.expect_snapshots();
+        a.on_depth(0, 0, &update(11, 12, 10, &[], &[]));
+        a.drop_book();
+        assert!(a.needs_snapshot());
+        assert_eq!(a.buffered(), 0);
+    }
+
+    /// The hold is bounded, and what it drops is the oldest.
+    #[test]
+    fn the_hold_is_bounded() {
+        let mut a = Aggregator::new(SEC).expect("window");
+        a.expect_snapshots();
+        for i in 0..(MAX_PENDING as u64 + 5) {
+            a.on_depth(0, 0, &update(i + 1, i + 1, i, &[], &[]));
+        }
+        assert_eq!(a.buffered(), MAX_PENDING);
+        a.install_snapshot(&snapshot(6))
+            .expect("joins at the oldest kept");
     }
 }

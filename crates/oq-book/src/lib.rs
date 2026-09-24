@@ -16,4 +16,4 @@ pub mod book;
 pub mod depth;
 
 pub use book::{Applied, Book, SequenceError, Side, Sweep};
-pub use depth::{DepthUpdate, Level};
+pub use depth::{DepthSnapshot, DepthUpdate, Level};

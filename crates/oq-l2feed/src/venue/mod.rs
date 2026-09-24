@@ -291,6 +291,30 @@ pub trait Venue {
         scales: crate::depth::Scales,
     ) -> Result<crate::depth::DepthUpdate, crate::depth::ParseError>;
 
+    /// Where to fetch a full book for `symbol` over REST, on a venue
+    /// whose depth stream is incremental only.
+    ///
+    /// `None` on a venue whose stream opens with its own snapshot, where
+    /// the first message is the starting book and a REST request would
+    /// be a second, unsynchronised copy of it.
+    fn depth_snapshot_url(&self, _symbol: &str) -> Option<String> {
+        None
+    }
+
+    /// Read the payload [`Venue::depth_snapshot_url`] returns.
+    ///
+    /// # Errors
+    ///
+    /// When the payload is not a snapshot, or a venue that publishes no
+    /// snapshot endpoint is asked to read one.
+    fn parse_depth_snapshot(
+        &self,
+        _payload: &[u8],
+        _scales: crate::depth::Scales,
+    ) -> Result<crate::depth::DepthSnapshot, crate::depth::ParseError> {
+        Err(crate::depth::ParseError::NotDepth)
+    }
+
     /// Which archive window a record at `ts` belongs to.
     ///
     /// The default divides the clock: one file per UTC day, or per UTC
