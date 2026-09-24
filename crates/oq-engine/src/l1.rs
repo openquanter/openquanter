@@ -357,6 +357,14 @@ pub struct L1Engine {
     /// Cumulative volume at the previous observation, for the traded
     /// volume of this one.
     prev_volume: Option<QtyLots>,
+    /// Volume that traded in the most recent observation, once there has
+    /// been one to measure against.
+    ///
+    /// What an order submitted with no entry latency arrives into. The
+    /// volume-multiple queue is sized from the market at arrival, and an
+    /// order that arrives at once was given no volume at all — a queue of
+    /// zero while the report still claimed the multiple.
+    last_traded: Option<i64>,
 }
 
 impl L1Engine {
@@ -371,6 +379,7 @@ impl L1Engine {
             delayed: Vec::new(),
             released: Vec::new(),
             prev_volume: None,
+            last_traded: None,
         }
     }
 
@@ -412,7 +421,7 @@ impl L1Engine {
             });
             return;
         }
-        self.admit(order, None, ahead);
+        self.admit(order, self.last_traded, ahead);
     }
 
     /// Withdraw an order, wherever it currently is.
@@ -616,6 +625,9 @@ impl L1Engine {
             self.released.extend(adjusted);
         }
 
+        if self.prev_volume.is_some() {
+            self.last_traded = Some(traded);
+        }
         self.prev_volume = Some(tick.volume);
         &self.released
     }
@@ -754,7 +766,16 @@ fn touched(tick: &Tick, price: PriceTicks) -> bool {
 ///
 /// A buy at 100 is passed through when the market traded entirely below
 /// 100: everything queued at 100 was lifted on the way.
+///
+/// An observation in which nothing traded went through nothing. Its high
+/// and low are zero — the aggregator's way of saying there was no trade —
+/// and read as prices, every buy looked passed through (the market
+/// "traded below" it) and skipped its queue, while no sell ever did: an
+/// optimism that fell on one side only.
 fn gapped_through(tick: &Tick, side: Side, price: PriceTicks) -> bool {
+    if tick.high.0 == 0 && tick.low.0 == 0 {
+        return false;
+    }
     match side {
         Side::Buy => tick.high.0 < price.0,
         Side::Sell => tick.low.0 > price.0,
@@ -1242,5 +1263,85 @@ mod tests {
             text.contains("assumption about this market, not a measurement"),
             "{text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod queue_symmetry {
+    use super::*;
+    use oq_types::{InstrumentId, Offset, Stamp};
+
+    const SEC: i64 = 1_000_000_000;
+
+    fn tick(i: i64, last: i64, high: i64, low: i64, volume: i64) -> Tick {
+        Tick {
+            stamp: Stamp {
+                exch: Nanos(i * SEC),
+                local: Nanos(i * SEC),
+            },
+            last: PriceTicks(last),
+            high: PriceTicks(high),
+            low: PriceTicks(low),
+            bid: PriceTicks(last - 1),
+            ask: PriceTicks(last + 1),
+            volume: QtyLots(volume),
+        }
+    }
+
+    fn limit(id: u64, side: Side, price: i64, qty: i64) -> Working {
+        Working::Live(
+            oq_types::Order::with_offset(
+                OrderId(id),
+                side,
+                oq_types::OrderKind::Limit {
+                    price: PriceTicks(price),
+                },
+                QtyLots(qty),
+                oq_types::TimeInForce::GoodTilCancel,
+                Stamp {
+                    exch: Nanos(0),
+                    local: Nanos(0),
+                },
+                Offset::Open,
+            )
+            .expect("positive quantity")
+            .accept(),
+        )
+    }
+
+    /// A window with no trades does not let a buy skip its queue.
+    #[test]
+    fn a_window_without_trades_passes_no_order_through_its_queue() {
+        let policy = Policy {
+            queue: QueueAhead::Fixed(QtyLots(10_000)),
+            ..Policy::TRANSPARENT
+        };
+        let mut e = L1Engine::new(InstrumentId::new(1), policy);
+        e.on_tick(&tick(1, 100, 101, 99, 1_000));
+        e.submit(limit(1, Side::Buy, 100, 5), Nanos(SEC));
+        // Nothing traded: high and low are zero, volume unchanged.
+        e.on_tick(&tick(2, 100, 0, 0, 1_000));
+        assert_eq!(e.shadowed(), 1, "still queued behind 10_000 lots");
+        assert_eq!(e.inner().book().len(), 0, "not promoted to the book");
+    }
+
+    /// With no entry latency the volume-multiple queue is sized from the
+    /// last observation, not from nothing.
+    #[test]
+    fn an_order_with_no_entry_latency_queues_behind_the_multiple() {
+        let policy = Policy {
+            queue: QueueAhead::VolumeMultiple(100),
+            ..Policy::TRANSPARENT
+        };
+        let mut e = L1Engine::new(InstrumentId::new(1), policy);
+        e.on_tick(&tick(1, 100, 101, 99, 1_000));
+        e.on_tick(&tick(2, 100, 101, 99, 1_500));
+        e.submit(limit(1, Side::Buy, 100, 5), Nanos(2 * SEC));
+        assert_eq!(
+            e.shadowed(),
+            1,
+            "queued behind the 500 lots that last traded"
+        );
+        assert_eq!(e.inner().book().len(), 0);
     }
 }
