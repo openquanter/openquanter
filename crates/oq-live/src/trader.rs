@@ -79,6 +79,14 @@ pub enum Outcome {
     },
 }
 
+/// How long after sending a "no such order" answer is evidence that the
+/// order never landed.
+///
+/// Twice the five-second `recvWindow` signed requests carry: past it the
+/// venue refuses a request it has not yet processed, so absence is then
+/// an answer rather than a race.
+pub const NOT_FOUND_IS_ANSWER_AFTER: Nanos = Nanos(10_000_000_000);
+
 /// A strategy, a session, and the map between them.
 pub struct Trader<S: Strategy, E: Execution> {
     strategy: S,
@@ -98,7 +106,7 @@ pub struct Trader<S: Strategy, E: Execution> {
     withdrawn: HashSet<u64>,
     intents: Vec<Intent>,
     /// Submissions the venue has not answered, and the id it was given.
-    unanswered: Vec<(OrderId, String)>,
+    unanswered: Vec<(OrderId, String, Nanos)>,
 }
 
 impl<S: Strategy, E: Execution> Trader<S, E> {
@@ -154,7 +162,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             .flat_map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
-        self.report_placements(&out);
+        self.report_placements(&out, now);
         out
     }
 
@@ -190,7 +198,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
     /// as a refusal — nobody knows whether it landed, and telling a
     /// strategy `false` would be telling it the order does not exist,
     /// which is the mistake `Placed::Unknown` exists to prevent.
-    fn report_placements(&mut self, outcomes: &[Outcome]) {
+    fn report_placements(&mut self, outcomes: &[Outcome], now: Nanos) {
         for o in outcomes {
             match o {
                 Outcome::Sent { local, .. } => self.strategy.on_placed(*local, true),
@@ -207,7 +215,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 // stays answerable.
                 Outcome::Unresolved {
                     local, client_id, ..
-                } => self.unanswered.push((*local, client_id.clone())),
+                } => self.unanswered.push((*local, client_id.clone(), now)),
                 // Unknown and cancelled: not an answer about whether
                 // this submission is resting.
                 Outcome::UnknownOrder(_) | Outcome::Cancelled { .. } => {}
@@ -225,7 +233,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             .flat_map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
-        self.report_placements(&out);
+        self.report_placements(&out, now);
         out
     }
 
@@ -295,14 +303,20 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
     /// Called on the heartbeat rather than per observation: it is a
     /// round trip to the venue, and the answer does not change between
     /// ticks.
-    pub fn chase_unanswered(&mut self) -> Vec<(OrderId, bool)> {
+    ///
+    /// "The venue has no such order" settles a placement only once the
+    /// request can no longer be accepted — [`NOT_FOUND_IS_ANSWER_AFTER`]
+    /// after it was sent. Before that the request may still be queued
+    /// behind the gateway that failed to answer, and resending it is how
+    /// one order becomes two.
+    pub fn chase_unanswered(&mut self, now: Nanos) -> Vec<(OrderId, bool)> {
         if self.unanswered.is_empty() {
             return Vec::new();
         }
         let symbol = self.session.symbol().to_string();
         let mut settled = Vec::new();
         let mut still_open = Vec::new();
-        for (local, client_id) in core::mem::take(&mut self.unanswered) {
+        for (local, client_id, sent) in core::mem::take(&mut self.unanswered) {
             match self.session.venue().order_status(&symbol, &client_id) {
                 // Resting after all, so it is registered as any accepted
                 // order is. Telling the strategy was once the whole of
@@ -314,12 +328,12 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                     self.live.insert(local.0, client_id);
                     settled.push((local, true));
                 }
-                Ok(None) => {
+                Ok(None) if now.0.saturating_sub(sent.0) >= NOT_FOUND_IS_ANSWER_AFTER.0 => {
                     self.closing.remove(&local.0);
                     settled.push((local, false));
                 }
-                // Still no answer. Kept, not guessed at.
-                Err(_) => still_open.push((local, client_id)),
+                // Not found yet, or no answer at all. Kept, not guessed at.
+                Ok(None) | Err(_) => still_open.push((local, client_id, sent)),
             }
         }
         self.unanswered = still_open;
@@ -364,7 +378,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             .flat_map(|i| self.act(i, ctx.tick.last, now))
             .collect();
         self.intents = intents;
-        self.report_placements(&out);
+        self.report_placements(&out, now);
         self.forget(client_id);
         out
     }

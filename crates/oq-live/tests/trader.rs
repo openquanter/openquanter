@@ -743,11 +743,11 @@ fn a_submission_the_venue_never_answered_is_asked_about_again() {
     );
 
     // Nothing changes while the venue is still unreachable.
-    assert!(t.chase_unanswered().is_empty());
+    assert!(t.chase_unanswered(Nanos(2)).is_empty());
     assert_eq!(t.unanswered(), 1);
 
     *t.session().venue().answers.borrow_mut() = true;
-    let settled = t.chase_unanswered();
+    let settled = t.chase_unanswered(Nanos(3));
 
     assert_eq!(settled, vec![(OrderId(7), true)]);
     assert_eq!(t.unanswered(), 0, "and it is not asked a third time");
@@ -770,7 +770,15 @@ fn an_order_that_never_landed_is_reported_as_not_resting() {
     t.on_tick(&ctx(), Nanos(1));
     *t.session().venue().answers.borrow_mut() = true;
 
-    assert_eq!(t.chase_unanswered(), vec![(OrderId(7), false)]);
+    // Too soon: the request may still be queued behind the gateway that
+    // failed to answer, and "not found" then licenses a duplicate.
+    assert!(t.chase_unanswered(Nanos(2)).is_empty());
+    assert_eq!(t.unanswered(), 1);
+    // Once the request can no longer be accepted, absence is an answer.
+    assert_eq!(
+        t.chase_unanswered(Nanos(1 + oq_live::trader::NOT_FOUND_IS_ANSWER_AFTER.0)),
+        vec![(OrderId(7), false)]
+    );
     assert_eq!(t.strategy().answers, vec![(OrderId(7), false)]);
 }
 
@@ -867,7 +875,7 @@ fn an_order_found_resting_later_is_registered_like_any_other() {
     assert!(t.resting().is_empty(), "not known to be resting yet");
 
     *t.session().venue().answers.borrow_mut() = true;
-    assert_eq!(t.chase_unanswered(), vec![(OrderId(7), true)]);
+    assert_eq!(t.chase_unanswered(Nanos(3)), vec![(OrderId(7), true)]);
 
     let resting: Vec<String> = t.resting().into_iter().map(str::to_string).collect();
     assert_eq!(resting.len(), 1, "the sweep and the halt can see it");

@@ -1247,7 +1247,7 @@ where
             // the observation path. Each answer reaches the strategy
             // through `on_placed`, which is where it would have arrived
             // had the venue answered the first time.
-            let settled = trader.chase_unanswered();
+            let settled = trader.chase_unanswered(Nanos(now_ns()));
             for (local, resting) in &settled {
                 if *resting {
                     println!("resolved         {local:?} is resting after all");
