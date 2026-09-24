@@ -245,3 +245,81 @@ fn a_short_action_slice_is_refused() {
 fn an_empty_batch_is_refused() {
     let _ = VecEnv::new(&config(), &rising(10), 0, 1);
 }
+
+fn priced(prices: impl IntoIterator<Item = i64>) -> Vec<Observation> {
+    prices
+        .into_iter()
+        .enumerate()
+        .map(|(i, price)| {
+            let at = (i as i64 + 1) * 1_000_000;
+            Observation::Tick(Tick {
+                stamp: Stamp::new(at, at),
+                last: PriceTicks(price),
+                high: PriceTicks(price),
+                low: PriceTicks(price),
+                bid: PriceTicks(price),
+                ask: PriceTicks(price),
+                volume: QtyLots(1_000),
+            })
+        })
+        .collect()
+}
+
+fn final_equity(config: RunConfig, stream: Vec<Observation>) -> (Cash, Option<Ending>) {
+    let mut env = Env::new(config, stream, 1);
+    env.reset();
+    let mut last = env.step(Action::target(10));
+    while last.done.is_none() {
+        last = env.step(Action::target(10));
+    }
+    (last.equity, last.done)
+}
+
+/// Funding reaches the reward. It was not settled at all, so a policy
+/// that held through expensive funding learned it was free.
+#[test]
+fn a_long_held_through_positive_funding_pays_it() {
+    let flat = priced([100_000; 20]);
+    let funding = oq_margin::FundingSchedule::new(
+        (5..15)
+            .map(|i| oq_margin::FundingRate {
+                at: oq_types::Nanos(i * 1_000_000 + 500_000),
+                rate: Ratio::from_percent(1),
+                mark: PriceTicks(100_000),
+            })
+            .collect(),
+    );
+    let (without, _) = final_equity(config(), flat.clone());
+    let (with, _) = final_equity(config().with_funding(funding), flat);
+    assert!(with < without, "funding paid: {with:?} vs {without:?}");
+}
+
+/// The margin mode the config names is the one the episode runs under,
+/// as it is in the backtest.
+#[test]
+fn ignored_margin_does_not_end_an_episode_in_liquidation() {
+    let thin = || {
+        RunConfig::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::new(vec![MarginTier {
+                max_notional: Cash(i64::MAX),
+                rate: Ratio::from_percent(1),
+                amount: Cash::ZERO,
+            }])
+            .expect("single bracket"),
+            Cash::from_units(1),
+        )
+    };
+    let falling = || priced((0..30).map(|i| 100_000 - i * 3_000));
+    let (_, enforced) = final_equity(
+        thin().with_margin(oq_backtest::MarginMode::Enforced),
+        falling(),
+    );
+    assert_eq!(enforced, Some(Ending::Liquidated));
+    let (_, ignored) = final_equity(
+        thin().with_margin(oq_backtest::MarginMode::Ignored),
+        falling(),
+    );
+    assert_eq!(ignored, Some(Ending::Exhausted));
+}
