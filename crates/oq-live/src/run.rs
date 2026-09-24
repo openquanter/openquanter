@@ -1419,6 +1419,10 @@ where
     // scrape endpoint — the snapshot is a value, and where it goes is
     // the operator's choice rather than this crate's dependency.
     metrics.foreign_orders = trader.foreign() as u64;
+    // Read from the switch itself. The field existed, was rendered and
+    // alerted on, and was never set: a run that spent two days halted
+    // closed with `oq_halted 0` and "alerts none".
+    metrics.halted = trader.session().gate().kill_switch().is_tripped();
     println!();
     print!("{}", metrics.render(None));
     let raised = crate::metrics::alerts(&metrics, crate::metrics::AlertRules::default());
