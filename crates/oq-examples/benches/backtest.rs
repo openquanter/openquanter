@@ -151,7 +151,7 @@ fn config(margin: MarginMode) -> RunConfig {
 }
 
 fn benches(c: &mut Criterion) {
-    let ticks = series(MarketShape::trending(TICKS), 20_260_816);
+    let ticks = series(MarketShape::rising(TICKS, 0.5), 20_260_816);
 
     let mut group = c.benchmark_group("backtest");
     group.throughput(Throughput::Elements(TICKS as u64));
@@ -198,7 +198,7 @@ fn benches(c: &mut Criterion) {
     // not be.
     let mut scaling = c.benchmark_group("scaling");
     for size in [10_000usize, 100_000, 400_000] {
-        let ticks = series(MarketShape::trending(size), 20_260_816);
+        let ticks = series(MarketShape::rising(size, 0.5), 20_260_816);
         scaling.throughput(Throughput::Elements(size as u64));
         scaling.bench_with_input(BenchmarkId::from_parameter(size), &ticks, |b, ticks| {
             b.iter(|| {

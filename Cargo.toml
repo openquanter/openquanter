@@ -109,3 +109,15 @@ debug = 1
 
 [profile.dev.package."*"]
 debug = false
+
+# Integer overflow panics in release as it does under test, in our crates.
+# A position, a sequence number or a cash sum that wrapped would be wrong
+# silently, and in the direction nobody checks; a panic stops the process
+# where the number went wrong. Measured on the engine loop's throughput
+# example before turning it on. Dependencies keep their own choice: some
+# are written to wrap in release, and this is not a claim about them.
+[profile.release]
+overflow-checks = true
+
+[profile.release.package."*"]
+overflow-checks = false
