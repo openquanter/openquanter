@@ -67,7 +67,7 @@ with it:
 
 | Artifact | Versioning | Where |
 |---|---|---|
-| Capture file format | `format_version` in the manifest, currently 1 | [Capture Format](CAPTURE-FORMAT.md) |
+| Capture file format | `format_version` in the manifest, currently 2 (readers still accept 1) | [Capture Format](CAPTURE-FORMAT.md) |
 | Tick file format | `version` in the file header, currently 2 | [Tick Format](TICK-FORMAT.md) |
 | Journal frame format | `VERSION` in the frame header | `oq-journal` |
 
