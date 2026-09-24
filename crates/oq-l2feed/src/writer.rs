@@ -128,10 +128,7 @@ impl CaptureWriter {
     ///
     /// Propagates I/O failures from rotation and appending.
     pub fn append(&mut self, record: &Record) -> io::Result<Option<SealedDay>> {
-        let window = self.window_of.map_or_else(
-            || Window::from_nanos(record.day_ts(), self.rotation),
-            |f| f(record.day_ts(), self.rotation),
-        );
+        let window = self.window_for(record);
 
         // A record for the day that just rolled over is normal, not an
         // error. Exchange timestamps and the host clock cross midnight
@@ -201,6 +198,29 @@ impl CaptureWriter {
         Ok(sealed)
     }
 
+    fn window_for(&self, record: &Record) -> Window {
+        self.window_of.map_or_else(
+            || Window::from_nanos(record.day_ts(), self.rotation),
+            |f| f(record.day_ts(), self.rotation),
+        )
+    }
+
+    /// The manifest accounting for the file a record of `window` was
+    /// written to: the day kept open for late arrivals when it belongs
+    /// there, otherwise the open one.
+    ///
+    /// A control record counted against whichever day happened to be
+    /// open described one file's gap in another file's manifest. The
+    /// file that holds the marker then said zero gaps while holding one,
+    /// and its neighbour claimed a gap it has no marker for.
+    fn builder_for(&mut self, window: Window) -> Option<&mut ManifestBuilder> {
+        match (&mut self.previous, &mut self.open) {
+            (Some(previous), _) if previous.window == window => Some(&mut previous.builder),
+            (_, Some(open)) if open.window == window => Some(&mut open.builder),
+            _ => None,
+        }
+    }
+
     /// Record a feed gap. The marker is written into the stream *and*
     /// counted in the manifest, so a reader can tell "nothing happened"
     /// from "we were not listening" without reparsing the file.
@@ -215,12 +235,11 @@ impl CaptureWriter {
         last_seq: Option<u64>,
         outage_ns: i64,
     ) -> io::Result<Option<SealedDay>> {
-        let sealed = self.append(&Record::control(
-            local_ts,
-            control::gap(reason, last_seq, outage_ns),
-        ))?;
-        if let Some(open) = self.open.as_mut() {
-            open.builder.observe_gap(outage_ns);
+        let record = Record::control(local_ts, control::gap(reason, last_seq, outage_ns));
+        let window = self.window_for(&record);
+        let sealed = self.append(&record)?;
+        if let Some(builder) = self.builder_for(window) {
+            builder.observe_gap(outage_ns);
         }
         self.flush()?;
         Ok(sealed)
@@ -237,12 +256,11 @@ impl CaptureWriter {
         offset_ns: i64,
         dispersion_ns: i64,
     ) -> io::Result<Option<SealedDay>> {
-        let sealed = self.append(&Record::control(
-            local_ts,
-            control::clock_offset(offset_ns, dispersion_ns),
-        ))?;
-        if let Some(open) = self.open.as_mut() {
-            open.builder.observe_clock_offset(offset_ns);
+        let record = Record::control(local_ts, control::clock_offset(offset_ns, dispersion_ns));
+        let window = self.window_for(&record);
+        let sealed = self.append(&record)?;
+        if let Some(builder) = self.builder_for(window) {
+            builder.observe_clock_offset(offset_ns);
         }
         self.flush()?;
         Ok(sealed)
@@ -663,6 +681,41 @@ mod tests {
         let (records, _) = decode_all(&old).expect("decode");
         let payloads: Vec<_> = records.iter().map(|r| r.payload.clone()).collect();
         assert_eq!(payloads, vec![b"before".to_vec(), b"late".to_vec()]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A gap marker that lands in the day kept open for late arrivals is
+    /// counted in that day's manifest, not in the one that happens to be
+    /// open: the file that holds the marker is the one that must say so.
+    #[test]
+    fn a_late_gap_is_counted_in_the_manifest_of_the_file_that_holds_it() {
+        let (mut w, root) = writer("lategap");
+        let day = 20_000i64;
+        let midnight = (day + 1) * DAY_NS;
+
+        w.append(&Record::payload(0, midnight - 1_000, b"before".to_vec()))
+            .expect("append");
+        w.append(&Record::payload(0, midnight + 1_000, b"after".to_vec()))
+            .expect("append");
+        w.append_gap(midnight - 500, "lost", None, 400)
+            .expect("a late gap is not an error");
+
+        let today = w.seal().expect("seal");
+        assert_eq!(today.window.day, UtcDay(day + 1));
+        assert_eq!(today.manifest.gaps, 0, "the new day's file holds no marker");
+
+        let yesterday = fs::read_to_string(StreamId::new("venue", "SYM", "depth").manifest_for(
+            &root,
+            Window {
+                day: UtcDay(day),
+                hour: None,
+            },
+        ))
+        .expect("the old day was sealed with a manifest");
+        assert!(
+            yesterday.contains("\"gaps\": 1"),
+            "the old day's manifest counts the marker its file holds: {yesterday}"
+        );
         fs::remove_dir_all(root).ok();
     }
 
