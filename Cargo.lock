@@ -1065,6 +1065,8 @@ dependencies = [
 name = "oq-parity"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "oq-data",
+ "oq-engine",
  "oq-hash",
  "oq-types",
 ]

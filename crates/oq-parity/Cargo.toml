@@ -8,8 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# For `oq-parity markout`, which prices fills against a tick file. No
+# third-party crates: oq-data holds the same zero budget this crate does.
+oq-data.workspace = true
 oq-hash.workspace = true
 oq-types.workspace = true
+
+[dev-dependencies]
+oq-engine.workspace = true
 
 [lints]
 workspace = true
