@@ -89,6 +89,26 @@ class CrossBatched(Cross):
         ]
 
 
+class Clairvoyant:
+    """Buys before a rise, which it knows about because it was built with
+    the whole window. The lookahead check exists to catch exactly this."""
+
+    name = "clairvoyant"
+
+    def __init__(self, known):
+        self.future = [t.last for t in known]
+        self.seen = 0
+
+    def on_tick(self, ctx):
+        i = self.seen
+        self.seen += 1
+        if i + 1 < len(self.future) and self.future[i + 1] > ctx.last and ctx.position == 0:
+            return [oq.Order("buy", 1, "open")]
+        if ctx.position > 0:
+            return [oq.Order("sell", 1, "close")]
+        return None
+
+
 FAILURES = []
 
 
@@ -275,6 +295,23 @@ def main():
         check("a file that is not this format is refused on open", False)
     except ValueError as e:
         check("a file that is not this format is refused on open", "magic" in str(e).lower())
+
+    # --- lookahead ----------------------------------------------------
+    short = series[:6_000]
+    honest = oq.lookahead_check(lambda known: Cross(), short, balance, max_points=40)
+    check("a strategy that uses only the past is clean", honest.clean, repr(honest))
+    check(
+        "the report says how much it checked",
+        0 < honest.checked <= 40 and honest.sampled == (honest.checked < honest.signals),
+        repr(honest),
+    )
+    cheat = oq.lookahead_check(Clairvoyant, short, balance, max_points=40)
+    check("a strategy built from the whole window is caught", not cheat.clean, repr(cheat))
+    try:
+        oq.lookahead_check(lambda known: 1 / 0, short, balance)
+        check("a build that raises is reported", False)
+    except ValueError as e:
+        check("a build that raises is reported", "division" in str(e), str(e))
 
     print()
     if FAILURES:
