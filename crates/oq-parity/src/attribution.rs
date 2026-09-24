@@ -190,9 +190,15 @@ pub struct Evidence {
     pub matched: Vec<Matched>,
     /// Fills only one side made.
     pub unmatched: Vec<Unmatched>,
-    /// Funding the venue charged, and funding the model computed.
+    /// Funding as it moved the account: the venue's, then the model's.
+    /// Positive when received, negative when paid.
     pub funding: Option<(Cash, Cash)>,
-    /// Fees the venue charged, and fees the model computed.
+    /// Fees as they moved the account: the venue's, then the model's.
+    /// **Negative when charged** — every component here is an effect on
+    /// profit, and a fee is a cost. A caller holding fees as "amount
+    /// charged" negates them; passed as charged, a venue that charged
+    /// more read as having earned more, and the residual carried twice
+    /// the difference with the opposite sign.
     pub fees: Option<(Cash, Cash)>,
 }
 
