@@ -322,3 +322,77 @@ fn an_unresolved_order_is_still_resting() {
     let b = Belief::from_journal(&p).expect("readable");
     assert_eq!(b.resting, vec!["oq-1".to_string()]);
 }
+
+/// A journal a restarted process appended to is read as the latest run.
+///
+/// Each start writes the venue's whole position, which already contains
+/// every earlier fill. Added to what the journal had built, the first
+/// run's position was counted twice; and orders that run left were
+/// listed as resting although a process starts only with none.
+#[test]
+fn a_restart_replaces_the_position_rather_than_adding_to_it() {
+    let p = tmp("restart");
+    write(
+        &p,
+        &[
+            start(),
+            Record::Reconciled {
+                at: Nanos(1),
+                legs: vec![("BTCUSDT".into(), "LONG".into(), 20, 10_000)],
+            },
+            Record::Submitted {
+                at: Nanos(2),
+                client_id: "oq-1".into(),
+                side: Side::Buy,
+                limit_price: PriceTicks(0),
+                qty: QtyLots(10),
+                reduce_only: false,
+            },
+            Record::Outcome {
+                at: Nanos(3),
+                client_id: "oq-1".into(),
+                tag: OutcomeTag::Accepted,
+                detail: String::new(),
+            },
+            Record::Fill {
+                at: Nanos(4),
+                client_id: "oq-1".into(),
+                trade_id: 1,
+                qty: "0.010".into(),
+                price: "100.00".into(),
+                order: 1,
+                side: "Buy".into(),
+            },
+            Record::Submitted {
+                at: Nanos(5),
+                client_id: "oq-2".into(),
+                side: Side::Buy,
+                limit_price: PriceTicks(0),
+                qty: QtyLots(10),
+                reduce_only: false,
+            },
+            Record::Outcome {
+                at: Nanos(6),
+                client_id: "oq-2".into(),
+                tag: OutcomeTag::Accepted,
+                detail: String::new(),
+            },
+            // The restart: the venue now holds the 20 adopted plus the 10.
+            start(),
+            Record::Reconciled {
+                at: Nanos(7),
+                legs: vec![("BTCUSDT".into(), "LONG".into(), 30, 10_000)],
+            },
+        ],
+    );
+    let b = Belief::from_journal(&p).expect("readable");
+    assert_eq!(
+        b.position_lots, 30,
+        "the latest start's position, not 20 + 10 + 30"
+    );
+    assert!(
+        b.resting.is_empty(),
+        "nothing rests across a start: {:?}",
+        b.resting
+    );
+}
