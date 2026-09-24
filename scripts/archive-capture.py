@@ -134,15 +134,68 @@ def is_quiescent(path, settle=1.0):
     return a == os.path.getsize(path)
 
 
+def signature(path):
+    """What a file is, for asking later whether it is still that file."""
+    st = os.stat(path)
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
 def compress(raw, level):
+    """Compress `raw`, or reuse a copy made from the same bytes.
+
+    Returns (blob, signature of `raw` it was made from), or None.
+
+    A `.zst` found beside the file used to be reused because it existed.
+    That is two ways to lose data: a zstd killed mid-write leaves half a
+    blob, and a capture restarted inside the same window appends to a file
+    whose earlier blob no longer covers it. Either was uploaded, its ETag
+    matched the stale bytes, and the raw file was deleted. Now a blob is
+    written under a temporary name and renamed into place only once zstd
+    has finished, and it is reused only when a record of the file it was
+    made from still matches.
+    """
     out = raw + ".zst"
-    if os.path.exists(out):
-        return out
+    source = out + ".src"
+    sig = signature(raw)
+    if os.path.exists(out) and os.path.exists(source):
+        with open(source) as f:
+            if f.read().strip() == sig:
+                return out, sig
+    tmp = out + ".tmp"
+    if os.path.exists(tmp):
+        os.remove(tmp)
     rc = subprocess.call(
-        ["zstd", "-q", f"-{level}", "--long", "-o", out, raw],
+        ["zstd", "-q", "-f", f"-{level}", "--long", "-o", tmp, raw],
         stdout=subprocess.DEVNULL,
     )
-    return out if rc == 0 else None
+    if rc != 0:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return None
+    # Written to while it was compressed: the blob may hold part of it.
+    if signature(raw) != sig:
+        os.remove(tmp)
+        return None
+    os.replace(tmp, out)
+    with open(source + ".tmp", "w") as f:
+        f.write(sig + "\n")
+    os.replace(source + ".tmp", source)
+    return out, sig
+
+
+def unchanged_and_unheld(raw, sig):
+    """Whether `raw` is still the file that was compressed and uploaded,
+    and nobody has it open -- the last check before it is deleted.
+
+    Liveness was decided once, at the start of the run; a capture
+    restarted after that snapshot could be appending to it now.
+    """
+    try:
+        if signature(raw) != sig:
+            return False
+    except FileNotFoundError:
+        return False
+    return os.path.realpath(raw) not in open_files_on_host()
 
 
 def free_gb(path):
@@ -190,11 +243,13 @@ def main():
             print(f"would archive {rel} ({os.path.getsize(raw)} bytes)")
             continue
 
-        blob = compress(raw, args.level)
-        if blob is None:
-            print(f"archive: compression failed for {rel}", file=sys.stderr)
+        compressed = compress(raw, args.level)
+        if compressed is None:
+            print(f"archive: compression failed for {rel}, or it changed "
+                  "while being compressed", file=sys.stderr)
             failed += 1
             continue
+        blob, sig = compressed
 
         key = f"{args.prefix.rstrip('/')}/{rel}.zst" if args.prefix else f"{rel}.zst"
         mkey = key[: -len(".oqcap.zst")] + ".manifest.json"
@@ -218,8 +273,13 @@ def main():
         # unrecoverable data-loss one.
         age_h = (now - os.path.getmtime(raw)) / 3600.0
         if age_h >= args.keep_hours:
+            if not unchanged_and_unheld(raw, sig):
+                print(f"archive: {rel} changed or was reopened after it was "
+                      "uploaded; kept for the next run", file=sys.stderr)
+                continue
             os.remove(raw)
             os.remove(blob)
+            os.remove(blob + ".src")
             if manifest is not None:
                 os.remove(manifest)
             tag = "" if manifest is not None else " [orphan, no manifest]"
