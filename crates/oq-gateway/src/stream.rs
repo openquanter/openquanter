@@ -236,7 +236,11 @@ impl UserStreamReader {
             Err(tungstenite::Error::Io(e))
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    // Interrupted is a signal, which the caller's own
+                    // loop is about to act on; it is not the link.
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
                 ) =>
             {
                 StreamOutcome::Idle
@@ -302,7 +306,11 @@ impl Wire for UserStreamReader {
             Err(tungstenite::Error::Io(e))
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    // Interrupted is a signal, which the caller's own
+                    // loop is about to act on; it is not the link.
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
                 ) =>
             {
                 Ok(None)

@@ -105,6 +105,12 @@ impl MessageSource for WsSource {
                 Err(e) if is_read_timeout(&e) => {
                     return Err(io::Error::new(io::ErrorKind::WouldBlock, e.to_string()));
                 }
+                // A signal interrupted the read. Its kind is kept, as a
+                // timeout's is, so the caller can tell a shutdown from a
+                // lost connection.
+                Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::Interrupted => {
+                    return Err(e);
+                }
                 Err(e) => return Err(io::Error::other(e)),
             };
             self.silent_rounds = 0;
