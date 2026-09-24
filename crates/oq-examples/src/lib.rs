@@ -122,6 +122,11 @@ impl MarketShape {
 
     /// A market that grinds upward, so a trend follower has something
     /// to follow.
+    ///
+    /// The drift is per observation and sized for a few thousand of
+    /// them. It compounds: over 400,000 the price rises some 26 billion
+    /// times and sums of it overflow. For a long series use
+    /// [`MarketShape::rising`].
     #[must_use]
     pub const fn trending(ticks: usize) -> Self {
         Self {
@@ -129,6 +134,21 @@ impl MarketShape {
             drift: 0.000_06,
             volatility: 0.000_30,
             ticks,
+        }
+    }
+
+    /// The trending market, rising by `total` over the whole series
+    /// whatever its length — `0.5` ends about 50% higher.
+    ///
+    /// What a benchmark over hundreds of thousands of observations
+    /// wants: the same kind of market at prices a contract trades at.
+    #[must_use]
+    pub fn rising(ticks: usize, total: f64) -> Self {
+        #[allow(clippy::cast_precision_loss)]
+        let per_tick = total.ln_1p() / ticks.max(1) as f64;
+        Self {
+            drift: per_tick,
+            ..Self::trending(ticks)
         }
     }
 }
@@ -236,6 +256,21 @@ mod tests {
             assert!(tick.low.0 <= tick.last.0, "low must cover last");
             assert!(tick.last.0 > 0, "price must stay positive");
         }
+    }
+
+    /// A rising market ends near the rise it was asked for, however
+    /// long it is — where `trending` over the same length leaves any
+    /// price a contract could have.
+    #[test]
+    fn a_rising_market_rises_by_what_was_asked_at_any_length() {
+        for ticks in [2_000, 400_000] {
+            let s = series(MarketShape::rising(ticks, 0.5), 20_260_816);
+            #[allow(clippy::cast_precision_loss)]
+            let ratio = s[ticks - 1].last.0 as f64 / s[0].last.0 as f64;
+            assert!((1.0..3.0).contains(&ratio), "{ticks}: ended at {ratio:.2}x");
+        }
+        let runaway = series(MarketShape::trending(400_000), 20_260_816);
+        assert!(runaway[399_999].last.0 > 1_000_000 * runaway[0].last.0);
     }
 
     #[test]

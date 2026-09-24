@@ -103,7 +103,10 @@ fn main() -> ExitCode {
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(DEFAULT_FLOOR);
 
-    let ticks = series(MarketShape::trending(TICKS), 20_260_816);
+    // Rising by half over the run, not `trending`: its per-observation
+    // drift compounded over this many ticks overflowed the moving
+    // averages, silently until release builds checked for it.
+    let ticks = series(MarketShape::rising(TICKS, 0.5), 20_260_816);
     let config = RunConfig::new(
         InstrumentId::new(1),
         Contract::new(10_000),
