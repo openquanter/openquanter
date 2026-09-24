@@ -115,8 +115,8 @@ impl UserStreamReader {
     /// # Errors
     /// Anything the handshake reports.
     pub fn connect(stream: &UserStream, read_timeout: Duration) -> Result<Self, VenueError> {
-        let (socket, _response) =
-            tungstenite::connect(stream.url()).map_err(|e| VenueError::Transport(e.to_string()))?;
+        let socket = connect_bounded(stream.url(), HANDSHAKE_TIMEOUT)
+            .map_err(|e| VenueError::Transport(e.to_string()))?;
         let mut reader = Self {
             socket,
             // A fresh connection has not been silent. Without this it
@@ -805,5 +805,98 @@ mod health {
     fn an_empty_account_agrees_with_itself() {
         let mut h = StreamHealth::futures();
         assert_eq!(h.observe(&[], &[]), Health::Agreed);
+    }
+}
+
+/// The same bound as `oq_l2feed::ws::connect_bounded`, kept in both
+/// crates because neither depends on the other.
+///
+/// How long opening a WebSocket may take, from the TCP connect to the
+/// server's `101`.
+///
+/// `tungstenite::connect` sets no timeout on any of it. A peer that
+/// completes the TCP handshake and then says nothing — or goes away
+/// after the TLS hello — holds the calling thread in a read forever, and
+/// with the signal handler restarting interrupted reads, SIGTERM cannot
+/// end it either. A capture process sat in exactly that state for 29
+/// hours with an ESTABLISHED socket and an empty file.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Open a WebSocket with every step bounded by `timeout`.
+///
+/// The TCP connect uses `connect_timeout` per resolved address, and the
+/// socket's read and write timeouts are set *before* the TLS and HTTP
+/// handshakes rather than after them, which is where the unbounded wait
+/// was. The caller sets its own read timeout for the data phase; the
+/// write timeout stays, so a send cannot block forever either.
+///
+/// Name resolution is not bounded: the standard library offers no way
+/// to, and a resolver that hangs is a different failure from a peer
+/// that does.
+///
+/// # Errors
+/// Anything the connect or the handshake reports, a handshake that did
+/// not finish within `timeout` included.
+pub fn connect_bounded(
+    url: &str,
+    timeout: Duration,
+) -> Result<
+    tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    tungstenite::Error,
+> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use tungstenite::client::{IntoClientRequest, uri_mode};
+    use tungstenite::stream::Mode;
+
+    let request = url.into_client_request()?;
+    let mode = uri_mode(request.uri())?;
+    let host = request
+        .uri()
+        .host()
+        .ok_or(tungstenite::Error::Url(
+            tungstenite::error::UrlError::NoHostName,
+        ))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let port = request.uri().port_u16().unwrap_or(match mode {
+        Mode::Plain => 80,
+        Mode::Tls => 443,
+    });
+
+    let mut last = None;
+    let mut stream = None;
+    for addr in (host.as_str(), port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        tungstenite::Error::Io(last.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{host} resolved to nothing"),
+            )
+        }))
+    })?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let _ = stream.set_nodelay(true);
+
+    match tungstenite::client_tls(request, stream) {
+        Ok((socket, _response)) => Ok(socket),
+        Err(tungstenite::HandshakeError::Failure(e)) => Err(e),
+        // A blocking socket interrupts the handshake only when a read or
+        // write timed out.
+        Err(tungstenite::HandshakeError::Interrupted(_)) => {
+            Err(tungstenite::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("the WebSocket handshake did not complete within {timeout:?}"),
+            )))
+        }
     }
 }
