@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use oq_l2feed::venue::Deployment;
 use oq_live::run::{RunConfig, run_on};
-use oq_live::sim::{Sim, SimConfig, SimEnv};
+use oq_live::sim::{Faults, Sim, SimConfig, SimEnv};
 use oq_risk::Limits;
 use oq_strategy::{Context, Intent, Strategy};
 use oq_types::{Cash, Nanos, OrderId, PriceTicks, QtyLots, Ratio, Side};
@@ -51,7 +51,7 @@ impl Strategy for Quoter {
         } else {
             (Side::Buy, last - 3)
         };
-        let mut intent = ctx.limit(id, side, PriceTicks(price), QtyLots(1));
+        let mut intent = ctx.limit(id, side, PriceTicks(price), QtyLots(2));
         if side == Side::Sell
             && let Intent::Limit { offset, .. } = &mut intent
         {
@@ -82,6 +82,10 @@ fn dir(tag: &str, seed: u64) -> PathBuf {
 /// One simulated run of `minutes`, returning the simulation, the exit
 /// code and the journal's bytes.
 fn simulate(tag: &str, seed: u64, minutes: i64) -> (Sim, ExitCode, Vec<u8>) {
+    simulate_with(tag, seed, minutes, Faults::default())
+}
+
+fn simulate_with(tag: &str, seed: u64, minutes: i64, faults: Faults) -> (Sim, ExitCode, Vec<u8>) {
     let root = dir(tag, seed);
     let sim = Sim::new(SimConfig {
         seed,
@@ -92,6 +96,7 @@ fn simulate(tag: &str, seed: u64, minutes: i64) -> (Sim, ExitCode, Vec<u8>) {
         idle_step: Duration::from_millis(50),
         balance: 10_000.0,
         state_root: root.clone(),
+        faults,
     });
     let journal = root.join("run.oqj");
     let cfg = RunConfig {
@@ -194,4 +199,50 @@ fn the_journal_rebuilds_the_position_the_venue_holds() {
 
 fn dir_path(tag: &str, seed: u64) -> PathBuf {
     std::env::temp_dir().join(format!("oq-dst-{tag}-{seed}-{}", std::process::id()))
+}
+
+/// The properties a run must keep however the venue misbehaves.
+fn assert_invariants(tag: &str, seed: u64, sim: &Sim, code: ExitCode) {
+    let path = dir_path(tag, seed).join("run.oqj");
+    let belief = oq_live::belief::Belief::from_journal(&path).expect("the journal reads");
+    let context = format!("seed {seed}: {belief:?}");
+    assert_eq!(code, ExitCode::SUCCESS, "{context}");
+    assert_eq!(belief.undecodable, 0, "{context}");
+    assert_eq!(
+        belief.position_lots,
+        sim.position(),
+        "the journal and the venue disagree about the position; {context}"
+    );
+    assert!(
+        sim.position().abs() <= 20,
+        "past the position limit; {context}"
+    );
+    assert!(
+        sim.resting().is_empty(),
+        "shutdown left {:?}; {context}",
+        sim.resting()
+    );
+    let mut ids = sim.placed();
+    ids.sort();
+    let sent = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), sent, "a client id was sent twice; {context}");
+}
+
+/// A venue that drops the account stream, repeats itself, loses answers,
+/// refuses for rate and fills in pieces — and a run that stays true
+/// through all of it.
+#[test]
+fn a_misbehaving_venue_leaves_the_journal_true() {
+    let faults = Faults {
+        stream_drop: 300,
+        duplicate: 20_000,
+        unknown_placement: 20_000,
+        rate_limited: 20_000,
+        partial_fill: 200_000,
+    };
+    for seed in 1..=12 {
+        let (sim, code, _) = simulate_with("faults", seed, 10, faults);
+        assert_invariants("faults", seed, &sim, code);
+    }
 }
