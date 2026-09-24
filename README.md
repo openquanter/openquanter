@@ -236,7 +236,10 @@ Pre-alpha, and specific about it. **Built and tested today:**
   probability of backtest overfitting, in seconds rather than the half hour
   budgeted for them, and the statistics are computed whether or not anyone
   asked: a sweep that reports only its best configuration is the instrument
-  that produces overfitted strategies.
+  that produces overfitted strategies. The winner is also rerun on prefixes
+  of the data, rebuilt from each prefix alone, and refused if it decides
+  differently on one — the check for a strategy that used data it could not
+  have had (`lookahead`, and `lookahead_check` from Python).
 - **A Python strategy tier** — a strategy with no framework in it, run by
   the Rust engine, in two modes. Compatibility mode calls it once per tick.
   Throughput mode calls it once per batch and mirrors the account onto the

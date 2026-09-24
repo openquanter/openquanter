@@ -62,6 +62,23 @@ edge away. Which of those is acceptable is a property of your strategy,
 so the binding measures and does not choose. `batch=1` is exactly
 compatibility mode, and a test asserts the two runs are identical.
 
+### Did it use the future?
+
+A strategy built from the whole window — indicators precomputed over all
+of it, a threshold chosen from its distribution — sends orders a live run
+could not. `lookahead_check` builds the strategy again from each prefix of
+the data alone and reruns it; one that decides differently on a prefix
+than on the whole window is reported, tick by tick.
+
+```python
+report = oq.lookahead_check(lambda known: Cross(), ticks, balance=100_000)
+report.clean      # True: it decided from the past alone
+```
+
+`build` receives the ticks the strategy may know about. Up to
+`max_points` (200) points are rerun, evenly spread, and `sampled` says
+when that was fewer than all of them.
+
 ## Status
 
 **Alpha.** The APIs are documented and not yet stable. The Rust core is
