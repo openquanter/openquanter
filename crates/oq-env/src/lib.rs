@@ -327,6 +327,7 @@ impl Env {
                     self.last_funding = self.last_funding.max(now);
                     for rate in due {
                         let outputs = self.kernel.apply(&Event::Funding {
+                            instrument: None,
                             at: rate.at,
                             rate: rate.rate,
                             mark: rate.mark,

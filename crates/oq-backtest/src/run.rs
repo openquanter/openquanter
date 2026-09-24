@@ -424,6 +424,7 @@ where
             let due: Vec<_> = config.funding.between(last_funding, now).to_vec();
             for rate in due {
                 let event = Event::Funding {
+                    instrument: None,
                     at: rate.at,
                     rate: rate.rate,
                     mark: rate.mark,
@@ -621,6 +622,14 @@ where
             note_endings(&outputs, kernel.working(), &mut ended);
         }
         let _ = next_order_id;
+    }
+
+    // Fills made inside the last response latency, which the data ended
+    // before releasing. They happened; the result includes them.
+    for out in kernel.settle_unreported() {
+        if let Output::Filled(f) = out {
+            fills.push(*f);
+        }
     }
 
     let summary = kernel.summary();
