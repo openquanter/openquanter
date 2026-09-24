@@ -59,6 +59,8 @@ pub struct Snapshot {
     pub unbookable_reports: u64,
     /// Orders resting at the venue that this process did not send.
     pub foreign_orders: u64,
+    /// Account-stream reports about another symbol, set aside unbooked.
+    pub other_symbol_reports: u64,
     /// Times the account stream dropped.
     pub disconnects: u64,
     /// Times a read of the account came back incomplete.
@@ -118,6 +120,13 @@ impl Snapshot {
             "oq_foreign_orders",
             "orders resting at the venue that this process did not send",
             self.foreign_orders,
+        );
+        counter(
+            "oq_other_symbol_reports_total",
+            "account-stream reports about a symbol this process does not trade; not \
+             booked, because a quantity read at this symbol's precision is a different \
+             quantity",
+            self.other_symbol_reports,
         );
         counter(
             "oq_stream_disconnects_total",

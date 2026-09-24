@@ -933,6 +933,17 @@ where
             None => reader.next(),
         };
         match next {
+            // The account stream carries every symbol the account trades,
+            // and nothing upstream of here filters it. A report about
+            // another symbol read as this one is a quantity at the wrong
+            // precision — ETH's 1.000 is a thousand lots of this contract
+            // — booked as a position the strategy then trades against
+            // until the reconciler notices minutes later. Counted, not
+            // booked; the venue's own position is what reconciliation
+            // compares, and it is read per symbol.
+            StreamOutcome::Event(UserEvent::Order(u)) if !reports_on(&u, &symbol) => {
+                metrics.other_symbol_reports += 1;
+            }
             StreamOutcome::Event(UserEvent::Order(u)) => {
                 println!(
                     "fill/update      {} {} qty {} @ {}",
@@ -1422,6 +1433,10 @@ where
         "other systems    {} events on this account belonged to something else",
         trader.foreign()
     );
+    println!(
+        "other symbols    {} account reports about another symbol, not booked",
+        metrics.other_symbol_reports
+    );
     // Above zero means this process and the account disagree about the
     // position, and the disagreement is this process's fault rather than
     // the venue's. Reported unconditionally: a zero here is the only
@@ -1631,6 +1646,13 @@ fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
         Action::Reconnect => {}
         Action::Halt(why) => trader.halt(why),
     }
+}
+
+/// Whether an account-stream report is about the symbol this process
+/// trades. Case-insensitive because venues are not consistent about it
+/// and a case difference is not a different contract.
+fn reports_on(u: &oq_gateway::OrderUpdate, symbol: &str) -> bool {
+    u.symbol.eq_ignore_ascii_case(symbol)
 }
 
 /// Reports about this process's resting orders that the books have not
@@ -2700,5 +2722,39 @@ mod recovery {
         ]));
         let got = missed_reports(&venue, "BTCUSDT", &["a".into(), "b".into()], |_| false);
         assert!(got.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod symbol_filter {
+    use super::reports_on;
+
+    fn report(symbol: &str) -> oq_gateway::OrderUpdate {
+        oq_gateway::OrderUpdate {
+            symbol: symbol.into(),
+            client_id: "manual-1".into(),
+            venue_id: "1".into(),
+            status: "FILLED".into(),
+            last_qty: "1.000".into(),
+            cumulative_qty: "1.000".into(),
+            last_price: "2500".into(),
+            side: "BUY".into(),
+            position_side: "BOTH".into(),
+            maker: false,
+            trade_id: Some(9),
+            event_ms: 0,
+        }
+    }
+
+    /// ETH's 1.000 read at BTC's precision is a thousand lots.
+    #[test]
+    fn a_report_about_another_symbol_is_not_this_ones() {
+        assert!(!reports_on(&report("ETHUSDT"), "BTCUSDT"));
+    }
+
+    #[test]
+    fn a_report_about_this_symbol_is_whatever_its_case() {
+        assert!(reports_on(&report("BTCUSDT"), "BTCUSDT"));
+        assert!(reports_on(&report("btcusdt"), "BTCUSDT"));
     }
 }
