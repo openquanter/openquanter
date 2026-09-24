@@ -69,7 +69,7 @@ pub struct SimConfig {
 /// Failures the simulated venue injects, each in parts per million of
 /// the occasions it could happen on. All zero is a venue that never
 /// fails, which is what the default is.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Faults {
     /// Per read of the account stream: the connection drops, and every
     /// event the venue sends until it is reopened is lost.
@@ -83,6 +83,11 @@ pub struct Faults {
     pub rate_limited: u32,
     /// Per fill of two lots or more: it arrives in two pieces.
     pub partial_fill: u32,
+    /// Once this much time has passed, the next fill happens without a
+    /// word: no report on the stream and none when asked. The account
+    /// moves and nothing the loop can read explains it — the state a
+    /// process must stop trading in.
+    pub silent_fill_after: Option<Duration>,
 }
 
 /// An order resting at the simulated venue.
@@ -131,8 +136,10 @@ struct Core {
     /// Bumped by every connection, so a reader from before a drop reads
     /// as dropped.
     generation: u64,
-    /// Every client id ever sent, in order, for the invariants.
-    placed: Vec<String>,
+    /// Every client id ever sent, and when, for the invariants.
+    placed: Vec<(String, Duration)>,
+    /// When the silent fill happened, if it has.
+    silent_at: Option<Duration>,
 }
 
 impl Core {
@@ -159,6 +166,7 @@ impl Core {
             connected: false,
             generation: 0,
             placed: Vec::new(),
+            silent_at: None,
             cfg,
         }
     }
@@ -288,6 +296,21 @@ impl Core {
         qty: i64,
         maker: bool,
     ) {
+        let now = self.clock.elapsed();
+        if self.silent_at.is_none() && self.cfg.faults.silent_fill_after.is_some_and(|t| now >= t) {
+            self.silent_at = Some(now);
+            self.book(side, price, qty);
+            self.finished.insert(
+                client_id.to_string(),
+                Finished {
+                    venue_id,
+                    status: "FILLED",
+                    filled: qty,
+                    reports: Vec::new(),
+                },
+            );
+            return;
+        }
         let pieces = if qty >= 2 && self.chance(self.cfg.faults.partial_fill) {
             vec![qty / 2, qty - qty / 2]
         } else {
@@ -372,7 +395,24 @@ impl Sim {
     /// Every client id sent to the venue, in order.
     #[must_use]
     pub fn placed(&self) -> Vec<String> {
-        self.0.borrow().placed.clone()
+        self.0
+            .borrow()
+            .placed
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// When each client id was sent, on the simulated clock.
+    #[must_use]
+    pub fn placed_at(&self) -> Vec<Duration> {
+        self.0.borrow().placed.iter().map(|(_, at)| *at).collect()
+    }
+
+    /// When the silent fill happened, if it has.
+    #[must_use]
+    pub fn silent_at(&self) -> Option<Duration> {
+        self.0.borrow().silent_at
     }
 
     /// Orders still resting, by client id.
@@ -592,7 +632,8 @@ struct SimAccount(Sim);
 impl Execution for SimAccount {
     fn place(&self, order: &NewOrder, _instrument: &Instrument) -> Placed {
         let mut core = self.0.0.borrow_mut();
-        core.placed.push(order.client_id.clone());
+        let at = core.clock.elapsed();
+        core.placed.push((order.client_id.clone(), at));
         if core.resting.contains_key(&order.client_id)
             || core.finished.contains_key(&order.client_id)
         {
