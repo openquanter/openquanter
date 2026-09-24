@@ -152,6 +152,24 @@ pub trait Account: Execution {
         Ok(None)
     }
 
+    /// The account's own trades on a symbol over the venue's recent
+    /// history, oldest first.
+    ///
+    /// For a process taking over a position: how the position was built
+    /// is on the venue, and a strategy that replays it resumes the ladder
+    /// it was running rather than one guessed from the size and average.
+    /// The venue is the record here, not a journal — it survives a lost
+    /// journal, a new file per run, and any number of restarts.
+    ///
+    /// `Ok(None)` when the adapter does not report it, as with
+    /// [`Account::fees_charged`].
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    fn trade_history(&self, _symbol: &str) -> Result<Option<Vec<AccountTrade>>, VenueError> {
+        Ok(None)
+    }
+
     fn open_user_stream(&self) -> Result<UserStream, VenueError>;
 
     /// Tell the venue the stream is still wanted.
@@ -169,6 +187,23 @@ pub trait Account: Execution {
     /// # Errors
     /// Whatever the request reports.
     fn close_user_stream(&self) -> Result<(), VenueError>;
+}
+
+/// One of the account's own trades, as the venue records it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountTrade {
+    pub time_ms: i64,
+    pub trade_id: i64,
+    /// The venue's order id: a rung that fills in pieces is several
+    /// trades of one order.
+    pub order_id: i64,
+    pub side: oq_types::Side,
+    /// `LONG`, `SHORT`, or `BOTH`.
+    pub position_side: String,
+    /// In the contract's decimal units, as the venue reports them.
+    pub qty: f64,
+    pub price: f64,
+    pub maker: bool,
 }
 
 /// So a boxed account can be used where an `Execution` is wanted.
@@ -233,6 +268,9 @@ impl Account for Box<dyn Account> {
     }
     fn fees_charged(&self, symbol: &str, since_ms: i64) -> Result<Option<Cash>, VenueError> {
         (**self).fees_charged(symbol, since_ms)
+    }
+    fn trade_history(&self, symbol: &str) -> Result<Option<Vec<AccountTrade>>, VenueError> {
+        (**self).trade_history(symbol)
     }
     fn open_user_stream(&self) -> Result<UserStream, VenueError> {
         (**self).open_user_stream()

@@ -579,7 +579,6 @@ where
     // it exists. A position comes from the venue; a ladder does not —
     // how many rungs had filled is this strategy's own history and only
     // its own journal holds it.
-    let mut prior_fills: Vec<(oq_types::Fill, String, String)> = Vec::new();
     if !no_journal && std::path::Path::new(&journal_path).exists() {
         match crate::recover(&journal_path) {
             Ok(prior) => {
@@ -619,13 +618,6 @@ where
                         return ExitCode::FAILURE;
                     }
                 }
-                prior_fills = prior
-                    .fills
-                    .iter()
-                    .cloned()
-                    .zip(prior.fill_decimals.iter().cloned())
-                    .map(|(f, (q, p))| (f, q, p))
-                    .collect();
                 if let Some(prefix) = prior.prefix {
                     if prefix != config_prefix {
                         println!(
@@ -740,32 +732,39 @@ where
         }
     }
 
-    // And then its own fills, in order, through a callback that cannot
-    // send anything. The strategy folds them with the code it runs live,
-    // so it arrives at the state it was in rather than at a summary of
-    // it — which is what a snapshot would have given, and a snapshot is
-    // a second record of the same thing that can disagree with the
-    // first.
-    if !prior_fills.is_empty() {
-        let n = prior_fills.len();
-        for (mut fill, qty, price) in prior_fills {
-            let Some(q) = scaled_decimal(&qty, instrument.qty_scale) else {
-                continue;
-            };
-            let Some(p) = scaled_decimal(&price, instrument.price_scale) else {
-                continue;
-            };
-            fill.qty = QtyLots(q);
-            fill.price = PriceTicks(p);
-            // The context a replayed fill is handed is the books as
-            // they stand, with a tick that carries no price: nothing in
-            // a replay should be pricing anything, and a stale price
-            // offered here would be a number a strategy could act on if
-            // it forgot it was replaying.
-            let ctx = context_for(&books, oq_engine::Tick::default(), trader.working());
-            trader.on_history_fill(&fill, &ctx);
+    // And then how the position it took over was built, in order,
+    // through a callback that cannot send anything. From the venue's own
+    // trades rather than a journal: the venue survives a lost journal, a
+    // new file per run and any number of restarts, and it is the record
+    // the position itself came from. The strategy folds them with the
+    // code it runs live and arrives at the ladder it was running — where
+    // the last one started, how deep it went, whether it had widened —
+    // instead of one guessed from the size and the average, which moved
+    // every rung of a restored ladder.
+    if adopt && positions.iter().any(|p| p.amount != 0.0) {
+        match trader.venue().trade_history(&symbol) {
+            Ok(Some(trades)) => {
+                let (fills, unrecovered) = legs_since_flat(&positions, &trades, &instrument);
+                for leg in &unrecovered {
+                    println!(
+                        "recovery         {leg}: not flat at any point in the venue's history; \
+                         resuming from its size and average"
+                    );
+                }
+                let n = fills.len();
+                for fill in &fills {
+                    // The books as they stand, with a tick that carries no
+                    // price: nothing in a replay should be pricing anything.
+                    let ctx = context_for(&books, oq_engine::Tick::default(), trader.working());
+                    trader.on_history_fill(fill, &ctx);
+                }
+                println!(
+                    "recovery         {n} venue fill(s) since each held leg was last flat, replayed"
+                );
+            }
+            Ok(None) => println!("recovery         this venue does not report trade history"),
+            Err(e) => eprintln!("recovery         trade history could not be read: {e}"),
         }
-        println!("recovery         {n} of this strategy's own fill(s) replayed");
     }
 
     // Stamped before the loop so the fee query at the end covers exactly
@@ -1747,6 +1746,74 @@ fn side_of(word: &str) -> Side {
     } else {
         Side::Sell
     }
+}
+
+/// The trades that built each held leg, since it was last flat.
+///
+/// Walked back from the venue's position for that leg, subtracting each
+/// trade until the leg reads zero: what follows that point is how the
+/// position now held was built. A leg that never reaches zero within the
+/// history is returned by name, not guessed at.
+///
+/// Each fill carries the venue's order id as its order, so a strategy can
+/// tell the pieces of one rung from separate rungs; these are history, and
+/// no id here is one this process issued.
+fn legs_since_flat(
+    positions: &[oq_gateway::PositionSnapshot],
+    trades: &[oq_gateway::AccountTrade],
+    instrument: &Instrument,
+) -> (Vec<oq_types::Fill>, Vec<String>) {
+    let lots = |q: f64| (q * 10_f64.powi(i32::from(instrument.qty_scale))).round() as i64;
+    let ticks = |p: f64| (p * 10_f64.powi(i32::from(instrument.price_scale))).round() as i64;
+    let mut fills = Vec::new();
+    let mut unrecovered = Vec::new();
+    for p in positions.iter().filter(|p| p.amount != 0.0) {
+        let Some(mut running) = scaled_decimal(&p.amount_text, instrument.qty_scale) else {
+            unrecovered.push(p.position_side.clone());
+            continue;
+        };
+        let leg: Vec<&oq_gateway::AccountTrade> = trades
+            .iter()
+            .filter(|t| t.position_side.eq_ignore_ascii_case(&p.position_side))
+            .collect();
+        let mut start = None;
+        for (i, t) in leg.iter().enumerate().rev() {
+            let signed = if t.side == Side::Buy {
+                lots(t.qty)
+            } else {
+                -lots(t.qty)
+            };
+            running -= signed;
+            if running == 0 {
+                start = Some(i);
+                break;
+            }
+        }
+        let Some(start) = start else {
+            unrecovered.push(p.position_side.clone());
+            continue;
+        };
+        for t in &leg[start..] {
+            let side_word = if t.side == Side::Buy { "BUY" } else { "SELL" };
+            fills.push(oq_types::Fill {
+                stamp: oq_types::Stamp::new(t.time_ms * 1_000_000, t.time_ms * 1_000_000),
+                instrument: oq_types::InstrumentId::new(1),
+                order: OrderId(t.order_id.unsigned_abs()),
+                trade: oq_types::TradeId(t.trade_id.unsigned_abs()),
+                side: t.side,
+                offset: offset_of(&t.position_side, side_word),
+                price: PriceTicks(ticks(t.price)),
+                qty: QtyLots(lots(t.qty)),
+                liquidity: if t.maker {
+                    oq_types::Liquidity::Maker
+                } else {
+                    oq_types::Liquidity::Taker
+                },
+            });
+        }
+    }
+    fills.sort_by_key(|f| (f.stamp.exch.0, f.trade.0));
+    (fills, unrecovered)
 }
 
 /// Whether an account-stream report is about the symbol this process
@@ -3026,5 +3093,85 @@ mod working_count {
             1,
             "still resting at the venue"
         );
+    }
+}
+
+#[cfg(test)]
+mod venue_history {
+    use super::legs_since_flat;
+    use oq_gateway::{AccountTrade, PositionSnapshot};
+    use oq_types::{Instrument, Offset, QtyLots, Side};
+
+    fn trade(
+        t: i64,
+        id: i64,
+        order: i64,
+        side: Side,
+        leg: &str,
+        qty: f64,
+        price: f64,
+    ) -> AccountTrade {
+        AccountTrade {
+            time_ms: t,
+            trade_id: id,
+            order_id: order,
+            side,
+            position_side: leg.into(),
+            qty,
+            price,
+            maker: true,
+        }
+    }
+
+    fn held(leg: &str, amount: &str) -> PositionSnapshot {
+        PositionSnapshot {
+            symbol: "BTCUSDT".into(),
+            position_side: leg.into(),
+            amount: amount.parse().unwrap(),
+            amount_text: amount.into(),
+            entry_text: "0".into(),
+            entry_price: 0.0,
+            unrealized: 0.0,
+        }
+    }
+
+    /// The testnet leg that motivated this: opened, closed by its
+    /// take-profit, then rebuilt by two rungs. Only what followed the
+    /// close built the position now held.
+    #[test]
+    fn only_the_trades_since_the_leg_was_last_flat_are_replayed() {
+        let trades = [
+            trade(1, 1, 10, Side::Buy, "LONG", 0.002, 85270.6),
+            trade(2, 2, 11, Side::Sell, "LONG", 0.002, 85620.6),
+            trade(3, 3, 12, Side::Buy, "LONG", 0.002, 84770.6),
+            trade(4, 4, 13, Side::Buy, "LONG", 0.003, 84270.6),
+            trade(5, 5, 13, Side::Buy, "LONG", 0.001, 84270.6),
+        ];
+        let (fills, unrecovered) =
+            legs_since_flat(&[held("LONG", "0.006")], &trades, &Instrument::linear(2, 4));
+        assert!(unrecovered.is_empty());
+        let shape: Vec<_> = fills.iter().map(|f| (f.order.0, f.qty, f.offset)).collect();
+        assert_eq!(
+            shape,
+            [
+                (12, QtyLots(20), Offset::Open),
+                (13, QtyLots(30), Offset::Open),
+                (13, QtyLots(10), Offset::Open),
+            ],
+            "one rung in two pieces keeps its order id"
+        );
+    }
+
+    /// A leg the history never shows flat is named, not guessed at.
+    #[test]
+    fn a_leg_never_flat_in_the_history_is_reported() {
+        let trades = [trade(1, 1, 10, Side::Sell, "SHORT", 0.002, 85000.0)];
+        let (fills, unrecovered) = legs_since_flat(
+            &[held("SHORT", "-0.004")],
+            &trades,
+            &Instrument::linear(2, 4),
+        );
+        assert!(fills.is_empty());
+        assert_eq!(unrecovered, ["SHORT"]);
     }
 }
