@@ -77,6 +77,30 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The deployment-specific patterns: host names, private identifiers.
+      # Published, they would be the disclosure they guard against, so they
+      # live in a repository secret and reach the scanner the way a local
+      # checkout gives them — inside .git, where nothing can commit them.
+      # The script prints how many it loaded, never what they are.
+      #
+      # A pull request from a fork is not given secrets and is scanned with
+      # the public patterns only; the push to main that merges it is scanned
+      # with both. Anywhere else a missing list is a broken check, not a
+      # clean one.
+      - name: Load private patterns
+        env:
+          PATTERNS: ${{ secrets.SECRETSCAN_LOCAL }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          if [ -n "$PATTERNS" ]; then
+            printf '%s\n' "$PATTERNS" > "$(git rev-parse --git-common-dir)/secretscan-local"
+          elif [ "$FORK" = "true" ]; then
+            echo "::warning::fork pull request: private patterns withheld; main is scanned with them after merge"
+          else
+            echo "::error::SECRETSCAN_LOCAL is not set; the scan would pass without the private patterns"
+            exit 1
+          fi
+
       - name: Scan working tree and history
         run: scripts/check-no-secrets.sh --history
 
