@@ -652,3 +652,24 @@ fn a_reconciliation_that_finds_an_impossible_leg_leaves_the_halt_to_the_caller()
         "the session did not halt on its own; the caller does, and withdraws"
     );
 }
+
+/// A venue that takes letters and digits only gets ids with nothing
+/// between prefix and sequence; one that takes punctuation keeps the
+/// hyphen every existing id there has.
+#[test]
+fn client_ids_follow_the_venues_alphabet() {
+    use oq_gateway::broker::IdRules;
+    let mut okx = session(Recording::accepting(), &[], &[], &[])
+        .expect("starts")
+        .with_id_rules(IdRules::OKX);
+    okx.submit(buy(1), PriceTicks(6_000_000), Nanos(0));
+    let sent = okx.venue().sent.borrow()[0].client_id.clone();
+    assert!(!sent.contains('-'), "{sent}");
+    assert!(IdRules::OKX.accepts(&sent), "{sent}");
+
+    let mut binance = session(Recording::accepting(), &[], &[], &[])
+        .expect("starts")
+        .with_id_rules(IdRules::BINANCE);
+    binance.submit(buy(1), PriceTicks(6_000_000), Nanos(0));
+    assert_eq!(binance.venue().sent.borrow()[0].client_id, "live-1");
+}

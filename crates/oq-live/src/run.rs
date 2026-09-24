@@ -406,10 +406,12 @@ where
             return ExitCode::FAILURE;
         }
     };
-    if !venue
-        .id_rules()
-        .accepts(&format!("{id_prefix}-{}", id_range.end()))
-    {
+    let id_rules = venue.id_rules();
+    if !id_rules.accepts(&format!(
+        "{id_prefix}{}{}",
+        id_rules.separator(),
+        id_range.end()
+    )) {
         eprintln!(
             "order ids        REFUSED: prefix leaves insufficient room for a durable sequence"
         );
@@ -469,7 +471,7 @@ where
         &resting,
         &expected,
     ) {
-        Ok(s) => match s.with_order_id_range(id_range) {
+        Ok(s) => match s.with_id_rules(id_rules).with_order_id_range(id_range) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("order ids        REFUSED: {e}");
