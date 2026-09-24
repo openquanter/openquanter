@@ -432,12 +432,29 @@ impl<E: Execution> Session<E> {
     /// The only route to a venue in this crate, and it cannot be taken
     /// without a permit because the permit is what carries the order.
     pub fn submit(&mut self, order: ProposedOrder, mark: PriceTicks, now: Nanos) -> Submission {
+        // The position the venue last confirmed, moved by every fill
+        // since — not zero, and not the number at startup. A limit
+        // compared against a hardcoded zero can never fire, which makes
+        // the position cap decoration — the exact failure the gate's own
+        // documentation warns about.
+        //
+        // On a hedged account an opening order is capped against the leg
+        // it opens, not the net: long 20 and short 20 net to nothing, and
+        // a cap on the net lets both legs grow in step without bound. A
+        // close is not capped by position at all (the gate skips it), so
+        // the net is as good as anything for it.
+        let scale = self.instrument.qty_scale;
+        let position = if self.position_side.is_hedged() && !order.reduce_only {
+            let leg = match order.side {
+                oq_types::Side::Buy => "LONG",
+                oq_types::Side::Sell => "SHORT",
+            };
+            self.book.leg_lots(&self.symbol, leg, scale)
+        } else {
+            self.book.net_lots(&self.symbol, scale)
+        };
         let account = AccountState {
-            // The position the venue last confirmed, not zero. A limit
-            // compared against a hardcoded zero can never fire, which
-            // makes the position cap decoration — the exact failure the
-            // gate's own documentation warns about.
-            position: self.book.net_lots(&self.symbol, self.instrument.qty_scale),
+            position,
             mark,
             working: self.book.working(),
         };
