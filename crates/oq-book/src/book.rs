@@ -315,7 +315,16 @@ impl Book {
                 if update.final_id <= snapshot {
                     return Ok(Applied::AlreadyInSnapshot);
                 }
-                if update.first_id > snapshot + 1 {
+                // Joined when it starts no later than the snapshot's next
+                // id, or when the update before it is already inside the
+                // snapshot. The second is the common case on a venue whose
+                // ids are shared across its instruments: consecutive
+                // updates of one book are hundreds of ids apart, so a
+                // snapshot taken between two of them has no update that
+                // straddles it, and requiring one refused the join with
+                // nothing missing.
+                let predecessor_inside = update.prev_final_id.is_some_and(|p| p <= snapshot);
+                if update.first_id > snapshot + 1 && !predecessor_inside {
                     return Err(SequenceError::DoesNotStraddleSnapshot {
                         snapshot,
                         first_id: update.first_id,
@@ -482,6 +491,32 @@ mod tests {
             Ok(Applied::Updated)
         );
         assert_eq!(book.bids().best(), Some(level(100, 3)));
+    }
+
+    /// Binance's USD-M ids are shared across instruments: one book's
+    /// consecutive updates were 10 to 289 ids apart when sampled. A
+    /// snapshot taken in that space has no update straddling it, and the
+    /// next one joins through its predecessor instead.
+    #[test]
+    fn an_update_whose_predecessor_is_in_the_snapshot_joins_it() {
+        let mut book = Book::new();
+        book.install_snapshot(1_000, &[level(100, 1)], &[level(101, 1)]);
+        assert_eq!(
+            book.apply(&update(1_150, 1_180, Some(990), vec![level(100, 4)])),
+            Ok(Applied::Updated)
+        );
+        assert_eq!(book.bids().best(), Some(level(100, 4)));
+    }
+
+    /// And one whose predecessor is past the snapshot is still a gap.
+    #[test]
+    fn an_update_whose_predecessor_is_past_the_snapshot_does_not_join() {
+        let mut book = Book::new();
+        book.install_snapshot(1_000, &[level(100, 1)], &[level(101, 1)]);
+        assert!(matches!(
+            book.apply(&update(1_150, 1_180, Some(1_100), vec![])),
+            Err(SequenceError::DoesNotStraddleSnapshot { .. })
+        ));
     }
 
     #[test]
