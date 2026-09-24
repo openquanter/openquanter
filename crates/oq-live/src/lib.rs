@@ -41,6 +41,7 @@
 pub mod belief;
 pub mod book;
 pub mod books;
+pub mod clock;
 pub mod feed;
 pub mod interlock;
 pub mod latency;
