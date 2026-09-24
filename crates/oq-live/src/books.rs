@@ -102,8 +102,14 @@ pub enum Booked {
 pub struct Books {
     kernel: Kernel,
     instrument: InstrumentId,
-    /// Venue trade ids already booked.
-    seen: std::collections::HashSet<u64>,
+    /// Fills already booked, by venue trade id and side.
+    ///
+    /// The side as well, because when two systems on one account trade
+    /// against each other both sides of the match carry one trade id: a
+    /// set of trade ids booked the first side and discarded the second as
+    /// a redelivery, leaving the books one fill away from the account.
+    /// A redelivery repeats the side; the other side of a match does not.
+    seen: std::collections::HashSet<(u64, Side)>,
     /// Orders submitted and not yet resolved, so `Context::working` is
     /// the process's own count rather than a guess.
     working: usize,
@@ -220,7 +226,7 @@ impl Books {
             // unbounded number of copies of one trade.
             return Booked::Unidentifiable;
         }
-        if !self.seen.insert(fill.trade.0) {
+        if !self.seen.insert((fill.trade.0, fill.side)) {
             return Booked::Duplicate;
         }
         self.working = self.working.saturating_sub(1);
@@ -234,7 +240,7 @@ impl Books {
     pub fn close_exceeds_position(&self, fill: &Fill) -> bool {
         if self.kernel.state().mode != oq_core::PositionMode::Hedge
             || fill.offset != Offset::Close
-            || self.seen.contains(&fill.trade.0)
+            || self.seen.contains(&(fill.trade.0, fill.side))
         {
             return false;
         }
@@ -259,8 +265,8 @@ impl Books {
     /// is harmless, but counting the first as a discovery would call a
     /// difference explained when nothing had explained it.
     #[must_use]
-    pub fn has_booked(&self, trade: u64) -> bool {
-        self.seen.contains(&trade)
+    pub fn has_booked(&self, trade: u64, side: Side) -> bool {
+        self.seen.contains(&(trade, side))
     }
 
     /// The strategy's view, for this observation.
@@ -565,5 +571,54 @@ mod tests {
             after_first,
             "the same trade arrived twice and was booked twice"
         );
+    }
+}
+
+#[cfg(test)]
+mod two_systems {
+    use super::*;
+    use oq_types::{Liquidity, Stamp, TradeId};
+
+    fn fill(side: Side, offset: Offset) -> Fill {
+        Fill {
+            stamp: Stamp::new(1, 1),
+            instrument: InstrumentId::new(1),
+            order: OrderId(0),
+            trade: TradeId(7),
+            side,
+            offset,
+            price: oq_types::PriceTicks(6_000_000),
+            qty: oq_types::QtyLots(5),
+            liquidity: Liquidity::Maker,
+        }
+    }
+
+    /// Both sides of a match between two systems on one account carry the
+    /// same trade id, and both moved the account.
+    #[test]
+    fn both_sides_of_one_trade_are_booked_and_a_redelivery_is_not() {
+        let mut b = Books::new(
+            InstrumentId::new(1),
+            oq_margin::Contract::new(10_000),
+            oq_margin::TierTable::example_btcusdt(),
+            Cash::from_units(100_000),
+            oq_core::PositionMode::OneWay,
+        );
+        assert!(matches!(
+            b.on_venue_fill(&fill(Side::Buy, Offset::Open)),
+            Booked::Applied(_)
+        ));
+        assert!(matches!(
+            b.on_venue_fill(&fill(Side::Sell, Offset::Open)),
+            Booked::Applied(_)
+        ));
+        assert!(matches!(
+            b.on_venue_fill(&fill(Side::Buy, Offset::Open)),
+            Booked::Duplicate
+        ));
+        assert!(b.has_booked(7, Side::Buy) && b.has_booked(7, Side::Sell));
+        // The account bought and sold the same five: it is flat, as the
+        // venue says, rather than long five.
+        assert_eq!(b.net_position(), oq_types::QtyLots(0));
     }
 }
