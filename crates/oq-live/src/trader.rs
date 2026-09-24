@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use oq_gateway::Execution;
 use oq_risk::ProposedOrder;
-use oq_strategy::{Context, Ending, Intent, Strategy};
+use oq_strategy::{Context, Ending, Intent, Strategy, VenueClosed};
 use oq_types::{Nanos, Offset, OrderId, PriceTicks};
 
 use crate::session::{Session, Submission};
@@ -227,6 +227,27 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
     pub fn on_fill(&mut self, fill: &oq_types::Fill, ctx: &Context, now: Nanos) -> Vec<Outcome> {
         self.intents.clear();
         self.strategy.on_fill(fill, ctx, &mut self.intents);
+        let intents = core::mem::take(&mut self.intents);
+        let out: Vec<Outcome> = intents
+            .iter()
+            .flat_map(|i| self.act(i, ctx.tick.last, now))
+            .collect();
+        self.intents = intents;
+        self.report_placements(&out, now);
+        out
+    }
+
+    /// The venue closed part of a position on its own. The strategy is
+    /// told, and what it asks for in answer is acted on as for a fill.
+    pub fn on_venue_closed(
+        &mut self,
+        closed: &VenueClosed,
+        ctx: &Context,
+        now: Nanos,
+    ) -> Vec<Outcome> {
+        self.intents.clear();
+        self.strategy
+            .on_venue_closed(closed, ctx, &mut self.intents);
         let intents = core::mem::take(&mut self.intents);
         let out: Vec<Outcome> = intents
             .iter()

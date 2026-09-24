@@ -23,7 +23,7 @@ use oq_core::{Event, Kernel, Output, State};
 pub use oq_engine::Observation;
 use oq_engine::{L1Engine, L2Engine, Policy, Tick};
 use oq_margin::{Contract, FundingSchedule, TierTable};
-use oq_strategy::{Context, Ending, Intent, Strategy};
+use oq_strategy::{CloseReason, Context, Ending, Intent, Strategy, VenueClosed};
 use oq_types::{Cash, Fill, InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Stamp};
 
 /// Whether the venue is allowed to close the account.
@@ -357,6 +357,7 @@ where
 
     let mut fills = Vec::new();
     let mut liquidations = Vec::new();
+    let mut closed_by_venue: Vec<VenueClosed> = Vec::new();
     let mut intents = Vec::new();
     let mut min_equity = config.starting_balance;
     let mut peak_maintenance = Cash::ZERO;
@@ -435,6 +436,7 @@ where
                         price,
                         qty,
                         equity,
+                        ..
                     } = out
                     {
                         liquidations.push(Liquidation {
@@ -443,6 +445,7 @@ where
                             qty: *qty,
                             equity: *equity,
                         });
+                        closed_by_venue.extend(venue_closes(out));
                     }
                 }
             }
@@ -471,12 +474,16 @@ where
                     price,
                     qty,
                     equity,
-                } => liquidations.push(Liquidation {
-                    at: *at,
-                    price: *price,
-                    qty: *qty,
-                    equity: *equity,
-                }),
+                    ..
+                } => {
+                    liquidations.push(Liquidation {
+                        at: *at,
+                        price: *price,
+                        qty: *qty,
+                        equity: *equity,
+                    });
+                    closed_by_venue.extend(venue_closes(out));
+                }
                 _ => {}
             }
         }
@@ -529,6 +536,11 @@ where
         intents.clear();
         for fill in &tick_fills {
             strategy.on_fill(fill, &ctx, &mut intents);
+        }
+        // Then what the venue closed without being asked, which the
+        // strategy did not order and must not read as a fill of its own.
+        for closed in closed_by_venue.drain(..) {
+            strategy.on_venue_closed(&closed, &ctx, &mut intents);
         }
         // Then the orders that ended, in the order a live host reports
         // them: the fill first, the end of the order after it.
@@ -671,6 +683,32 @@ const fn intent_id(intent: &Intent) -> Option<OrderId> {
     }
 }
 
+/// A liquidation as the legs it closed, for the strategy.
+fn venue_closes(out: &Output) -> Vec<VenueClosed> {
+    let Output::Liquidated {
+        at,
+        price,
+        instrument,
+        long,
+        short,
+        ..
+    } = *out
+    else {
+        return Vec::new();
+    };
+    [(oq_types::Side::Buy, long), (oq_types::Side::Sell, short)]
+        .into_iter()
+        .filter(|(_, qty)| !qty.is_zero())
+        .map(|(leg, qty)| VenueClosed {
+            instrument,
+            reason: CloseReason::Liquidation,
+            leg,
+            qty: QtyLots(qty.0.abs()),
+            price,
+            at,
+        })
+        .collect()
+}
 /// A tick built from a price, for tests and simple data adapters.
 #[must_use]
 pub fn tick_at(ns: i64, last: i64, high: i64, low: i64) -> Tick {
@@ -922,6 +960,59 @@ mod tests {
             &ticks,
         );
         assert_eq!(a, b);
+    }
+
+    /// Buys and holds, and writes down what it is told.
+    struct Listening {
+        inner: BuyAndHold,
+        closed: Vec<VenueClosed>,
+        fills: usize,
+    }
+
+    impl Strategy for Listening {
+        fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+            self.inner.on_tick(ctx, out);
+        }
+        fn on_fill(&mut self, _fill: &Fill, _ctx: &Context, _out: &mut Vec<Intent>) {
+            self.fills += 1;
+        }
+        fn on_venue_closed(&mut self, closed: &VenueClosed, ctx: &Context, _out: &mut Vec<Intent>) {
+            assert!(
+                ctx.position.is_zero(),
+                "the context already reflects the close"
+            );
+            self.closed.push(*closed);
+        }
+        fn name(&self) -> &str {
+            "listening"
+        }
+    }
+
+    /// A liquidation is the venue's order, not the strategy's: it arrives
+    /// as a venue close of the leg it took, and never as a fill.
+    #[test]
+    fn a_liquidation_is_delivered_as_a_venue_close() {
+        let mut s = Listening {
+            inner: BuyAndHold {
+                qty: 10,
+                done: false,
+            },
+            closed: Vec::new(),
+            fills: 0,
+        };
+        let r = run(
+            &config(150).with_margin(MarginMode::Enforced),
+            &mut s,
+            &falling_market(),
+        );
+        assert_eq!(r.liquidations.len(), 1, "{:?}", r.liquidations);
+        assert_eq!(s.fills, 1, "its own buy, and nothing else");
+        assert_eq!(s.closed.len(), 1, "{:?}", s.closed);
+        let c = s.closed[0];
+        assert_eq!(c.reason, CloseReason::Liquidation);
+        assert_eq!(c.leg, Side::Buy);
+        assert_eq!(c.qty, QtyLots(10));
+        assert_eq!(c.price, r.liquidations[0].price);
     }
 
     #[test]

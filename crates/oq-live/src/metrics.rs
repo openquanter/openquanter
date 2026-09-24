@@ -61,6 +61,9 @@ pub struct Snapshot {
     pub foreign_orders: u64,
     /// Account-stream reports about another symbol, set aside unbooked.
     pub other_symbol_reports: u64,
+    /// Fills of orders the venue placed itself: liquidations,
+    /// auto-deleveraging, settlements.
+    pub venue_closed: u64,
     /// Times the account stream dropped.
     pub disconnects: u64,
     /// Times a read of the account came back incomplete.
@@ -127,6 +130,12 @@ impl Snapshot {
              booked, because a quantity read at this symbol's precision is a different \
              quantity",
             self.other_symbol_reports,
+        );
+        counter(
+            "oq_venue_closed_total",
+            "fills of orders the venue placed itself to close a position: liquidation, \
+             auto-deleveraging or settlement",
+            self.venue_closed,
         );
         counter(
             "oq_stream_disconnects_total",
@@ -237,6 +246,18 @@ pub fn alerts(s: &Snapshot, rules: AlertRules) -> Vec<Alert> {
                 "{} order(s) resting that this process did not send; they consume the \
                  risk gate's limit, so its caps may no longer be able to fire",
                 s.foreign_orders
+            ),
+            urgent: true,
+        });
+    }
+    if s.venue_closed > 0 {
+        out.push(Alert {
+            name: "venue_closed",
+            detail: format!(
+                "{} fill(s) of orders the venue placed itself — liquidation, \
+                 auto-deleveraging or settlement; the position is not the one the \
+                 strategy built",
+                s.venue_closed
             ),
             urgent: true,
         });

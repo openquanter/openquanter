@@ -24,7 +24,7 @@
 //! the two.
 
 use oq_engine::Tick;
-use oq_strategy::{Context, Ending, Intent, Strategy};
+use oq_strategy::{Context, Ending, Intent, Strategy, VenueClosed};
 use oq_types::{Fill, Nanos, OrderId};
 
 use crate::run::{RunConfig, run};
@@ -71,6 +71,12 @@ impl<S: Strategy> Strategy for Recorder<S> {
     fn on_fill(&mut self, fill: &Fill, ctx: &Context, out: &mut Vec<Intent>) {
         let from = out.len();
         self.inner.on_fill(fill, ctx, out);
+        self.record(self.seen, out, from);
+    }
+
+    fn on_venue_closed(&mut self, closed: &VenueClosed, ctx: &Context, out: &mut Vec<Intent>) {
+        let from = out.len();
+        self.inner.on_venue_closed(closed, ctx, out);
         self.record(self.seen, out, from);
     }
 

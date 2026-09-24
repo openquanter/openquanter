@@ -1775,7 +1775,16 @@ fn read_order_update(item: &str) -> Option<OrderUpdate> {
         }
         raw
     };
+    // The venue's own orders say so in `category`; everything else is
+    // `normal`, `twap` or `ddh`, all placed from the account.
+    let initiator = match field_str(item, "category").as_deref() {
+        Some("full_liquidation" | "partial_liquidation") => crate::exec::Initiator::Liquidation,
+        Some("adl") => crate::exec::Initiator::Adl,
+        Some("delivery") => crate::exec::Initiator::Settlement,
+        _ => crate::exec::Initiator::Account,
+    };
     Some(OrderUpdate {
+        initiator,
         symbol: field_str(item, "instId")?,
         client_id: field_str(item, "clOrdId").unwrap_or_default(),
         venue_id: field_str(item, "ordId")?,
@@ -1860,6 +1869,30 @@ mod account_stream {
         {"instId":"BTC-USDT-SWAP","ordId":"1","clOrdId":"oq1","state":"filled",
          "side":"buy","posSide":"long","fillSz":"4","fillPx":"78010","accFillSz":"5",
          "tradeId":"502","execType":"T","uTime":"1700000000002"}]}"#;
+
+    /// The venue's own orders say so in `category`.
+    #[test]
+    fn orders_the_venue_placed_itself_are_named() {
+        use crate::exec::Initiator;
+        for (category, want) in [
+            ("normal", Initiator::Account),
+            ("twap", Initiator::Account),
+            ("full_liquidation", Initiator::Liquidation),
+            ("partial_liquidation", Initiator::Liquidation),
+            ("adl", Initiator::Adl),
+            ("delivery", Initiator::Settlement),
+        ] {
+            let frame = TWO_FILLS.replacen(
+                r#""clOrdId":"oq1","#,
+                &format!(r#""clOrdId":"oq1","category":"{category}","#),
+                1,
+            );
+            let UserEvent::Order(u) = &parse_user_events(&frame)[0] else {
+                panic!("an order update");
+            };
+            assert_eq!(u.initiator, want, "{category}");
+        }
+    }
 
     #[test]
     fn a_frame_with_two_fills_produces_two_events() {

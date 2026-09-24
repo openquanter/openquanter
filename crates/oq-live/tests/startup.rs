@@ -543,6 +543,7 @@ fn filled(
         maker: true,
         trade_id: Some(trade_id),
         event_ms: 0,
+        initiator: oq_gateway::Initiator::Account,
     }
 }
 

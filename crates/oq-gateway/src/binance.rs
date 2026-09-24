@@ -31,8 +31,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::creds::Credentials;
 use crate::exec::{
-    Endpoint, Execution, NewOrder, OrderAck, OrderUpdate, Placed, PositionSide, Reject, Unresolved,
-    UserEvent, UserStream, decimal,
+    Endpoint, Execution, Initiator, NewOrder, OrderAck, OrderUpdate, Placed, PositionSide, Reject,
+    Unresolved, UserEvent, UserStream, decimal,
 };
 use oq_types::{Instrument, Side, TimeInForce};
 
@@ -1277,6 +1277,7 @@ impl Execution for Binance {
 pub fn recovered_reports(order: &str, trades: &str) -> Result<Vec<OrderUpdate>, VenueError> {
     let symbol = need_str(order, "symbol")?;
     let client_id = need_str(order, "clientOrderId")?;
+    let initiator = initiator_of(&client_id);
     let venue_id = need_i64(order, "orderId")?.to_string();
     let status = need_str(order, "status")?;
     let executed = field_str(order, "executedQty").unwrap_or_else(|| "0".into());
@@ -1316,6 +1317,7 @@ pub fn recovered_reports(order: &str, trades: &str) -> Result<Vec<OrderUpdate>, 
             maker: need_bool(t, "maker")?,
             trade_id: Some(need_i64(t, "id")?).filter(|id| *id > 0),
             event_ms: field_i64(t, "time").unwrap_or_default(),
+            initiator,
         });
     }
     if !decimal_eq(&cumulative, &executed) {
@@ -1335,6 +1337,7 @@ pub fn recovered_reports(order: &str, trades: &str) -> Result<Vec<OrderUpdate>, 
             maker: false,
             trade_id: None,
             event_ms: field_i64(order, "updateTime").unwrap_or_default(),
+            initiator,
         });
     }
     Ok(out)
@@ -1902,6 +1905,25 @@ impl crate::exec::Events for Events {
     }
 }
 
+/// Who placed an order, read from the client id the venue gave it.
+///
+/// The venue's orders carry reserved client ids: `autoclose-` for a
+/// liquidation, `adl_autoclose` for auto-deleveraging, and
+/// `settlement_autoclose-` for a delivery or delisting settlement
+/// (USD-M futures user data stream, `ORDER_TRADE_UPDATE`).
+#[must_use]
+pub fn initiator_of(client_id: &str) -> Initiator {
+    if client_id.starts_with("adl_autoclose") {
+        Initiator::Adl
+    } else if client_id.starts_with("settlement_autoclose-") {
+        Initiator::Settlement
+    } else if client_id.starts_with("autoclose-") {
+        Initiator::Liquidation
+    } else {
+        Initiator::Account
+    }
+}
+
 /// Read one message from the user data stream.
 ///
 /// Pure, so every event this build claims to understand is checked
@@ -1939,6 +1961,7 @@ pub fn parse_user_event(payload: &str) -> Option<UserEvent> {
                 // swallows every subsequent non-fill.
                 trade_id: field_i64(inner, "t").filter(|id| *id > 0),
                 event_ms: field_i64(payload, "E").unwrap_or_default(),
+                initiator: field_str(inner, "c").map_or(Initiator::Account, |c| initiator_of(&c)),
             }))
         }
         "listenKeyExpired" => Some(UserEvent::Expired),
@@ -1954,6 +1977,31 @@ mod user_stream {
     use super::*;
 
     const FILL: &str = r#"{"e":"ORDER_TRADE_UPDATE","E":1786891783639,"T":1786891783630,"o":{"s":"BTCUSDT","c":"oq-1","S":"BUY","o":"LIMIT","f":"GTC","q":"0.002","p":"120000.00","X":"FILLED","i":283194212,"l":"0.002","z":"0.002","L":"119999.90","t":481923,"n":"0.00479999","N":"USDT"}}"#;
+
+    /// The venue's own orders, by the reserved client ids it documents.
+    #[test]
+    fn orders_the_venue_placed_itself_are_named() {
+        assert_eq!(initiator_of("oq-1"), Initiator::Account);
+        assert_eq!(initiator_of("web_abc"), Initiator::Account);
+        assert_eq!(
+            initiator_of("autoclose-1726000000000"),
+            Initiator::Liquidation
+        );
+        assert_eq!(initiator_of("adl_autoclose"), Initiator::Adl);
+        assert_eq!(
+            initiator_of("settlement_autoclose-1726000000000"),
+            Initiator::Settlement
+        );
+        let liquidation = FILL.replace(r#""c":"oq-1""#, r#""c":"autoclose-1726000000000""#);
+        match parse_user_event(&liquidation) {
+            Some(UserEvent::Order(u)) => assert_eq!(u.initiator, Initiator::Liquidation),
+            other => panic!("{other:?}"),
+        }
+        match parse_user_event(FILL) {
+            Some(UserEvent::Order(u)) => assert_eq!(u.initiator, Initiator::Account),
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn a_fill_carries_the_ids_that_join_it_to_an_order_and_deduplicate_it() {

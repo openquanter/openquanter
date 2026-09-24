@@ -30,7 +30,7 @@ pub use fidelity::{
 /// resolving for code written before it moved out.
 pub use lookahead::{Divergence, LookaheadReport, lookahead};
 pub use oq_strategy as strategy;
-pub use oq_strategy::{Context, Ending, Intent, Strategy};
+pub use oq_strategy::{CloseReason, Context, Ending, Intent, Strategy, VenueClosed};
 pub use run::{
     Liquidation, MarginMode, MarginUsage, Observation, RunConfig, RunResult, Tier, run,
     run_observations, run_stream, tick_at,
