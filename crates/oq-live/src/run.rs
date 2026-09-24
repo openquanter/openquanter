@@ -388,35 +388,40 @@ where
     // Held for the rest of `run`. The binding matters — `let _ = ...`
     // drops it immediately and releases the lock on the line that takes
     // it.
-    let interlock =
-        match crate::interlock::Interlock::claim(&format!("{deployment:?}"), &symbol, &id_prefix) {
-            Ok(held) => held,
-            Err(taken) => {
-                eprintln!("interlock        REFUSED: {taken}");
-                return ExitCode::FAILURE;
-            }
-        };
-    println!("interlock        held ({})", interlock.path().display());
-
-    // Keep ownership stable, but never recycle a sequence from an earlier
-    // process. A timed-out submit queried under a reused id can otherwise
-    // resolve to an unrelated historical order, leaving an entry pending.
     let Some(state_root) = env.state_root() else {
         eprintln!(
             "order ids        REFUSED: neither XDG_STATE_HOME nor HOME identifies durable state"
         );
         return ExitCode::FAILURE;
     };
-    let id_range = match interlock.reserve_order_ids(
-        &state_root.join("oq-live"),
-        u64::try_from(clock.wall().0).unwrap_or(0),
+    // In the state directory, beside the ids it protects, and held by the
+    // kernel for as long as this process lives. See `interlock`.
+    let state_dir = state_root.join("oq-live");
+    let interlock = match crate::interlock::Interlock::claim(
+        &state_dir,
+        &format!("{deployment:?}"),
+        &symbol,
+        &id_prefix,
     ) {
-        Ok(range) => range,
-        Err(e) => {
-            eprintln!("order ids        REFUSED: cannot reserve durable client ids: {e}");
+        Ok(held) => held,
+        Err(taken) => {
+            eprintln!("interlock        REFUSED: {taken}");
             return ExitCode::FAILURE;
         }
     };
+    println!("interlock        held ({})", interlock.path().display());
+
+    // Keep ownership stable, but never recycle a sequence from an earlier
+    // process. A timed-out submit queried under a reused id can otherwise
+    // resolve to an unrelated historical order, leaving an entry pending.
+    let id_range =
+        match interlock.reserve_order_ids(&state_dir, u64::try_from(clock.wall().0).unwrap_or(0)) {
+            Ok(range) => range,
+            Err(e) => {
+                eprintln!("order ids        REFUSED: cannot reserve durable client ids: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
     let id_rules = venue.id_rules();
     if !id_rules.accepts(&format!(
         "{id_prefix}{}{}",
@@ -629,13 +634,13 @@ where
                         return ExitCode::FAILURE;
                     }
                 }
-                if let Some(prefix) = prior.prefix {
-                    if prefix != config_prefix {
-                        println!(
-                            "recovery         previous prefix was {prefix}, this run uses \
+                if let Some(prefix) = prior.prefix
+                    && prefix != config_prefix
+                {
+                    println!(
+                        "recovery         previous prefix was {prefix}, this run uses \
                              {config_prefix}; older orders will read as another system's"
-                        );
-                    }
+                    );
                 }
             }
             Err(e) => {

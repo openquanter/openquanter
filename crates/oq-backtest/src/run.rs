@@ -489,7 +489,7 @@ where
         }
 
         let summary = kernel.summary();
-        if config.equity_every > 0 && tick_count % config.equity_every == 0 {
+        if config.equity_every > 0 && tick_count.is_multiple_of(config.equity_every) {
             equity_curve.push(summary.equity);
         }
         if summary.equity < min_equity {
@@ -623,13 +623,11 @@ where
             // rather than in the live host.
             let submitted = matches!(event, Event::Submit { .. });
             let outputs: Vec<oq_core::Output> = kernel.apply(&event).to_vec();
-            if submitted {
-                if let Event::Submit { id, .. } = event {
-                    let refused = outputs.iter().any(|o| {
+            if submitted && let Event::Submit { id, .. } = event {
+                let refused = outputs.iter().any(|o| {
                         matches!(o, oq_core::Output::Rejected { id: rejected, .. } if *rejected == id)
                     });
-                    strategy.on_placed(id, !refused);
-                }
+                strategy.on_placed(id, !refused);
             }
             note_endings(&outputs, kernel.working(), &mut ended);
         }
@@ -1138,10 +1136,10 @@ mod stream_tests {
         }
         fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
             self.n += 1;
-            if self.n % 50 == 0 {
+            if self.n.is_multiple_of(50) {
                 out.push(ctx.market(
                     oq_types::OrderId(self.n as u64),
-                    if self.n % 100 == 0 {
+                    if self.n.is_multiple_of(100) {
                         oq_types::Side::Sell
                     } else {
                         oq_types::Side::Buy

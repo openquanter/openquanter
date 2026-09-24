@@ -34,21 +34,33 @@
 //! instrument for that case, and it works there because a different
 //! host is very unlikely to be using the same prefix.
 //!
-//! It also does not reap stale locks. A process that died leaves one
-//! behind, and clearing it is a decision — this cannot distinguish a
-//! crash from a process that is alive and merely slow, and pid reuse
-//! makes the obvious check wrong rather than merely unreliable. The
-//! message says which file and what it claims about itself. That is the
-//! same bargain `oq-journal`'s writer lock makes, deliberately.
+//! # Where it lives, and how it is held
+//!
+//! In the state directory, beside the reserved order ids it protects, and
+//! held as an operating-system lock on an open file for as long as the
+//! process lives. It used to be a file created in the shared temporary
+//! directory and deleted on exit, which failed three ways: a `/tmp`
+//! cleaner or a private `/tmp` let a second process claim the same ids; any
+//! user on the host could pre-create the file and stop the trader starting,
+//! or plant a link there; and a crash left the file behind, so every
+//! restart needed someone to remove it — the step operators end up
+//! scripting, at which point the lock protects nothing. A held lock is
+//! released by the kernel when its holder dies, however it dies, so none of
+//! that can happen. The file itself is left in place: removing it would let
+//! a second process lock a new file while the first still holds the old
+//! one.
 
 use std::fmt;
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
 
-/// A held interlock. Released when dropped.
+/// A held interlock. Released when dropped, or when the process ends.
 #[derive(Debug)]
 pub struct Interlock {
     path: PathBuf,
+    /// The open, locked file. Dropping it releases the lock.
+    _held: File,
 }
 
 /// Somebody else is already trading this.
@@ -67,8 +79,8 @@ impl fmt::Display for Taken {
             "another process is already trading this account: {} says {}. \
              Two processes sharing an id prefix read each other's orders as \
              their own — each will cancel the other's, and the metric that \
-             would tell you reads zero. If that process is gone, remove the \
-             file.",
+             would tell you reads zero. The lock is released when that \
+             process ends; stop it rather than removing the file.",
             self.path.display(),
             self.held_by
         )
@@ -78,49 +90,64 @@ impl fmt::Display for Taken {
 impl std::error::Error for Taken {}
 
 impl Interlock {
-    /// Claim `(deployment, symbol, prefix)`, or say who holds it.
+    /// Claim `(deployment, symbol, prefix)` in `dir`, or say who holds it.
+    ///
+    /// `dir` is the process's durable state directory — the one its order
+    /// ids are reserved in — and is created owner-only when missing.
     ///
     /// # Errors
     /// [`Taken`] when another live process holds the same triple. An I/O
-    /// failure creating the file is also reported as taken rather than
-    /// ignored: a lock that could not be established has not been
+    /// failure opening or locking the file is also reported as taken rather
+    /// than ignored: a lock that could not be established has not been
     /// established, and treating that as success is the one reading that
     /// makes the whole thing decorative.
-    pub fn claim(deployment: &str, symbol: &str, prefix: &str) -> Result<Self, Taken> {
-        let path = std::env::temp_dir().join(format!(
+    pub fn claim(dir: &Path, deployment: &str, symbol: &str, prefix: &str) -> Result<Self, Taken> {
+        let path = dir.join(format!(
             "oq-live.{}.{}.{}.lock",
             encode(deployment),
             encode(symbol),
             encode(prefix)
         ));
-        match std::fs::OpenOptions::new()
+        let failed = |why: String| Taken {
+            path: path.clone(),
+            held_by: format!("the lock could not be established: {why}"),
+        };
+        create_private_dir(dir).map_err(|e| failed(e.to_string()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&path)
-        {
-            Ok(mut f) => {
+            .map_err(|e| failed(e.to_string()))?;
+        match file.try_lock() {
+            Ok(()) => {
+                let _ = file.set_len(0);
                 let _ = writeln!(
-                    f,
+                    file,
                     "pid {} trading {symbol} on {deployment} as {prefix}",
                     std::process::id()
                 );
-                let _ = f.sync_all();
-                Ok(Self { path })
+                let _ = file.sync_all();
+                Ok(Self { path, _held: file })
             }
-            Err(e) => {
-                let held_by = if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    let text = text.trim();
-                    if text.is_empty() {
+            Err(std::fs::TryLockError::WouldBlock) => {
+                // Read through the handle already open, not the path: what
+                // the holder wrote, and nothing a name could be pointed at.
+                let mut text = String::new();
+                let _ = file.rewind();
+                let _ = Read::by_ref(&mut file).take(1024).read_to_string(&mut text);
+                let text = text.trim();
+                Err(Taken {
+                    held_by: if text.is_empty() {
                         "nothing about itself".to_string()
                     } else {
                         text.to_string()
-                    }
-                } else {
-                    format!("the lock could not be created: {e}")
-                };
-                Err(Taken { path, held_by })
+                    },
+                    path,
+                })
             }
+            Err(std::fs::TryLockError::Error(e)) => Err(failed(e.to_string())),
         }
     }
 
@@ -131,10 +158,16 @@ impl Interlock {
     }
 }
 
-impl Drop for Interlock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+/// Create `dir` readable by its owner only, if it is missing.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
+    builder.create(dir)
 }
 
 /// Make a component safe in a filename **without merging two of them.**
@@ -164,11 +197,15 @@ mod tests {
         format!("test-{}-{tag}", std::process::id())
     }
 
+    fn dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("oq-interlock-{}-{tag}", std::process::id()))
+    }
+
     #[test]
     fn a_second_claim_on_the_same_triple_is_refused() {
         let p = unique("same");
-        let first = Interlock::claim("testnet", "BTCUSDT", &p).expect("first claim");
-        let second = Interlock::claim("testnet", "BTCUSDT", &p);
+        let first = Interlock::claim(&dir(&p), "testnet", "BTCUSDT", &p).expect("first claim");
+        let second = Interlock::claim(&dir(&p), "testnet", "BTCUSDT", &p);
         assert!(second.is_err(), "two processes claimed one account");
         let taken = second.unwrap_err();
         assert!(
@@ -186,9 +223,9 @@ mod tests {
     #[test]
     fn releasing_lets_the_next_run_start() {
         let p = unique("release");
-        let first = Interlock::claim("testnet", "BTCUSDT", &p).expect("first claim");
+        let first = Interlock::claim(&dir(&p), "testnet", "BTCUSDT", &p).expect("first claim");
         drop(first);
-        let again = Interlock::claim("testnet", "BTCUSDT", &p);
+        let again = Interlock::claim(&dir(&p), "testnet", "BTCUSDT", &p);
         assert!(
             again.is_ok(),
             "a released interlock still blocked a restart"
@@ -199,10 +236,10 @@ mod tests {
     #[test]
     fn the_triple_is_the_key() {
         let p = unique("triple");
-        let _a = Interlock::claim("testnet", "BTCUSDT", &p).expect("a");
-        let b = Interlock::claim("live", "BTCUSDT", &p);
-        let c = Interlock::claim("testnet", "ETHUSDT", &p);
-        let d = Interlock::claim("testnet", "BTCUSDT", &format!("{p}-other"));
+        let _a = Interlock::claim(&dir(&p), "testnet", "BTCUSDT", &p).expect("a");
+        let b = Interlock::claim(&dir(&p), "live", "BTCUSDT", &p);
+        let c = Interlock::claim(&dir(&p), "testnet", "ETHUSDT", &p);
+        let d = Interlock::claim(&dir(&p), "testnet", "BTCUSDT", &format!("{p}-other"));
         assert!(b.is_ok(), "a different deployment was refused");
         assert!(c.is_ok(), "a different symbol was refused");
         assert!(d.is_ok(), "a different id prefix was refused");
@@ -214,9 +251,68 @@ mod tests {
     #[test]
     fn symbols_that_differ_only_in_punctuation_do_not_collide() {
         let p = unique("punct");
-        let a = Interlock::claim("testnet", "BTC/USDT", &p).expect("slash form");
-        let b = Interlock::claim("testnet", "BTC-USDT", &p);
+        let a = Interlock::claim(&dir(&p), "testnet", "BTC/USDT", &p).expect("slash form");
+        let b = Interlock::claim(&dir(&p), "testnet", "BTC-USDT", &p);
         assert!(b.is_ok(), "BTC/USDT and BTC-USDT were merged into one lock");
         assert_ne!(a.path(), b.expect("dash form").path());
+    }
+}
+
+#[cfg(test)]
+mod held_by_the_kernel {
+    use super::*;
+
+    fn dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("oq-interlock-k-{}-{tag}", std::process::id()))
+    }
+
+    /// A file left behind by a process that died is not a lock. Before,
+    /// it was: every crash meant a restart refused until someone removed
+    /// it by hand.
+    #[test]
+    fn a_file_left_by_a_crashed_process_does_not_block_a_restart() {
+        let d = dir("stale");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("oq-live.testnet.BTCUSDT.stale.lock"),
+            "pid 1 trading BTCUSDT on testnet as stale\n",
+        )
+        .unwrap();
+        let held = Interlock::claim(&d, "testnet", "BTCUSDT", "stale").expect("not held by anyone");
+        let text = std::fs::read_to_string(held.path()).unwrap();
+        assert!(text.contains(&std::process::id().to_string()), "{text}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The lock lives where it is asked to, never in the shared
+    /// temporary directory, and the directory is its owner's alone.
+    #[test]
+    fn the_lock_lives_in_the_state_directory() {
+        let d = dir("where").join("oq-live");
+        let _ = std::fs::remove_dir_all(dir("where"));
+        let held = Interlock::claim(&d, "testnet", "BTCUSDT", "where").expect("claimed");
+        assert_eq!(held.path().parent(), Some(d.as_path()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{mode:o}");
+        }
+        let _ = std::fs::remove_dir_all(dir("where"));
+    }
+
+    /// Releasing does not remove the file: removing it would let a second
+    /// process lock a fresh file while the first still held the old one.
+    #[test]
+    fn releasing_leaves_the_file_and_frees_the_lock() {
+        let d = dir("keep");
+        let _ = std::fs::remove_dir_all(&d);
+        let held = Interlock::claim(&d, "testnet", "BTCUSDT", "keep").expect("claimed");
+        let path = held.path().to_path_buf();
+        drop(held);
+        assert!(path.exists());
+        assert!(Interlock::claim(&d, "testnet", "BTCUSDT", "keep").is_ok());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

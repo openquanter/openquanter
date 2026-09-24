@@ -842,13 +842,13 @@ pub fn run_backtest(
     // Reported before the strategy's own failure only if the strategy
     // did not fail: a strategy that raised did so while reading these
     // ticks, and its exception is the more specific answer.
-    if driven.failure.is_none() {
-        if let Some(e) = read_error {
-            return Err(PyValueError::new_err(format!(
-                "the tick file stopped the run after {} ticks: {e}",
-                result.ticks
-            )));
-        }
+    if driven.failure.is_none()
+        && let Some(e) = read_error
+    {
+        return Err(PyValueError::new_err(format!(
+            "the tick file stopped the run after {} ticks: {e}",
+            result.ticks
+        )));
     }
 
     if let Some(why) = driven.failure {

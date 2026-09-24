@@ -152,7 +152,7 @@ pub fn probability_of_backtest_overfitting(
     matrix: &PerformanceMatrix,
     n_blocks: usize,
 ) -> Result<PboReport> {
-    if !(4..=MAX_BLOCKS).contains(&n_blocks) || n_blocks % 2 != 0 {
+    if !(4..=MAX_BLOCKS).contains(&n_blocks) || !n_blocks.is_multiple_of(2) {
         return Err(StatsError::InvalidSplitCount { got: n_blocks });
     }
     if matrix.n_configs < 2 {
@@ -343,7 +343,7 @@ fn median(values: &mut [f64]) -> f64 {
     }
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
