@@ -323,6 +323,13 @@ impl Books {
         (s.qty, s.short_qty)
     }
 
+    /// Realized P&L, fees and funding since this run started, apart.
+    #[must_use]
+    pub fn realized_parts(&self) -> (Cash, Cash, Cash) {
+        let s = self.kernel.state();
+        (s.realized, s.fees, s.funding)
+    }
+
     /// Realized P&L net of fees and funding, as the venue's fills made
     /// it.
     ///

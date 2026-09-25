@@ -836,7 +836,10 @@ fn a_run_leaves_run_files_a_tick_file_and_answers_for_its_attribution() {
         20,
         Faults::default(),
         Kind::Quoter,
-        &[(Duration::from_secs(10 * 60), "attribution\tdeck test\t")],
+        &[
+            (Duration::from_secs(10 * 60), "attribution\tdeck test\t"),
+            (Duration::from_secs(11 * 60), "status\tdeck test\t"),
+        ],
         false,
     );
     assert_eq!(code, ExitCode::SUCCESS);
@@ -869,7 +872,26 @@ fn a_run_leaves_run_files_a_tick_file_and_answers_for_its_attribution() {
     assert_eq!(header.count as usize, ticks.len());
 
     let answers = sim.control_answers();
-    assert_eq!(answers.len(), 1);
+    assert_eq!(answers.len(), 2);
+    // The status carries what this run has made and the limits it trades
+    // under, so an operator need not open the config to know either.
+    let status = &answers[1].1;
+    for field in [
+        r#""pnl":{"since_ms":"#,
+        r#""realized":""#,
+        r#""fees":""#,
+        r#""net":""#,
+        r#""equity":""#,
+        r#""limits":{"max_order_qty":"#,
+        r#""max_working":"#,
+        r#""rate_window_ns":"#,
+    ] {
+        assert!(status.contains(field), "{field} missing: {status}");
+    }
+    assert!(
+        !status.contains(r#""max_order_qty":0,"#),
+        "the limits in force, not closed ones: {status}"
+    );
     let a = &answers[0].1;
     assert!(a.contains(r#""method":"shadow""#), "{a}");
     for name in [
