@@ -665,6 +665,11 @@ fn an_operator_halt_stops_the_orders_and_is_on_the_record() {
         answers[0].1
     );
     assert!(
+        answers[0].1.contains(r#""price_scale":2,"qty_scale":3"#),
+        "{}",
+        answers[0].1
+    );
+    assert!(
         answers[1].1.contains(r#""closing":false"#),
         "the bid is listed: {}",
         answers[1].1

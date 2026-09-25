@@ -3640,6 +3640,8 @@ fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
         .str("symbol", v.symbol)
         .str("prefix", &v.cfg.id_prefix)
         .str("strategy", &v.cfg.strategy_name)
+        .uint("price_scale", u64::from(v.instrument.price_scale))
+        .uint("qty_scale", u64::from(v.instrument.qty_scale))
         .int("now_ns", v.now.0)
         .bool("halted", session.gate().kill_switch().is_tripped())
         .opt_str("halt_reason", session.halt_reason())
