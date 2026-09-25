@@ -615,6 +615,12 @@ impl<E: Execution> Session<E> {
             limit_price: order.limit_price.unwrap_or(PriceTicks(0)),
             qty: order.qty,
             reduce_only: order.reduce_only,
+            leg: match order.position_side {
+                PositionSide::OneWay => "BOTH",
+                PositionSide::Long => "LONG",
+                PositionSide::Short => "SHORT",
+            }
+            .to_string(),
         });
         if !recorded {
             return Submission::Rejected(format!(

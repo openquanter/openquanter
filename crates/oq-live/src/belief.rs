@@ -75,6 +75,11 @@ pub struct Belief {
     pub adopted: bool,
     /// Adopted legs pointed in both directions.
     pub hedged: bool,
+    /// Each position leg as `(name, signed lots, entry ticks)`: `LONG`
+    /// and `SHORT` on a hedged account, one net leg named by its sign on
+    /// a one-way one. What [`Belief::to_record`] reports, because a
+    /// hedged account compared as a net number disagrees with itself.
+    pub legs: Vec<(String, i64, i64)>,
     /// Records the reader could not decode.
     pub undecodable: u64,
 }
@@ -94,11 +99,15 @@ impl Belief {
         // Side and reduce-only per submission, so a fill can be applied
         // in the right direction. A fill record names a client id and a
         // quantity; the direction lives in the submission it answers.
-        let mut submitted: HashMap<String, (Side, bool)> = HashMap::new();
+        let mut submitted: HashMap<String, (Side, bool, String)> = HashMap::new();
         let mut accepted: Vec<String> = Vec::new();
         let mut filled: HashMap<String, i64> = HashMap::new();
         let mut withdrawn: HashSet<String> = HashSet::new();
         let mut ordered: Vec<i64> = Vec::new();
+        // Leg name -> (signed lots, entry ticks). `NET` is a one-way
+        // account's single position, named by its sign on the way out.
+        let mut legs: std::collections::BTreeMap<String, (i64, i64)> =
+            std::collections::BTreeMap::new();
 
         for frame in replay.since(0) {
             match Record::decode(frame.kind, &frame.payload) {
@@ -112,7 +121,7 @@ impl Belief {
                     b.price_scale = price_scale;
                     b.qty_scale = qty_scale;
                 }
-                Some(Record::Reconciled { legs, .. }) => {
+                Some(Record::Reconciled { legs: adopted, .. }) => {
                     // The venue's whole position at a process's start, and
                     // it already contains every fill before it. So it
                     // replaces what the journal had built, rather than
@@ -124,20 +133,22 @@ impl Belief {
                     b.position_lots = 0;
                     b.entry_ticks = 0;
                     b.hedged = false;
+                    legs.clear();
                     accepted.clear();
                     filled.clear();
                     withdrawn.clear();
                     let mut longs = false;
                     let mut shorts = false;
-                    for (_symbol, side, lots, entry) in legs {
-                        let signed = if side.eq_ignore_ascii_case("SHORT") {
+                    for (_symbol, side, lots, entry) in adopted {
+                        let (name, signed) = if side.eq_ignore_ascii_case("SHORT") {
                             shorts = true;
-                            -lots.abs()
+                            ("SHORT", -lots.abs())
                         } else {
                             longs = true;
-                            lots.abs()
+                            ("LONG", lots.abs())
                         };
                         b.apply(signed, entry);
+                        fold(legs.entry(name.to_string()).or_default(), signed, entry);
                     }
                     b.hedged = longs && shorts;
                 }
@@ -145,9 +156,10 @@ impl Belief {
                     client_id,
                     side,
                     reduce_only,
+                    leg,
                     ..
                 }) => {
-                    submitted.insert(client_id, (side, reduce_only));
+                    submitted.insert(client_id, (side, reduce_only, leg));
                 }
                 Some(Record::Cancelled { client_id, .. }) => {
                     withdrawn.insert(client_id);
@@ -172,7 +184,7 @@ impl Belief {
                     price,
                     ..
                 }) => {
-                    let Some((side, _)) = submitted.get(&client_id).copied() else {
+                    let Some((side, _, leg)) = submitted.get(&client_id).cloned() else {
                         // A fill for a submission this journal does not
                         // contain. Counted as undecodable rather than
                         // guessed: applying it with an assumed side is
@@ -187,9 +199,26 @@ impl Belief {
                         b.undecodable += 1;
                         continue;
                     };
+                    let signed = if side == Side::Buy { lots } else { -lots };
+                    // Which leg it moved. A hedged account's leg is only
+                    // in the submission; one written before it was
+                    // recorded cannot be placed, and is counted as a hole
+                    // rather than guessed — a guess here is a close of the
+                    // short booked as an open of the long.
+                    let key =
+                        if leg.eq_ignore_ascii_case("LONG") || leg.eq_ignore_ascii_case("SHORT") {
+                            Some(leg.to_ascii_uppercase())
+                        } else {
+                            net_leg(&mut legs)
+                        };
+                    let Some(key) = key else {
+                        b.undecodable += 1;
+                        continue;
+                    };
                     *filled.entry(client_id).or_default() += lots;
                     ordered.push(lots);
-                    b.apply(if side == Side::Buy { lots } else { -lots }, ticks);
+                    b.apply(signed, ticks);
+                    fold(legs.entry(key).or_default(), signed, ticks);
                 }
                 Some(_) => {}
                 None => b.undecodable += 1,
@@ -216,6 +245,19 @@ impl Belief {
             .filter(|id| filled.get(id).copied().unwrap_or(0) == 0 && !withdrawn.contains(id))
             .collect();
         b.resting.sort();
+        b.legs = legs
+            .into_iter()
+            .filter(|(_, (lots, _))| *lots != 0)
+            .map(|(name, (lots, entry))| {
+                let name = if name == "NET" {
+                    if lots > 0 { "LONG" } else { "SHORT" }.to_string()
+                } else {
+                    name
+                };
+                (name, lots, entry)
+            })
+            .collect();
+        b.legs.sort_by(|a, c| a.0.cmp(&c.0));
         Ok(b)
     }
 
@@ -225,27 +267,9 @@ impl Belief {
     /// when the position crosses through flat — the same convention a
     /// venue reports, because the number exists to be compared with one.
     fn apply(&mut self, signed_lots: i64, entry_ticks: i64) {
-        if signed_lots == 0 {
-            return;
-        }
-        let before = self.position_lots;
-        let after = before + signed_lots;
-        if before == 0 || (before > 0) == (signed_lots > 0) {
-            // Opening or adding.
-            let total = i128::from(before.abs()) + i128::from(signed_lots.abs());
-            if total > 0 {
-                let weighted = i128::from(before.abs()) * i128::from(self.entry_ticks)
-                    + i128::from(signed_lots.abs()) * i128::from(entry_ticks);
-                self.entry_ticks = i64::try_from(weighted / total).unwrap_or(i64::MAX);
-            }
-        } else if (before > 0) != (after > 0) && after != 0 {
-            // Crossed through flat: the remainder is a new position at
-            // the price that reversed it.
-            self.entry_ticks = entry_ticks;
-        } else if after == 0 {
-            self.entry_ticks = 0;
-        }
-        self.position_lots = after;
+        let mut net = (self.position_lots, self.entry_ticks);
+        fold(&mut net, signed_lots, entry_ticks);
+        (self.position_lots, self.entry_ticks) = net;
     }
 
     /// The same shape `oq-recon --record` writes, so the two compare.
@@ -256,26 +280,77 @@ impl Belief {
             let x = v as f64;
             x / 10f64.powi(i32::from(decimals))
         };
-        let legs = if self.position_lots == 0 {
-            Vec::new()
-        } else {
-            let side = if self.position_lots > 0 {
-                "LONG"
-            } else {
-                "SHORT"
-            };
-            vec![(
-                side.to_string(),
-                scale(self.position_lots, self.qty_scale),
-                scale(self.entry_ticks, self.price_scale),
-            )]
-        };
+        let legs = self
+            .legs
+            .iter()
+            .map(|(name, lots, entry)| {
+                (
+                    name.clone(),
+                    scale(*lots, self.qty_scale),
+                    scale(*entry, self.price_scale),
+                )
+            })
+            .collect();
         oq_gateway::record::Record {
             symbol: self.symbol.clone().unwrap_or_default(),
             read_at_ms,
             legs,
             orders: self.resting.clone(),
         }
+    }
+}
+
+/// Fold one signed quantity at one price into a `(signed lots, entry)`
+/// position.
+///
+/// Volume-weighted while adding, untouched while reducing, and reset
+/// when the position crosses through flat — the same convention a venue
+/// reports, because the number exists to be compared with one.
+fn fold(pos: &mut (i64, i64), signed_lots: i64, entry_ticks: i64) {
+    if signed_lots == 0 {
+        return;
+    }
+    let (before, entry) = *pos;
+    let after = before + signed_lots;
+    let entry = if before == 0 || (before > 0) == (signed_lots > 0) {
+        // Opening or adding.
+        let total = i128::from(before.abs()) + i128::from(signed_lots.abs());
+        let weighted = i128::from(before.abs()) * i128::from(entry)
+            + i128::from(signed_lots.abs()) * i128::from(entry_ticks);
+        i64::try_from(weighted / total.max(1)).unwrap_or(i64::MAX)
+    } else if (before > 0) != (after > 0) && after != 0 {
+        // Crossed through flat: the remainder is a new position at the
+        // price that reversed it.
+        entry_ticks
+    } else if after == 0 {
+        0
+    } else {
+        entry
+    };
+    *pos = (after, entry);
+}
+
+/// The key a one-way fill goes to: the account's single position.
+///
+/// A leg adopted under its direction's name becomes that position, since
+/// on a one-way account it is the only one. An account holding both legs
+/// has no single position, and `None` says so.
+fn net_leg(legs: &mut std::collections::BTreeMap<String, (i64, i64)>) -> Option<String> {
+    if legs.contains_key("NET") {
+        return Some("NET".into());
+    }
+    let named: Vec<String> = legs.keys().filter(|k| *k != "NET").cloned().collect();
+    match named.as_slice() {
+        [] => {
+            legs.insert("NET".into(), (0, 0));
+            Some("NET".into())
+        }
+        [one] => {
+            let pos = legs.remove(one).unwrap_or_default();
+            legs.insert("NET".into(), pos);
+            Some("NET".into())
+        }
+        _ => None,
     }
 }
 

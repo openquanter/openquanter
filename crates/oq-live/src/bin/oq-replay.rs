@@ -193,12 +193,18 @@ fn render(record: &Record) -> String {
             limit_price,
             qty,
             reduce_only,
+            leg,
         } => format!(
-            "sent {}  {client_id} {side:?} {} @ {}{}",
+            "sent {}  {client_id} {side:?} {} @ {}{}{}",
             at.0,
             qty.0,
             limit_price.0,
-            if *reduce_only { " reduce-only" } else { "" }
+            if *reduce_only { " reduce-only" } else { "" },
+            if leg.is_empty() {
+                String::new()
+            } else {
+                format!(" {leg}")
+            }
         ),
         Record::Outcome {
             at,
@@ -323,6 +329,7 @@ mod readout {
                 limit_price: PriceTicks(2_222),
                 qty: QtyLots(3_333),
                 reduce_only: true,
+                leg: String::new(),
             },
             &["1111", "zz-client", "Sell", "2222", "3333", "reduce-only"],
         );

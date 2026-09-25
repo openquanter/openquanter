@@ -163,6 +163,7 @@ mod tests {
             limit_price: PriceTicks(5),
             qty: QtyLots(1),
             reduce_only: false,
+            leg: String::new(),
         }
     }
 
