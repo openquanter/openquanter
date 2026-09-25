@@ -189,19 +189,42 @@ impl Venue for OkxSwap {
         let ts = quoted(text, r#""ts":"#)
             .and_then(|v| v.parse::<i64>().ok())
             .ok_or(ParseError::MissingField("ts"))?;
-        let seq = bare_int(text, r#""seqId":"#).ok_or(ParseError::MissingField("seqId"))?;
+        let seq: u64 = bare_digits(text, r#""seqId":"#)
+            .ok_or(ParseError::MissingField("seqId"))?
+            .parse()
+            .map_err(|_| ParseError::BadSequence("seqId"))?;
         // A snapshot has no predecessor and the venue says so with -1.
         // `prev_final_id` being an Option is exactly the right shape for
         // that: reporting -1 as a real predecessor would make the first
         // message after a resubscribe look like a break in the chain.
-        let prev = bare_int(text, r#""prevSeqId":"#).filter(|p| *p >= 0);
-        let first = prev.map_or(seq, |p| p + 1);
+        //
+        // Everything else is refused rather than clamped. A sequence
+        // number past what the type holds, or a negative one that is not
+        // the venue's -1, cannot be placed on the chain: read as zero it
+        // would look like the chain starting over, and the updates that
+        // follow would be dropped without anyone saying so.
+        let prev: Option<u64> = match bare_digits(text, r#""prevSeqId":"#) {
+            None | Some("-1") => None,
+            Some(digits) => Some(
+                digits
+                    .parse()
+                    .map_err(|_| ParseError::BadSequence("prevSeqId"))?,
+            ),
+        };
+        // The successor of `u64::MAX` is not a number, so a message
+        // claiming it as a predecessor is not one this can follow.
+        let first = match prev {
+            Some(p) => p
+                .checked_add(1)
+                .ok_or(ParseError::BadSequence("prevSeqId"))?,
+            None => seq,
+        };
 
         Ok(DepthUpdate {
             event_ms: ts,
-            first_id: u64::try_from(first).unwrap_or(0),
-            final_id: u64::try_from(seq).unwrap_or(0),
-            prev_final_id: prev.and_then(|p| u64::try_from(p).ok()),
+            first_id: first,
+            final_id: seq,
+            prev_final_id: prev,
             bids: levels(text, r#""bids":[["#, scales)?,
             asks: levels(text, r#""asks":[["#, scales)?,
         })
@@ -216,14 +239,20 @@ fn quoted(text: &str, key: &str) -> Option<String> {
     Some(rest[start..end].to_string())
 }
 
-/// A bare JSON integer following `key`, which may be negative.
-fn bare_int(text: &str, key: &str) -> Option<i64> {
+/// The digits of a bare JSON integer following `key`, as the message
+/// wrote them. `None` when the field is not there at all.
+///
+/// The digits come back rather than a parsed number because the sequence
+/// fields have to be range-checked against `u64`: parsing into `i64`
+/// first would turn a number too large for it into "the field was
+/// missing", which reads as a snapshot rather than as a message that
+/// cannot be placed.
+fn bare_digits<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let rest = &text[text.find(key)? + key.len()..];
-    let digits: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .collect();
-    digits.parse().ok()
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 /// Levels arrive as `[["price","size","liquidations","orders"], ...]`.
@@ -335,6 +364,56 @@ mod tests {
             None,
             "the other venue's reader must not silently half-work on this shape"
         );
+    }
+
+    /// A sequence number is placed on the chain exactly, or the message
+    /// is refused.
+    ///
+    /// `prevSeqId` at the top of what `i64` holds used to reach `p + 1`
+    /// and panic the process reading the book — in release, where this
+    /// workspace turns overflow checks on. A negative `seqId` used to be
+    /// clamped to zero, which is not a number the venue sent: read as a
+    /// real id it looks like the chain starting over, and the updates
+    /// after it are dropped with nobody told.
+    #[test]
+    fn a_sequence_number_that_cannot_be_placed_is_refused() {
+        let scales = Scales::default();
+        let frame = |seq: &str, prev: &str| {
+            format!(
+                r#"{{"arg":{{"channel":"books"}},"data":[{{"ts":"1","seqId":{seq},"prevSeqId":{prev},"bids":[["1","1"]],"asks":[]}}]}}"#
+            )
+        };
+
+        // The shape that panicked. A predecessor inside `u64` is a place
+        // on the chain, and its successor is the next one.
+        let update = OkxSwap
+            .parse_depth(
+                frame("9223372036854775807", "9223372036854775807").as_bytes(),
+                scales,
+            )
+            .expect("a predecessor u64 can hold");
+        assert_eq!(update.prev_final_id, Some(9_223_372_036_854_775_807));
+        assert_eq!(update.first_id, 9_223_372_036_854_775_808);
+
+        // Past the top of the range there is no successor to compute.
+        assert!(matches!(
+            OkxSwap.parse_depth(frame("1", "18446744073709551615").as_bytes(), scales),
+            Err(ParseError::BadSequence("prevSeqId"))
+        ));
+
+        // A negative id that is not the venue's -1 cannot be placed.
+        assert!(matches!(
+            OkxSwap.parse_depth(frame("-5", "-1").as_bytes(), scales),
+            Err(ParseError::BadSequence("seqId"))
+        ));
+
+        // -1 still means what the venue says it means: a snapshot.
+        let snapshot = OkxSwap
+            .parse_depth(frame("7", "-1").as_bytes(), scales)
+            .expect("a snapshot");
+        assert_eq!(snapshot.prev_final_id, None);
+        assert_eq!(snapshot.first_id, 7);
+        assert_eq!(snapshot.final_id, 7);
     }
 
     #[test]

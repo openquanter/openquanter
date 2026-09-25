@@ -31,6 +31,12 @@ pub enum ParseError {
     TooPrecise { text: String, scale: u32 },
     /// The message is not a depth update at all.
     NotDepth,
+    /// A sequence number the venue could not have meant.
+    ///
+    /// Refused rather than clamped: read as zero it would look like the
+    /// chain had started over, and the updates that follow would be
+    /// dropped without anyone being told.
+    BadSequence(&'static str),
 }
 
 impl core::fmt::Display for ParseError {
@@ -42,6 +48,7 @@ impl core::fmt::Display for ParseError {
                 write!(f, "{text:?} has more decimals than scale {scale} allows")
             }
             Self::NotDepth => f.write_str("not a depth update"),
+            Self::BadSequence(name) => write!(f, "{name} is not a sequence number"),
         }
     }
 }
