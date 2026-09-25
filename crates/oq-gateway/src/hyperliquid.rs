@@ -36,16 +36,13 @@
 //! `universe`, not by symbol, with spot at `10000 + index`. The mapping
 //! is fetched and kept; nothing in `Instrument` carries it.
 //!
-//! # Where this commit stops
+//! # A client id is a cloid
 //!
-//! The signing layer and the answer reader, both verified. `Execution`
-//! is not implemented yet and the reason is a third client-id
-//! constraint: cancelling by the caller's own id needs a `cloid`, which
-//! is a 128-bit hex string — narrower than Binance's 36 characters,
-//! Kraken's 100, and different again from Backpack's `uint32`. That is
-//! a fourth shape for `IdRules` to carry, and it belongs in the commit
-//! that uses it rather than this one. Placing also needs the asset
-//! *index* for a symbol, which is a `/info` call and a cache.
+//! Cancelling by the caller's own id needs a `cloid`, a 128-bit hex
+//! string — narrower than Binance's 36 characters, Kraken's 100, and
+//! different again from Backpack's `uint32`: the fourth shape
+//! `IdRules` carries. Placing also needs the asset *index* for a
+//! symbol, which is a `/info` call and a cache.
 //!
 //! # What this has not done
 //!
@@ -1139,17 +1136,66 @@ impl crate::exec::Execution for Hyperliquid {
             r#"{{"type":"orderStatus","user":"{}","oid":"{client_id}"}}"#,
             self.address()
         ))?;
-        if !body.contains("\"order\"") {
-            return Ok(None);
+        // Only `unknownOid` is "no such order", the answer that licenses a
+        // resend after an unknown placement. Anything else this cannot
+        // read is the venue failing to answer, and is an error: "no such
+        // order" and "could not tell" lead to opposite actions.
+        match crate::json::field_str(&body, "status").as_deref() {
+            Some("unknownOid") => Ok(None),
+            Some("order") => order_from_query(&body, client_id)
+                .map(Some)
+                .ok_or_else(|| crate::json::malformed("order status", &body)),
+            _ => Err(crate::json::malformed("order status", &body)),
         }
-        let status = crate::json::field_str(&body, "status").unwrap_or_default();
-        Ok(Some(crate::exec::OrderAck {
-            venue_id: crate::json::raw_field(&body, "oid").unwrap_or_default(),
-            client_id: client_id.to_string(),
-            status,
-            executed_qty: crate::json::field_str(&body, "sz").unwrap_or_else(|| "0".to_string()),
-        }))
     }
+}
+
+/// What an `orderStatus` answer says about one order; `None` when the
+/// venue does not have it, or when the answer does not read — which
+/// [`Execution::order_status`](crate::exec::Execution::order_status)
+/// tells apart before trusting a `None`.
+///
+/// The answer nests twice, and both mistakes this used to make came
+/// from reading it flat. Its first `status` is the envelope's — `order`
+/// for a known order, `unknownOid` for none — and the order's own state
+/// is the `status` beside the inner `order` object, so reading the first
+/// one reported every order as being in the state `order`. And `sz` is
+/// what is still open, not what has filled: a filled order reads
+/// `"sz":"0.0"` beside `"origSz":"0.0076"`, so taking `sz` as the
+/// executed quantity reported a full fill as nothing filled.
+#[must_use]
+pub fn order_from_query(body: &str, client_id: &str) -> Option<crate::exec::OrderAck> {
+    if crate::json::field_str(body, "status").as_deref() != Some("order") {
+        return None;
+    }
+    let wrapper = crate::json::object_field(body, "order")?;
+    let order = crate::json::object_field(&wrapper, "order")?;
+    // The wrapper's own fields, with the order taken out so none of its
+    // keys can answer for the wrapper's.
+    let own = wrapper.replacen(&order, "{}", 1);
+    let status = crate::json::field_str(&own, "status").unwrap_or_default();
+    let executed_qty = match (
+        crate::json::field_str(&order, "origSz"),
+        crate::json::field_str(&order, "sz"),
+    ) {
+        (Some(original), Some(open)) => filled_size(&original, &open)?,
+        _ => return None,
+    };
+    Some(crate::exec::OrderAck {
+        venue_id: crate::json::raw_field(&order, "oid").unwrap_or_default(),
+        client_id: client_id.to_string(),
+        status,
+        executed_qty,
+    })
+}
+
+/// `original - open`, exactly, at the finer of the two precisions.
+fn filled_size(original: &str, open: &str) -> Option<String> {
+    let places = |t: &str| t.split_once('.').map_or(0, |(_, f)| f.len());
+    let scale = u8::try_from(places(original).max(places(open))).ok()?;
+    let filled =
+        crate::klines::scaled(original, scale)?.checked_sub(crate::klines::scaled(open, scale)?)?;
+    (filled >= 0).then(|| canonical_decimal(filled, scale))
 }
 
 fn unreadable(order: &crate::exec::NewOrder, _value: Value) -> Placed {
@@ -1389,6 +1435,46 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(classify_cancel(500, ok, "c"), Placed::Unknown(_)));
+    }
+
+    /// hyperliquid-docs, info endpoint, "Query order status by oid or
+    /// cloid", with the documented `<status>` placeholder set to one of
+    /// its listed values. Both fields this used to misread are here: the
+    /// envelope's `status` comes first, and `sz` is what is still open.
+    const ORDER_STATUS: &str = r#"{"status":"order","order":{"order":{"coin":"ETH","side":"A","limitPx":"2412.7","sz":"0.0","oid":1,"timestamp":1724361546645,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Market","origSz":"0.0076","tif":"FrontendMarket","cloid":null},"status":"filled","statusTimestamp":1724361546645}}"#;
+
+    #[test]
+    fn an_order_status_is_the_orders_and_its_fill_is_what_left_the_book() {
+        let a = order_from_query(ORDER_STATUS, "c").expect("a known order");
+        assert_eq!(a.status, "filled", "not the envelope's `order`");
+        assert_eq!(
+            a.executed_qty, "0.0076",
+            "origSz less the open sz, not the open sz"
+        );
+        assert_eq!(a.venue_id, "1");
+        // The old reading, for the record of what it said.
+        assert_eq!(
+            crate::json::field_str(ORDER_STATUS, "status").as_deref(),
+            Some("order")
+        );
+        assert_eq!(
+            crate::json::field_str(ORDER_STATUS, "sz").as_deref(),
+            Some("0.0")
+        );
+
+        let partly = ORDER_STATUS
+            .replace(r#""sz":"0.0""#, r#""sz":"0.0026""#)
+            .replace(r#""status":"filled""#, r#""status":"open""#);
+        let a = order_from_query(&partly, "c").expect("a known order");
+        assert_eq!(
+            (a.status.as_str(), a.executed_qty.as_str()),
+            ("open", "0.005")
+        );
+
+        assert_eq!(order_from_query(r#"{"status":"unknownOid"}"#, "c"), None);
+        // More open than was ever ordered is not an answer to trust.
+        let impossible = ORDER_STATUS.replace(r#""sz":"0.0""#, r#""sz":"1""#);
+        assert_eq!(order_from_query(&impossible, "c"), None);
     }
 
     /// An action refused as a whole is `"status":"err"` with the reason

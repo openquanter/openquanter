@@ -182,7 +182,7 @@ input this project cannot reach, the second has not been written.
 | Gateway | Reference perpetuals adapter (market data, orders, user stream) | Built; the whole loop has run against a testnet |
 | Gateway | Reconciliation as a first-class object (lost, duplicate, out-of-order) | Built |
 | Gateway | A second venue (OKX) | Built; **public half verified against the real venue, signed half unverified** |
-| Gateway | **Conformance suite for execution adapters** | Built — six adapters driven through it (Aster shares Binance's), and three deliberately-wrong adapters caught by it |
+| Gateway | **Conformance suite for execution adapters** | Built — all seven adapters driven through it (Aster shares Binance's), and three deliberately-wrong adapters caught by it |
 | Gateway | **Broker/referral prefix scheme** | Built — `broker::IdScheme` composes ids carrying a venue-issued code, kept separate from the ownership prefix because they answer different questions |
 | Risk | RiskGate: pre-trade checks, kill switch, startup reconciliation | Built |
 | Risk | **Limit changes journalled as auditable events** | Built — `VersionedLimits` records which field moved and from what; a no-op does not advance the version |

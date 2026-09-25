@@ -33,6 +33,8 @@ fn binance() -> Responses {
         unavailable: (503, "<html>service unavailable</html>"),
         absent: r#"{"code":-2013,"msg":"Order does not exist."}"#,
         present: r#"{"orderId":283194212,"symbol":"BTCUSDT","status":"FILLED","clientOrderId":"oq-1","executedQty":"0.002"}"#,
+        present_status: "FILLED",
+        present_executed: "0.002",
         foreign: "<html>captive portal</html>",
     }
 }
@@ -52,6 +54,8 @@ fn okx() -> Responses {
         unavailable: (502, "<html>bad gateway</html>"),
         absent: r#"{"code":"51603","msg":"Order does not exist","data":[]}"#,
         present: r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","ordId":"312269865356374016","clOrdId":"oq0001","state":"live","accFillSz":"0","sz":"5"}]}"#,
+        present_status: "live",
+        present_executed: "0",
         foreign: "<html>captive portal</html>",
     }
 }
@@ -79,6 +83,8 @@ fn kraken() -> Responses {
         unavailable: (502, "<html>bad gateway</html>"),
         absent: r#"{"result":"success","orders":[],"serverTime":"2019-09-05T16:33:50.734Z"}"#,
         present: r#"{"result":"success","orders":[{"order_id":"179f9af8-e45e-469d-b3e9-2fd4675cb7d0","cliOrdId":"oq0001","status":"untouched","filledSize":0}],"serverTime":"2019-09-05T16:33:50.734Z"}"#,
+        present_status: "untouched",
+        present_executed: "0",
         foreign: "<html>captive portal</html>",
     }
 }
@@ -113,6 +119,8 @@ fn bitget() -> Responses {
         unavailable: (502, "<html>bad gateway</html>"),
         absent: r#"{"code":"00000","msg":"success","requestTime":1695806875837,"data":[]}"#,
         present: r#"{"code":"00000","msg":"success","requestTime":1695806875837,"data":[{"orderId":"121211212122","clientOid":"oq0001","status":"live","filledQty":"0"}]}"#,
+        present_status: "live",
+        present_executed: "0",
         foreign: "<html>captive portal</html>",
     }
 }
@@ -148,6 +156,8 @@ fn backpack() -> Responses {
         unavailable: (502, "<html>bad gateway</html>"),
         absent: "[]",
         present: r#"[{"id":"114905014","clientId":7,"symbol":"SOL_USDC","side":"Bid","quantity":"1","executedQuantity":"0","price":"100","status":"New","createdAt":1614550000000}]"#,
+        present_status: "New",
+        present_executed: "0",
         foreign: "<html>captive portal</html>",
     }
 }
@@ -181,6 +191,8 @@ fn deribit() -> Responses {
         unavailable: (502, "<html>bad gateway</html>"),
         absent: r#"{"jsonrpc":"2.0","id":1,"result":[]}"#,
         present: r#"{"jsonrpc":"2.0","id":1,"result":[{"order_id":"ETH-100234","order_state":"open","label":"oq0001","instrument_name":"BTC-PERPETUAL","direction":"buy","price":78313.5,"amount":10,"filled_amount":0}]}"#,
+        present_status: "open",
+        present_executed: "0",
         foreign: "<html>captive portal</html>",
     }
 }
@@ -193,6 +205,43 @@ fn the_deribit_adapter_conforms() {
         oq_gateway::deribit::order_from_query,
     );
     assert!(r.conforms(), "{}", r.summary_line("deribit"));
+}
+
+/// Payloads from Hyperliquid's API documentation: the exchange
+/// endpoint's "Place an order" answers and the info endpoint's
+/// `orderStatus` answers, with the documented `<status>` placeholder set
+/// to one of its listed values.
+///
+/// A refusal arrives inside a 200, as an `error` entry in the statuses,
+/// and carries no code.
+fn hyperliquid() -> Responses {
+    Responses {
+        venue: "hyperliquid",
+        client_id: "0x1234567890abcdef1234567890abcdef",
+        accepted: r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":77738308}}]}}}"#,
+        accepted_venue_id: "77738308",
+        rejected: (
+            200,
+            r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"error":"Order must have minimum value of $10."}]}}}"#,
+        ),
+        rejected_code: None,
+        unavailable: (502, "<html>bad gateway</html>"),
+        absent: r#"{"status":"unknownOid"}"#,
+        present: r#"{"status":"order","order":{"order":{"coin":"ETH","side":"A","limitPx":"2412.7","sz":"0.0","oid":1,"timestamp":1724361546645,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Market","origSz":"0.0076","tif":"FrontendMarket","cloid":null},"status":"filled","statusTimestamp":1724361546645}}"#,
+        present_status: "filled",
+        present_executed: "0.0076",
+        foreign: "<html>captive portal</html>",
+    }
+}
+
+#[test]
+fn the_hyperliquid_adapter_conforms() {
+    let r = check(
+        &hyperliquid(),
+        oq_gateway::hyperliquid::classify,
+        oq_gateway::hyperliquid::order_from_query,
+    );
+    assert!(r.conforms(), "{}", r.summary_line("hyperliquid"));
 }
 
 #[test]
@@ -295,11 +344,47 @@ fn an_adapter_that_cannot_say_no_such_order_is_caught() {
     );
 }
 
-/// Every adapter the suite can drive, reported together — the form this
-/// suite is actually used in: adding a venue means adding a row here.
-/// Hyperliquid is not among them: it finds an order by the venue's id or
-/// its own through the info endpoint, and has no `order_from_query` for
-/// the suite's query cases to call.
+/// Hyperliquid's status answer read flat, as this adapter once did: the
+/// first `status` in the bytes, and `sz` as what filled. The first is
+/// the envelope's `order`, the second is what is still open. A suite
+/// that only asked for a non-empty status passed it.
+#[test]
+fn an_adapter_that_reads_a_nested_answer_flat_is_caught() {
+    fn flat(body: &str, client_id: &str) -> Option<oq_gateway::exec::OrderAck> {
+        let field = |key: &str| {
+            let needle = format!("\"{key}\":");
+            let rest = &body[body.find(&needle)? + needle.len()..];
+            let rest = rest.trim_start_matches('"');
+            Some(rest[..rest.find(['"', ',', '}'])?].to_string())
+        };
+        if field("status")? == "unknownOid" {
+            return None;
+        }
+        Some(oq_gateway::exec::OrderAck {
+            venue_id: field("oid")?,
+            client_id: client_id.to_string(),
+            status: field("status")?,
+            executed_qty: field("sz")?,
+        })
+    }
+
+    let r = check(&hyperliquid(), oq_gateway::hyperliquid::classify, flat);
+    assert!(!r.conforms());
+    assert!(
+        r.failures.iter().any(|f| f.contains(r#"state "order""#)),
+        "{:?}",
+        r.failures
+    );
+    assert!(
+        r.failures.iter().any(|f| f.contains("0.0 filled")),
+        "{:?}",
+        r.failures
+    );
+}
+
+/// Every adapter, reported together — the form this suite is actually
+/// used in: adding a venue means adding a row here. Aster is Binance's
+/// adapter under other paths and is driven as Binance.
 #[test]
 fn every_shipped_adapter_is_listed() {
     let reports = [
@@ -351,14 +436,22 @@ fn every_shipped_adapter_is_listed() {
                 oq_gateway::deribit::order_from_query,
             ),
         ),
+        (
+            "hyperliquid",
+            check(
+                &hyperliquid(),
+                oq_gateway::hyperliquid::classify,
+                oq_gateway::hyperliquid::order_from_query,
+            ),
+        ),
     ];
     for (venue, r) in &reports {
         println!("  {}", r.summary_line(venue));
     }
     assert_eq!(
         reports.len(),
-        6,
-        "six adapters answer the suite's queries; every one must be driven"
+        7,
+        "seven adapters ship; every one must be driven"
     );
     assert!(reports.iter().all(|(_, r)| r.conforms()));
 }

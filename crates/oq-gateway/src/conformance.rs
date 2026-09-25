@@ -72,6 +72,19 @@ pub struct Responses {
     pub absent: &'static str,
     /// A response to a status query for an order that does.
     pub present: &'static str,
+    /// The state `present` gives the order, in the venue's own word.
+    ///
+    /// Stated rather than merely required to be non-empty: an answer
+    /// that nests the order inside an envelope with its own `status`
+    /// read flat gives the envelope's word, and a non-empty check
+    /// passes it.
+    pub present_status: &'static str,
+    /// The quantity `present` says has filled.
+    ///
+    /// A venue may report what is still open instead and leave the
+    /// filled amount to be worked out; an adapter that passed the open
+    /// quantity through reports a full fill as nothing filled.
+    pub present_executed: &'static str,
     /// Something that is not this venue's answer at all.
     pub foreign: &'static str,
 }
@@ -220,7 +233,8 @@ pub fn check(r: &Responses, classify: Classify, status: ReadStatus) -> Report {
         );
     }
 
-    // 6. And an order that exists comes back with its state, unmapped.
+    // 6. And an order that exists comes back with its state, unmapped,
+    //    and what has filled of it.
     out.checks += 1;
     match status(r.present, r.client_id) {
         None => fail("a status query for an existing order returned nothing".to_string()),
@@ -232,6 +246,21 @@ pub fn check(r: &Responses, classify: Classify, status: ReadStatus) -> Report {
                      known one"
                         .to_string(),
                 );
+            } else if a.status != r.present_status {
+                fail(format!(
+                    "an existing order came back in state {:?} where the venue said {:?}",
+                    a.status, r.present_status
+                ));
+            }
+            let same = matches!(
+                (a.executed_qty.parse::<f64>(), r.present_executed.parse::<f64>()),
+                (Ok(x), Ok(y)) if x == y
+            );
+            if !same {
+                fail(format!(
+                    "an existing order came back with {} filled where the venue said {}",
+                    a.executed_qty, r.present_executed
+                ));
             }
         }
     }

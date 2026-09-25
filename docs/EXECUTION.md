@@ -172,10 +172,10 @@ under load — which is exactly when it must not.
   would double the surface without a reason.
 - A venue whose signed half has been exercised, other than Binance
   USD-M. The seam's claim — that a second venue is an implementation
-  rather than a rewrite — is no longer untested: `Execution` has eight
-  implementations, and a conformance suite drives six of them (Binance,
-  OKX, Kraken, Bitget, Backpack, Deribit; Aster shares Binance's) from
-  payloads each one supplies, so it tests the contract
+  rather than a rewrite — is no longer untested: eight venues stand
+  behind `Execution`, and a conformance suite drives every adapter
+  (Binance, OKX, Kraken, Bitget, Backpack, Deribit, Hyperliquid; Aster
+  shares Binance's) from payloads each one supplies, so it tests the contract
   rather than one venue's bytes. It exists because the two venues
   disagree about something that matters: Binance answers a refusal with
   an HTTP status and OKX answers one inside a 200, so a classifier

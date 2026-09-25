@@ -477,7 +477,7 @@ which is why this reconciles the things that are.
 Venues other than one — no longer. The design was written against
 Binance USDT-M because that is what ran. OKX now has an account reader
 and an event stream too, and `oq-trade` trades Binance, Aster and OKX;
-the execution conformance suite drives six adapters through the same
+the execution conformance suite drives all seven adapters through the same
 cases. The second venue did disagree about what an order report
 contains — OKX answers a refusal inside a 200 — which is what the suite
 exists to catch.
