@@ -175,14 +175,15 @@ impl Record {
             ));
         }
 
-        for (side, amount, entry) in &self.legs {
-            match other.legs.iter().find(|(s, _, _)| s == side) {
+        let (ours, theirs) = (named_legs(&self.legs), named_legs(&other.legs));
+        for (side, amount, entry) in &ours {
+            match theirs.iter().find(|(s, _, _)| s == side) {
                 None => out.push(format!("leg {side}: recorded {amount} and is now absent")),
                 Some((_, a, e)) => {
-                    if a != amount {
+                    if !same(*a, *amount) {
                         out.push(format!("leg {side}: recorded {amount} and read {a}"));
                     }
-                    if e != entry {
+                    if !same(*e, *entry) {
                         // Not cosmetic. Every subsequent P&L and every
                         // stop distance is computed from this number.
                         out.push(format!("leg {side} entry: recorded {entry} and read {e}"));
@@ -190,8 +191,8 @@ impl Record {
                 }
             }
         }
-        for (side, amount, _) in &other.legs {
-            if !self.legs.iter().any(|(s, _, _)| s == side) {
+        for (side, amount, _) in &theirs {
+            if !ours.iter().any(|(s, _, _)| s == side) {
                 out.push(format!("leg {side}: not recorded, and now holds {amount}"));
             }
         }
@@ -210,8 +211,65 @@ impl Record {
     }
 }
 
+/// Legs under the name of the direction they hold: a one-way account's
+/// `BOTH` is `LONG` or `SHORT` by its sign, which is what a process that
+/// adopted it calls it. The same position under two names is not a
+/// difference.
+fn named_legs(legs: &[(String, f64, f64)]) -> Vec<(String, f64, f64)> {
+    legs.iter()
+        .map(|(side, amount, entry)| {
+            let name = if side.eq_ignore_ascii_case("BOTH") {
+                if *amount < 0.0 { "SHORT" } else { "LONG" }.to_string()
+            } else {
+                side.to_ascii_uppercase()
+            };
+            (name, *amount, *entry)
+        })
+        .collect()
+}
+
+/// Two decimals the same up to how a float writes them.
+///
+/// The venue reports an entry as `83794.90000000001`; a process that
+/// holds it in ticks writes `83794.9`. A real difference is at least a
+/// tick — many orders of magnitude above this.
+fn same(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_float_rendering_and_a_leg_name_are_not_differences() {
+        let rec = |legs: Vec<(&str, f64, f64)>| super::Record {
+            symbol: "BTCUSDT".into(),
+            read_at_ms: 0,
+            legs: legs
+                .into_iter()
+                .map(|(s, a, e)| (s.to_string(), a, e))
+                .collect(),
+            orders: vec![],
+        };
+        let ours = rec(vec![("LONG", 0.004, 84_435.5), ("SHORT", -0.008, 83_794.9)]);
+        let venue = rec(vec![
+            ("LONG", 0.004, 84_435.5),
+            ("SHORT", -0.008, 83_794.900_000_000_01),
+        ]);
+        assert!(
+            ours.differences(&venue).is_empty(),
+            "{:?}",
+            ours.differences(&venue)
+        );
+        let one_way = rec(vec![("BOTH", -0.008, 83_794.9)]);
+        assert!(
+            rec(vec![("SHORT", -0.008, 83_794.9)])
+                .differences(&one_way)
+                .is_empty()
+        );
+        // A tick is a difference.
+        let off = rec(vec![("LONG", 0.004, 84_435.6), ("SHORT", -0.008, 83_794.9)]);
+        assert_eq!(ours.differences(&off).len(), 1);
+    }
     use super::*;
     use crate::binance::{AccountSnapshot, OpenOrder, PositionSnapshot};
     use crate::snapshot::SnapshotBuilder;

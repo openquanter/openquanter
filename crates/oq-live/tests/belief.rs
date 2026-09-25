@@ -103,6 +103,7 @@ fn fills_are_applied_in_the_direction_of_their_submission() {
                 limit_price: PriceTicks(0),
                 qty: QtyLots(2_000),
                 reduce_only: false,
+                leg: String::new(),
             },
             Record::Outcome {
                 at: Nanos(2),
@@ -126,6 +127,7 @@ fn fills_are_applied_in_the_direction_of_their_submission() {
                 limit_price: PriceTicks(0),
                 qty: QtyLots(1_000),
                 reduce_only: true,
+                leg: String::new(),
             },
             Record::Outcome {
                 at: Nanos(5),
@@ -167,6 +169,7 @@ fn only_accepted_and_unfilled_orders_are_resting() {
         limit_price: PriceTicks(9_000),
         qty: QtyLots(1_000),
         reduce_only: false,
+        leg: String::new(),
     };
     let out = |id: &str, at: i64, tag: OutcomeTag| Record::Outcome {
         at: Nanos(at),
@@ -262,6 +265,7 @@ fn an_order_the_venue_withdrew_is_not_resting() {
                 limit_price: PriceTicks(9_000),
                 qty: QtyLots(1_000),
                 reduce_only: false,
+                leg: String::new(),
             },
             Record::Outcome {
                 at: Nanos(2),
@@ -304,6 +308,7 @@ fn an_unresolved_order_is_still_resting() {
                 limit_price: PriceTicks(9_000),
                 qty: QtyLots(1_000),
                 reduce_only: false,
+                leg: String::new(),
             },
             Record::Outcome {
                 at: Nanos(2),
@@ -347,6 +352,7 @@ fn a_restart_replaces_the_position_rather_than_adding_to_it() {
                 limit_price: PriceTicks(0),
                 qty: QtyLots(10),
                 reduce_only: false,
+                leg: String::new(),
             },
             Record::Outcome {
                 at: Nanos(3),
@@ -370,6 +376,7 @@ fn a_restart_replaces_the_position_rather_than_adding_to_it() {
                 limit_price: PriceTicks(0),
                 qty: QtyLots(10),
                 reduce_only: false,
+                leg: String::new(),
             },
             Record::Outcome {
                 at: Nanos(6),
@@ -395,4 +402,100 @@ fn a_restart_replaces_the_position_rather_than_adding_to_it() {
         "nothing rests across a start: {:?}",
         b.resting
     );
+}
+
+fn order(id: &str, side: Side, qty: i64, leg: &str) -> [Record; 2] {
+    [
+        Record::Submitted {
+            at: Nanos(2),
+            client_id: id.into(),
+            side,
+            limit_price: PriceTicks(8_300_000),
+            qty: QtyLots(qty),
+            reduce_only: false,
+            leg: leg.into(),
+        },
+        Record::Outcome {
+            at: Nanos(3),
+            client_id: id.into(),
+            tag: OutcomeTag::Accepted,
+            detail: "NEW".into(),
+        },
+    ]
+}
+
+fn fill(id: &str, qty: &str, price: &str) -> Record {
+    Record::Fill {
+        at: Nanos(4),
+        client_id: id.into(),
+        trade_id: 1,
+        qty: qty.into(),
+        price: price.into(),
+        order: 1,
+        side: "Buy".into(),
+    }
+}
+
+/// A hedged account is two positions, not their sum.
+///
+/// The reconstruction kept one net number, so an account long 0.004 and
+/// short 0.008 read back as short 0.004 — a disagreement with the venue
+/// about a position that had not moved, on every hedged run.
+#[test]
+fn a_hedged_account_is_reconstructed_leg_by_leg() {
+    let p = tmp("hedged");
+    let mut records = vec![
+        start(),
+        Record::Reconciled {
+            at: Nanos(1),
+            legs: vec![
+                ("BTCUSDT".into(), "LONG".into(), 4, 8_443_550),
+                ("BTCUSDT".into(), "SHORT".into(), -8, 8_379_490),
+            ],
+        },
+    ];
+    // A buy that closes half the short, and a buy that adds to the long.
+    records.extend(order("c1", Side::Buy, 4, "SHORT"));
+    records.push(fill("c1", "0.004", "83000.00"));
+    records.extend(order("c2", Side::Buy, 4, "LONG"));
+    records.push(fill("c2", "0.004", "84000.00"));
+    write(&p, &records);
+
+    let b = Belief::from_journal(&p).expect("readable");
+    assert!(b.hedged);
+    assert_eq!(b.undecodable, 0);
+    assert_eq!(
+        b.legs,
+        vec![
+            ("LONG".to_string(), 8, (8_443_550 + 8_400_000) / 2),
+            ("SHORT".to_string(), -4, 8_379_490),
+        ]
+    );
+    let r = b.to_record(0);
+    assert_eq!(r.legs.len(), 2, "{:?}", r.legs);
+    assert_eq!(r.legs[1].0, "SHORT");
+    assert!((r.legs[1].1 + 0.004).abs() < 1e-12, "{:?}", r.legs[1]);
+}
+
+/// A hedged account's fill from a journal that did not record legs cannot
+/// be placed on one, and is a hole — never a guess.
+#[test]
+fn a_hedged_fill_without_its_leg_is_a_hole_not_a_guess() {
+    let p = tmp("legless");
+    let mut records = vec![
+        start(),
+        Record::Reconciled {
+            at: Nanos(1),
+            legs: vec![
+                ("BTCUSDT".into(), "LONG".into(), 4, 8_443_550),
+                ("BTCUSDT".into(), "SHORT".into(), -8, 8_379_490),
+            ],
+        },
+    ];
+    records.extend(order("c1", Side::Buy, 4, ""));
+    records.push(fill("c1", "0.004", "83000.00"));
+    write(&p, &records);
+    let b = Belief::from_journal(&p).expect("readable");
+    assert_eq!(b.undecodable, 1);
+    assert_eq!(b.legs.len(), 2, "the adopted legs stand as they were");
 }

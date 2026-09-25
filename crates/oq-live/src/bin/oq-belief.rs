@@ -65,22 +65,19 @@ fn main() -> ExitCode {
         "symbol           {}",
         belief.symbol.as_deref().unwrap_or("(none recorded)")
     );
-    println!(
-        "position         {} lots, entry {} ticks",
-        belief.position_lots, belief.entry_ticks
-    );
+    // Leg by leg: a hedged account's net is not a position anyone holds.
+    if belief.legs.is_empty() {
+        println!("position         flat");
+    }
+    for (leg, lots, entry) in &belief.legs {
+        println!("position         {leg} {lots} lots, entry {entry} ticks");
+    }
     println!("resting          {} order(s)", belief.resting.len());
     if !belief.adopted {
         // The distinction a flat reconstruction cannot make on its own.
         println!(
             "adoption         no record — a run before this was journalled that \
              carried a position reconstructs as flat"
-        );
-    }
-    if belief.hedged {
-        println!(
-            "hedged           both legs were adopted; the netted position above \
-             is not what the venue holds"
         );
     }
     if belief.undecodable > 0 {

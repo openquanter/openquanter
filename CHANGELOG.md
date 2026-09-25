@@ -125,6 +125,19 @@ writing it down and better than leaving it out.
 - **`RunResult::margin_usage` replaces nothing and adds a field**;
   `RunConfig::track_margin` defaults to off, so no existing run changes
   or pays for it.
+- **`Record::Submitted` gains a trailing `leg` field, and
+  `Belief` reconstructs position leg by leg.** *Changes what a
+  reconstruction reports, not what a run does.* A hedged account was
+  rebuilt as one net number, so long 0.004 and short 0.008 read back as
+  short 0.004 and every hedged reconciliation disagreed with the venue.
+  The net could not simply be split: on a hedged account the reduce-only
+  flag is dropped (the venue refuses it there), so without the leg a
+  close of the short and an open of the long look the same. Journals
+  written before the field still decode, with the leg unknown; a hedged
+  fill whose leg is unknown is counted as undecodable rather than
+  guessed. Record comparison also stops calling a float's rendering a
+  difference (`83794.9` against `83794.90000000001`) and treats a
+  one-way `BOTH` leg as the direction it holds.
 - **`Record::Operator` (live journal kind 10) added, with a local
   control port.** *Adds a record; changes no existing one.* A process
   started under systemd with a runtime directory listens on a Unix

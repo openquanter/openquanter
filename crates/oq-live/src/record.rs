@@ -127,6 +127,15 @@ pub enum Record {
         limit_price: PriceTicks,
         qty: QtyLots,
         reduce_only: bool,
+        /// The position leg the order acts on: `BOTH` on a one-way
+        /// account, `LONG` or `SHORT` on a hedged one. Empty in journals
+        /// written before it was recorded.
+        ///
+        /// Needed because a hedged account's orders carry no reduce-only
+        /// flag — the venue refuses it there, and the leg says the same
+        /// thing — so without this a reader cannot tell a close of the
+        /// short from an open of the long.
+        leg: String,
     },
     Outcome {
         at: Nanos,
@@ -274,6 +283,7 @@ impl Record {
                 limit_price,
                 qty,
                 reduce_only,
+                leg,
             } => {
                 put_i64(&mut out, at.0);
                 put_str(&mut out, client_id);
@@ -284,6 +294,7 @@ impl Record {
                 put_i64(&mut out, limit_price.0);
                 put_i64(&mut out, qty.0);
                 out.push(u8::from(*reduce_only));
+                put_str(&mut out, leg);
             }
             Self::Outcome {
                 at,
@@ -395,6 +406,12 @@ impl Record {
                 limit_price: PriceTicks(take_i64(&mut p)?),
                 qty: QtyLots(take_i64(&mut p)?),
                 reduce_only: take_u8(&mut p)? != 0,
+                // Absent from journals written before it existed.
+                leg: if p.is_empty() {
+                    String::new()
+                } else {
+                    take_str(&mut p)?
+                },
             },
             kind::OUTCOME => Self::Outcome {
                 at: Nanos(take_i64(&mut p)?),
@@ -528,6 +545,7 @@ mod tests {
             limit_price: PriceTicks(299_000),
             qty: QtyLots(8),
             reduce_only: true,
+            leg: String::new(),
         });
         roundtrip(&Record::Outcome {
             at: Nanos(8),
@@ -584,6 +602,7 @@ mod tests {
             limit_price: PriceTicks(0),
             qty: QtyLots(1),
             reduce_only: false,
+            leg: String::new(),
         };
         roundtrip(&r);
     }
@@ -600,14 +619,50 @@ mod tests {
             limit_price: PriceTicks(5),
             qty: QtyLots(1),
             reduce_only: false,
+            leg: "LONG".into(),
         }
         .encode();
+        // The one exception: a cut exactly where the leg begins is a
+        // whole record in the format before the leg existed, and reads as
+        // one — with the leg unknown, which a reader must treat as
+        // unknown. (A torn payload never reaches here in practice: the
+        // journal's frame checksum refuses it first.)
+        let old_format = full.len() - (4 + "LONG".len());
         for cut in 1..full.len() {
-            assert!(
-                Record::decode(kind::SUBMITTED, &full[..cut]).is_none(),
-                "a payload cut at {cut} must not decode"
-            );
+            let got = Record::decode(kind::SUBMITTED, &full[..cut]);
+            if cut == old_format {
+                assert!(
+                    matches!(&got, Some(Record::Submitted { leg, .. }) if leg.is_empty()),
+                    "{got:?}"
+                );
+            } else {
+                assert!(got.is_none(), "a payload cut at {cut} must not decode");
+            }
         }
+    }
+
+    /// A journal written before the leg was recorded still reads.
+    #[test]
+    fn a_submission_from_before_the_leg_reads_with_the_leg_unknown() {
+        let with = Record::Submitted {
+            at: Nanos(3),
+            client_id: "oq-9".into(),
+            side: Side::Sell,
+            limit_price: PriceTicks(7),
+            qty: QtyLots(2),
+            reduce_only: false,
+            leg: "SHORT".into(),
+        };
+        let bytes = with.encode();
+        let old = &bytes[..bytes.len() - (4 + "SHORT".len())];
+        match Record::decode(kind::SUBMITTED, old) {
+            Some(Record::Submitted { leg, qty, .. }) => {
+                assert!(leg.is_empty());
+                assert_eq!(qty, QtyLots(2));
+            }
+            other => panic!("{other:?}"),
+        }
+        roundtrip(&with);
     }
 
     #[test]
