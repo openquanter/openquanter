@@ -272,6 +272,20 @@ fn main() {
     // does — the refusal is the part that changes what happens next.
     println!();
     let thresholds = Thresholds::default();
+    // `--out FILE` keeps the whole result for a console to show, with the
+    // overfitting statistics beside the table they judge.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(path) = args
+        .iter()
+        .position(|a| a == "--out")
+        .and_then(|i| args.get(i + 1))
+    {
+        let text = oq_backtest::sweep_file::render("sweep_100 ma-cross calm", &report, thresholds);
+        match std::fs::write(path, text) {
+            Ok(()) => println!("wrote {path}"),
+            Err(e) => eprintln!("could not write {path}: {e}"),
+        }
+    }
     let refusals = report.refusals(thresholds);
     if refusals.is_empty() {
         println!("  strict mode      would package this sweep");

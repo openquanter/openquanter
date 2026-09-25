@@ -20,6 +20,7 @@ pub mod fidelity;
 pub mod lookahead;
 pub mod run;
 pub mod sweep;
+pub mod sweep_file;
 pub mod validity;
 
 pub use deviation::{DeviationReport, Verdict};
