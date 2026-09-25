@@ -102,7 +102,7 @@ Aster 的文档写的是对"query string 拼接 request body"做 `HMAC SHA256`,�
 **这里的客户端订单号是全局唯一的,而这是一份礼物。** `L4` 记着:Binance 的
 `clientOrderId` 只在**挂单之间**唯一,所以它不是幂等性令牌——而被调研的三个项目
 都把它当成了幂等性令牌。Kraken 的是在账户历史范围内唯一,最长 100 字符,重复会被
-指名拒绝(`clientOrderIdAlreadyExist`)。这让「收到 [`Placed::Unknown`] 之后该不该
+指名拒绝(`clientOrderIdAlreadyExist`)。这让「收到 `Placed::Unknown` 之后该不该
 重发」这个问题可以由交易所回答,而不是靠推断——那是下单路径上最难的一种情况。
 适配器应该用上它;这里别的交易所都给不了。
 
@@ -165,8 +165,8 @@ CCXT 关于签名开销的记录也值得写下来:纯语言实现的 ECDSA 签�
 这条政策对 SHA-256 和 HMAC 是负担得起的——它们是确定性的位运算,有公开的测试
 向量,`oq-hash` 过了 RFC 4231。对非对称方案就负担不起了:
 
-- **Kraken** 需要 **SHA-512**,`oq-hash` 没有。这一个*是*负担得起的:它和 SHA-256
-  是同一种活,有同一类向量可以对。
+- **Kraken** 需要 **SHA-512**,`oq-hash` 当时没有。这一个*是*负担得起的:它和 SHA-256
+  是同一种活,有同一类向量可以对——此后已经加上了。
 - **Backpack** 需要 **Ed25519**。**Hyperliquid** 需要 **secp256k1 ECDSA 加
   Keccak-256** 来做 EIP-712。**Lighter** 需要它自己的方案,在某条曲线上,还带着
   每个 API key 独立的 nonce。
@@ -234,7 +234,7 @@ INTX 适配器瞄准的是一个已经关掉的服务。要么把目标改成 De
 
 ### V4 —— 交易所读取器返回列表,不是 Option
 
-`Events::read` 目前答的是 `Option<UserEvent>`。OKX 的 `orders` 频道和 Hyperliquid
+写下这段时 `Events::read` 答的是 `Option<UserEvent>`;现在它返回 `Vec<UserEvent>`。OKX 的 `orders` 频道和 Hyperliquid
 的 `statuses` 都会带好几个。签名改成列表,`UserStreamReader` 把多出来的放进一个
 队列,`next` 先把队列排空再去读 socket。这不是为 Hyperliquid 做的改动——正在做的
 OKX 那部分工作已经要求它了。
@@ -328,7 +328,8 @@ Lighter 的把握当初是刻意写成「低」的,而读完之后它从一个�
 - Backpack:客户端订单号可以是一个 `uint32`,任何带前缀的编号方案都拼不出这种 id。
 - Hyperliquid:它还可以是 0x 加 32 个十六进制位,这是第四种形状。`IdRules` 的两个
   布尔标志表达不了四种,而每来一家加一个布尔也不是解法——**这个类型需要重新设计**,
-  这段话就是那个说明,而不是又一个堆标志的提交。
+  这段话就是那个说明,而不是又一个堆标志的提交。此后它已被重新设计:`IdRules` 现在
+  是一个按形状区分的枚举——`Text`、`Number`、`Hex`——而不是一组标志。
 
 **哪些是验证过的而不是写出来的。** Hyperliquid 的签名,对着交易所自己发布的向量
 ——已知私钥、已知 action、已知的 `r`/`s`/`v`,外加钉住 MessagePack 编码的

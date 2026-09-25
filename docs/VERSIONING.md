@@ -21,7 +21,7 @@ so a bump is a single edit and cannot drift between crates.
 The crates are one release train. They are separable — using one without
 the others is a supported and tested property (G0) — but they are
 developed, tested and released together, and a reader comparing two
-checkouts should not have to reconcile twelve numbers.
+checkouts should not have to reconcile twenty-three numbers.
 
 ## Why 2, when nothing public was ever 1
 
@@ -70,6 +70,8 @@ with it:
 | Capture file format | `format_version` in the manifest, currently 2 (readers still accept 1) | [Capture Format](CAPTURE-FORMAT.md) |
 | Tick file format | `version` in the file header, currently 2 | [Tick Format](TICK-FORMAT.md) |
 | Journal frame format | `VERSION` in the frame header | `oq-journal` |
+| Run file format | `openquanter-run N` on the first line, currently 1 | [Run Format](RUN-FORMAT.md) |
+| Sweep file format | `openquanter-sweep N` on the first line, currently 1 | [Sweep Format](SWEEP-FORMAT.md) |
 
 A data format outlives the code that wrote it. Tying a format version to
 a crate version would mean either bumping the format on every release,

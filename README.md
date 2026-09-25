@@ -146,10 +146,11 @@ deciding whether to use this now.
 - **Gap attribution** — decompose the live/backtest difference into slippage,
   queue position, funding, latency and fee tier, and report what will not
   decompose as an **unexplained residual**. This is the aim at the top of the
-  page made concrete. The instrument exists and the live process journals its
-  decisions, so `oq-belief` can reconstruct what it believed and diff that
-  against the venue. What it has not had is a long run to decompose: the
-  pillar is built and unexercised, which is a different thing from unbuilt.
+  page made concrete. The instrument exists and every live run feeds it: a
+  shadow kernel runs beside the venue on the same observations, and the run
+  ends with the gap decomposed (see [Status](#status)). What it has not had
+  is a long run to decompose: the pillar is built and not yet exercised at
+  length, which is a different thing from unbuilt.
 
 ## Documentation
 
@@ -216,10 +217,11 @@ Pre-alpha, and specific about it. **Built and tested today:**
   markouts, which say whether one run's fills were followed by worse prices
   than another's (`oq-parity markout`).
 
-- **The order path** — a venue-independent execution contract with five
-  venues behind it, three of them complete and two stopping at
-  placement. Two earned their keep by contradicting the contract rather
-  than fitting it: Aster ships Binance's API under different paths, so
+- **The order path** — a venue-independent execution contract with eight
+  venues behind it, every one of which places and cancels; three of them
+  — Binance, Aster and OKX — also read the account and its event stream,
+  and those three are what `oq-trade` trades through. Two earned their
+  keep by contradicting the contract rather than fitting it: Aster ships Binance's API under different paths, so
   it landed as a sixteen-entry table instead of a second adapter; and
   Kraken names its orders rather than numbering them, which turned a
   venue id from a number into text. A shared signature turned out to
@@ -351,9 +353,10 @@ minutes on a market doing nothing; and an order below the venue's minimum,
 because knowing the precision and the grid is not knowing the floor.
 
 What has not happened is a strategy with an edge running unattended with
-money behind it. The two strategies that ship are deliberately not
+money behind it. The two strategies `oq-trade` ships are deliberately not
 strategies: one never trades and exists to prove the loop, the other rests
-one order far from the market and withdraws it.
+one order far from the market and withdraws it. `grid_live` runs a textbook
+grid, which is a teaching reference and claims no edge.
 
 **The assembly now exists**: `oq-live` composes market data, the strategy,
 the risk gate and the order path into one process.
@@ -389,33 +392,46 @@ backtest only
 
 <!-- end generated -->
 
-**All three parts of the attribution chain exist. They are not yet
-joined.**
+**All three parts of the attribution chain exist, and a live run joins
+them.**
 
 - **The record** — the live process depends on `oq-journal` and writes
   through `record.rs`.
-- **The kernel** — `oq-live` now depends on `oq-core` and `oq-margin`,
-  not merely on the strategy and matching types. **Replaying into the
-  kernel is structurally possible.**
+- **The kernel** — twice. The live process's own books are
+  `oq_core::Kernel` in `Matching::Venue`: the venue decides what trades,
+  and the accounting is the backtest's. Beside them a **shadow** — the
+  same kernel matching as a backtest would — is fed the same
+  observations and the same orders, places nothing, and records where
+  it and the venue part company.
 - **The instrument** — `oq-parity`'s attribution module decomposes the
   gap by cause, reports what will not decompose as an unexplained
   residual, and marks a cause it cannot compute as unavailable rather
   than as zero.
 
-**What is missing is the wiring between them.** `oq-parity` depends on
-neither `oq-journal` nor `oq-core`, and its example is fed constructed
-data; **nothing takes a real live recording through the kernel and hands
-both sides to the attribution.**
+**The wiring lives in `oq-live`.** Every run ends by handing the venue's
+realised P&L and the shadow's to the attribution and printing the
+decomposition, and the control port's `attribution` command asks the
+same question mid-run. Beside the journal a run writes `<stem>.live.run`
+and `<stem>.model.run` — what the venue filled and what the shadow
+filled, under one identity — and `<stem>.oqtk`, the observations,
+rewritten every fifteen minutes and at exit, so `oq-parity` can compare
+the two and `oq-parity markout` can price them afterwards.
 
-So "every cent accounted for" still accounts for **none of them** — but
-what is missing is assembly rather than parts.
+So "every cent accounted for" is now a report each run prints rather
+than an intention. Two things keep it short of the aim: funding is not
+yet read from the venue, so it is reported unavailable and the residual
+carries it; and no long run has been decomposed.
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, and the L2 fidelity
 tier is a matcher. Both now exist and both use the same `oq-book` — the
 first replays an archive to prove captured data is usable, the second reads
-a book to decide where an order queues. What is still missing is the path
-between them, so no backtest today matches against reconstructed depth.
+a book to decide where an order queues. `oq-tiers` is the path between
+them: it replays a captured archive's depth into the L2 tier and reports
+how many of L0's fills the queue would never have reached. It runs its
+own resting bid rather than your strategy; a library caller takes the
+same path through `oq_ingest::fold_into_observations` and
+`run_observations`.
 
 Start with the [Quickstart](docs/QUICKSTART.md) — three examples, no data to
 download, a running backtest in a few minutes. See the

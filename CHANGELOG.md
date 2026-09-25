@@ -75,6 +75,49 @@ writing it down and better than leaving it out.
   rather than refusing it. The first 64 bytes are byte-identical, so
   one decoder reads both and the kind decides whether the tail is
   there.
+- **`Event::Submit` names an instrument, and `kind::SUBMIT_ON` (11) is
+  added to the schema.** *Changes nothing for a single-instrument
+  account.* The same move as `TICK_ON`, for the same reason: an order
+  that does not say which instrument it is for cannot be routed to the
+  holding — or the shard — it belongs to. `None` means "the account's
+  only one", which is what every journal written before it says. The
+  older payload is a prefix of the newer, so one decoder reads both.
+- **`Event::Funding` names an instrument, and `kind::FUNDING_ON` (12) is
+  added to the schema.** *Changes results for an account holding
+  several instruments.* A named settlement is charged to the holding
+  whose rate it is, with that holding's contract, and to no other; an
+  unnamed one with several holdings is refused, as an unnamed tick is,
+  where it used to be charged to the first holding whichever instrument
+  its rate belonged to. A flat holding now pays nothing whatever the
+  other holdings hold, where before only an account flat everywhere
+  paid nothing. **Behavioural delta:** none for an account with one
+  holding; journals written before it contain no such record.
+- **`Kernel::settle_unreported` books the fills a matcher still holds
+  back when a run ends, and the backtest calls it.** *Changes results
+  for L1 and L2 runs with a response latency.* A fill made inside the
+  last response latency happened at the venue but had not yet been
+  released to the account, so a run that ended inside that delay left
+  it out of the result. **Behavioural delta:** such a run now includes
+  those fills in its fills and equity. L0 holds nothing back and is
+  unchanged. Not an event: nothing in a journal replays "the run ended".
+- **L1 queueing is symmetric, and a zero-latency order queues behind the
+  multiple.** *Changes L1 results.* A window with no trades has a high
+  and a low of zero, and read as prices every buy looked passed through
+  and skipped its queue while no sell ever did — optimism on one side
+  only. Such a window now lets no order through its queue. And an order
+  submitted with no entry latency was given a volume-multiple queue
+  sized from no volume at all, a queue of zero while the report still
+  claimed the multiple; it is now sized from the last observation.
+  **Behavioural delta:** L1 buys resting through trade-less windows fill
+  later or not at all, and zero-latency L1 orders wait behind a real
+  queue. L0 and L2's measured queue are unaffected.
+- **A tick out of order no longer ends a backtest or settles funding
+  twice.** *Changes results for data with a backwards timestamp.*
+  `FundingSchedule::between` holds nothing for an interval that runs
+  backwards, where it used to slice out of bounds and end the run, and
+  the run's funding mark only moves forward, so the stretch between an
+  earlier and a later tick is not settled a second time. **Behavioural
+  delta:** none for data whose timestamps never go backwards.
 - **`Intent::Limit` and `Intent::Market` name an instrument.** An
   implicit "whichever instrument this callback was about" makes the
   same line of code place different orders depending on where it ran,
@@ -141,8 +184,8 @@ writing it down and better than leaving it out.
 - **`Record::Operator` (live journal kind 10) added, with a local
   control port.** *Adds a record; changes no existing one.* A process
   started under systemd with a runtime directory listens on a Unix
-  socket there for `status`, `orders`, `metrics`, `halt`, `shutdown` and
-  `resume`, acted on inside the loop like any other event. Peers are
+  socket there for `status`, `orders`, `metrics`, `attribution`, `halt`,
+  `shutdown` and `resume`, acted on inside the loop like any other event. Peers are
   checked by the uid the kernel reports; there is no port without a
   runtime directory, never one in `/tmp`. Every state-changing command is
   journalled with its reason, the authenticated origin and what came of
@@ -229,7 +272,9 @@ for all six. Verified by putting 4.06 back, which fails with
   keeps the policy, and `swept` / `unswept` say which priced a run.
   Where the book and the tick disagree the worse price wins, so climbing
   a tier can never make a backtest look better. **Nothing feeds it yet**
-  — a tick file carries a best bid and a best ask, not a book.
+  — a tick file carries a best bid and a best ask, not a book. *(Since
+  superseded: `run_observations` below feeds it, and `oq-tiers` does so
+  from a captured archive.)*
 - **`oq-book` — order book reconstruction as its own crate**, extracted
   from `oq-l2feed` so a matcher does not inherit a TLS stack to look at
   a price level. `oq-l2feed` re-exports at the old paths, so no call site
@@ -246,7 +291,9 @@ for all six. Verified by putting 4.06 back, which fails with
   is a run reporting a lower tier's answer under a higher tier's name.
   Two gaps stay open and are in the roadmap: converting an archive into
   that stream is the caller's loop, and depth is not in the journal, so
-  an L2 run's journal replays its orders but not the book.
+  an L2 run's journal replays its orders but not the book. *(Since
+  closed: `oq_ingest::fold_into_observations` converts an archive, and
+  `Event::Depth` above puts the book in the journal.)*
 - **`Matcher` in `oq-core`** — the kernel holds a tier rather than being
   one. `State.engine` was an `L0Engine` by name, which is why nothing
   could reach L2. An enum rather than a trait: the tiers are a closed
@@ -265,11 +312,14 @@ for all six. Verified by putting 4.06 back, which fails with
 Nothing here has traded real money, and the entry triggers in
 [Roadmap](docs/ROADMAP.md) §M3 say what would have to be true first.
 
-- `oq-gateway` — execution adapters for two venues. Placement is
+- `oq-gateway` — execution adapters for two venues *(eight since:
+  Binance, OKX, Aster, Kraken Futures, Deribit, Hyperliquid, Backpack,
+  Bitget — see [Venues](docs/VENUES.md))*. Placement is
   three-state: accepted, rejected, and **unknown**, which is not an error
   because an error lets a caller `?` past the one case that must be
   handled. A conformance suite drives both adapters through the same
-  cases and is itself checked against three deliberately-wrong adapters.
+  cases and is itself checked against three deliberately-wrong adapters
+  *(it drives six adapters now; Aster shares Binance's)*.
   `broker::IdScheme` composes client ids carrying a venue-issued referral
   code, kept separate from the prefix that answers *is this order mine*.
 - `oq-risk` — pre-trade gate, kill switch, startup reconciliation.
@@ -290,6 +340,32 @@ Nothing here has traded real money, and the entry triggers in
 - Metrics are a **snapshot value** rendered in the line-oriented form
   collectors read, and alerts are judgements rather than notifications:
   nothing in this workspace sends anything anywhere.
+- **A live run leaves run files and a tick file.** Beside its journal,
+  every fifteen minutes and at exit, it writes `<stem>.live.run` and
+  `<stem>.model.run` — the venue's fills and the shadow's, under one
+  identity, in the format `oq-parity` reads — and `<stem>.oqtk`, the
+  observations, for `oq-parity markout`. Each is written aside and
+  renamed, so a reader never sees half of one. The control port answers
+  `attribution` from the shadow's evidence mid-run.
+- **The shadow sees every order as it was sent, and every withdrawal.**
+  *Changes what the shadow reports.* Only the tick path told the shadow
+  about orders, and it sent every one without a price, so a resting
+  ladder reached the model as market orders and filled at once; orders
+  withdrawn by a halt or by the trader itself stayed resting in the
+  model and could fill later. Its fills — and every divergence and
+  attribution computed from them — described orders the venue never
+  held. Every outcome now passes through one function that tells the
+  books and the shadow alike, including orders placed from fills and
+  orders the venue ended. No backtest changes.
+- **The control port's `status` says more:** the contract's
+  `price_scale` and `qty_scale`, so a reader can show orders in the
+  venue's units; a `pnl` object (realized, fees, funding, net and equity
+  since the run started); and a `limits` object with the risk limits the
+  run trades under.
+- **`oq-recon --watch --latest FILE`** keeps the newest reading in
+  `--record`'s format, rewritten atomically after every read, so a
+  journal can be reconciled against the venue without anyone pasting a
+  record.
 
 **`Outcome::Unresolved` split from `Outcome::Refused`.** *Changes live
 behaviour.* A submission that was sent and never answered was reported
@@ -317,8 +393,9 @@ number the documentation quotes is gross of costs.
 - `oq-l2feed` — verbatim record framing, UTC-day rotation, sealing with
   content-hashed manifests. Survives the day boundary; flushes on a timer
   rather than only on a record count.
-- `oq-capture` — live client for Binance perpetual streams, capturing the
-  streams the venue actually serves (some accept a subscription and then
+- `oq-capture` — live client for Binance perpetual streams *(and OKX
+  swaps since, selected by `--venue`)*, capturing the streams the venue
+  actually serves (some accept a subscription and then
   send nothing; see [Capture Format](docs/CAPTURE-FORMAT.md)).
 - A keepalive tick hands control back to the capture loop instead of
   waiting inside the source. A source now says whether its silence is a
@@ -367,6 +444,12 @@ number the documentation quotes is gross of costs.
   edge it had is not waiting in a public repository; they are here so
   the framework can be learned by recognising something. Each documents
   where it breaks rather than claiming an edge.
+- **A sweep's result as a file.** `oq_backtest::sweep_file` renders a
+  sweep — every configuration's outcome, the deflated Sharpe ratio and
+  PBO beside them, the refusals, and the reason for any statistic that
+  could not be computed — in a line-oriented format headed
+  `openquanter-sweep 1`, and parses it back. `sweep_100 --out FILE`
+  writes one. See [Sweep Format](docs/SWEEP-FORMAT.md).
 - `criterion` benchmarks, plus a CI job asserting a throughput **floor**
   rather than a tracked baseline. Shared runners vary by several times
   from hour to hour, and a gate that fails on noise gets disabled;

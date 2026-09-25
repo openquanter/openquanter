@@ -96,8 +96,9 @@ it believes the length.
 Framing rather than newline-delimited JSON: a length prefix holds any
 byte sequence without escaping, so the verbatim rule survives payloads
 that contain newlines, invalid UTF-8, or binary protocols. The cost is
-that the file is not directly greppable, which is why `oq-l2feed cat`
-converts a range of records to NDJSON on demand.
+that the file is not directly greppable: it is read through
+`oq_l2feed::archive::read` and `frame::decode_all`, which every tool here
+uses, and there is no command yet that prints records as NDJSON.
 
 The CRC is per record, not per file: it lets a reader distinguish a torn
 final record from corruption in the middle, which are different problems
@@ -105,7 +106,8 @@ with different responses.
 
 ## 4. Control records
 
-`kind = 1` payloads are UTF-8 JSON emitted by the capture process itself,
+Control payloads — `kind = 3`, or `1` in a version 1 frame — are UTF-8
+JSON emitted by the capture process itself,
 interleaved in the stream so their position in time is unambiguous.
 
 | `type` | Emitted when | Contents |

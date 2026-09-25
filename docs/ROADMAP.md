@@ -46,7 +46,7 @@ commitments.
 | **M0** | Foundations: repository, capture, statistics | 3–6 pw | Mostly landed |
 | **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
 | **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | **Mostly built. G3 and G7's parity half have now been measured rather than blocked — neither passed, both by a stated margin. G11 was withdrawn** |
-| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Half built, entry triggers unmet** |
+| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Mostly built, entry triggers unmet** |
 | **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered, and further along than "a first L1 exists": L1 is built with latency as distributions, L2 measures both the queue and the taker's walk from a reconstructed book, and a backtest reaches it from a captured archive. What is left is calibration against recorded fills, which is blocked on the fills M3's trigger asks for, and the probabilistic queue model that the stated order puts after it. Its depth requirement was a bare "6 months" with no argument behind it; now stated by what the data is for |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
 | **2.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
@@ -72,7 +72,7 @@ Comparing two versions precisely is a local `cargo bench` job on one
 machine. This is a change to the plan, recorded rather than quietly
 dropped.
 
-**M3 was built to roughly half its scope with none of its four entry
+**M3 has been built to most of its scope with none of its four entry
 triggers met, and that is a departure from this document's own discipline
 rather than a revision of it.** The gateway speaks order entry and the user
 stream, the risk gate exists with a kill switch and a fatal startup check,
@@ -87,11 +87,15 @@ not followed. The work is not wasted and none of it is being reverted; the
 cost is that the ordering was the thing meant to ensure the expensive half
 got built against evidence, and it was built against enthusiasm instead.
 
-Still unbuilt in M3, so that "half" is a number rather than a feeling:
-snapshot recovery and graceful restart in `oq-live` (present in its
-comments, absent from its functions), the connector conformance suite, a
-second execution venue, observability of any kind, the live/backtest
-attribution, `oq-sim`, and the cutover playbook.
+When this was first recorded M3 was half built, and the unbuilt half was
+listed so that "half" was a number rather than a feeling: snapshot
+recovery and graceful restart in `oq-live`, the connector conformance
+suite, a second execution venue, observability of any kind, the
+live/backtest attribution, `oq-sim`, and the cutover playbook. Every one
+of those has since landed, and the M3 table below says how far — graceful
+restart is partial, and the cutover playbook is written but has never
+been rehearsed. What is left of M3 is its entry triggers, its exit gate,
+and G6's far boundary, below.
 
 **G6 is partly measured, and what is missing is the end of the interval
 rather than the beginning.** It asks for p99 latency from journal write
@@ -165,7 +169,7 @@ input this project cannot reach, the second has not been written.
 | Research | Sweeps emit DSR/PBO by default | Built |
 | Research | **Strict mode refusing over-threshold results** | Built — `SweepReport::refusals` names every reason, checks them independently so two failures report as two, and refuses an unscored sweep rather than waving it through. Three reasons now: PBO, deflated Sharpe, and an out-of-sample-on-in-sample Sharpe slope at or below zero |
 | Fidelity | Fidelity report and participation-rate flag | Built |
-| Adoption | Quickstart, seven example strategies, goldens | Built |
+| Adoption | Quickstart, eleven examples in `oq-examples`, goldens | Built |
 | Adoption | **Classic-strategy catalogue** (RSI, MACD, Bollinger, Donchian, grid, dual-thrust) | Built — teaching references, each one documenting where it breaks rather than claiming an edge |
 | Gate | **G3 throughput ≥8× the interpreted baseline** | **Measured, not met — 7.13× against a target of 8×.** No longer blocked: run on one machine, over 608 days of BTCUSDT trades (2024-09-01 to 2026-04-30, 149,546,989 observations), with both engines given the identical observation count and the same rule — vnpy's `DoubleMaStrategy`, whose two copies were checked byte-identical rather than assumed so. The predecessor took 647.4 s; this engine took 128.4 s per tick (5.04×) and 90.8 s at its best batch (7.13×). Take the predecessor's data-decode phase out of its time and the comparison is 5.67×, which is the fairer number for *engine* throughput and the lower one. Three things the figure hides are recorded with it: the baseline is Cython-compiled rather than interpreted, so the bar is higher than the goal's wording suggests; batching stops helping after 512, and splitting that run three ways says why — 36.7% is the engine plus building one Python object per observation, 5.7% is reading one attribute, and **57.6% is the strategy's own arithmetic in Python**, which both sides pay alike. So the ceiling on anything done at the language boundary is about a third, and 7.13× is a fact about this engine *and this rule* rather than about the engine: a rule that computes less would pass the gate with nothing changed, which is why G3 now names the load it is measured on; and the batch that produced 7.13× also dropped fills from 6,045,548 to 292,083, so the speed is quoted against a strategy that has stopped trading |
 | Gate | **G7 re-passing parity after conversion** | **Half met, half answered in the negative.** The mode half is met and tested. The parity half no longer shares G3's blocker, and running it produced a result rather than a pass: a batch large enough to reach G3's throughput does not preserve the fill sequence, because orders from a batch are submitted at its end. `compare_modes` reports the divergence rather than asserting there is none, which is the right shape for it — but it means the goal as written asks for two things that trade against each other, and the trade should be stated in the goal instead of discovered by running it |
@@ -178,7 +182,7 @@ input this project cannot reach, the second has not been written.
 | Gateway | Reference perpetuals adapter (market data, orders, user stream) | Built; the whole loop has run against a testnet |
 | Gateway | Reconciliation as a first-class object (lost, duplicate, out-of-order) | Built |
 | Gateway | A second venue (OKX) | Built; **public half verified against the real venue, signed half unverified** |
-| Gateway | **Conformance suite for execution adapters** | Built — both shipped adapters driven through it, and three deliberately-wrong adapters caught by it |
+| Gateway | **Conformance suite for execution adapters** | Built — six adapters driven through it (Aster shares Binance's), and three deliberately-wrong adapters caught by it |
 | Gateway | **Broker/referral prefix scheme** | Built — `broker::IdScheme` composes ids carrying a venue-issued code, kept separate from the ownership prefix because they answer different questions |
 | Risk | RiskGate: pre-trade checks, kill switch, startup reconciliation | Built |
 | Risk | **Limit changes journalled as auditable events** | Built — `VersionedLimits` records which field moved and from what; a no-op does not advance the version |
@@ -187,12 +191,15 @@ input this project cannot reach, the second has not been written.
 | Live | **A strategy learns whether the venue took its order** | Built — `Strategy::on_placed`, called from the backtest loop *and* the live trader, so a strategy written against one runs on the other |
 | Live | **A runnable strategy against a venue** | Built — `oq-live`'s `grid_live` example; `observe` sends nothing and `probe` is a diagnostic, so before it the repository had no way to run a strategy on a venue at all |
 | Live | **One process per account, enforced** | Built — an interlock on `(deployment, symbol, id_prefix)`, claimed before startup reconciliation. Host-local, and says so: two hosts against one account is what the `foreign_orders` metric is for |
+| Live | **A local control port** | Built — a Unix socket in the process's runtime directory, never in `/tmp`, answering `status`, `orders`, `metrics`, `attribution`, `halt`, `shutdown` and `resume`. Peers are checked by the uid the kernel reports, and every state-changing command is journalled with its reason and origin (`Record::Operator`) |
 | Live | Graceful restart | Partial — signal handling, resting orders cancelled, recovery on the way back up; restarting the process is deployment and stays out |
 | Attribution | **Gap decomposed by cause, with an unexplained residual** | Built |
 | Attribution | Shadow → evidence → report, end to end | Built |
+| Attribution | **Run files beside the journal** | Built — `<stem>.live.run` and `<stem>.model.run` (the venue's fills and the shadow's, under one identity) and `<stem>.oqtk` (the observations), rewritten every fifteen minutes and at exit, so `oq-parity` and `oq-parity markout` read a live run as they read a backtest |
 | Observability | Latency histograms | Built |
 | Observability | **Structured metrics, alert hooks** | Built — a snapshot rendered in the line-oriented form collectors read, and alerts as *judgements* rather than notifications: nothing here sends |
 | Simulation | Gateway fuzzing (disconnects, reordering, duplication, partial fills) | Built |
+| Simulation | **The whole live process against a simulated venue** | Built — the live loop reads time through an injected clock, and `oq_live::sim` supplies a seeded venue, market and account stream, including hedged accounts and a venue that misbehaves on purpose; `tests/dst.rs` runs the production `run_on` against it, so a seed names one run exactly |
 | Cutover | Position-carrying playbook | **Written, never rehearsed**; its §6 lists what is missing before one can be |
 | Cutover | Account record/compare tooling (a rehearsal precondition) | Built — both halves: `oq-recon` compares the **venue** against a record, `oq-belief` compares the **new process's own journal** against the same one |
 | Entry trigger | 1. Core released ≥ 6 months, no open P0/P1 | **Not met** |
@@ -212,7 +219,7 @@ input this project cannot reach, the second has not been written.
 | L1 | **Latency as distributions rather than constants** | Built — `Delay::Measured` takes p50/p90/p99/p999, which is what a latency measurement produces; nearest-rank and never interpolated, drawn deterministically from the order id so a replay from a snapshot fills the same way |
 | L1 | **Feed latency** | Deliberately not in the engine — it belongs to the event producer |
 | L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
-| L2 | Book reconstruction, snapshot reconciliation, gap handling | Reconstruction is built and now **measured on a real archive**: 133,910 depth updates, 0 sequence errors, 0 gaps, 0 crossed books, 10,286 levels deep — `RECONSTRUCTS CLEANLY`. **Both sides are now measured from it.** `L2Engine` reads the displayed size at the level an order joins, replacing L1's assumed `QueueAhead`, and walks the levels for taker fills, replacing L1's square-root penalty. Each measurement displaces the policy rather than compounding with it, a fill the book cannot reach keeps the policy, and `swept` / `unswept` report which priced a run. Several takers in one observation deplete one working copy of the depth, so size is not free for the second. Where book and tick disagree the worse price wins, which keeps the ladder monotone. No MBP feed can tell a cancellation ahead of you from one behind, so the queue depletes on trades only and is conservative by construction. **A backtest can now reach it**: `RunConfig::at_tier` selects the tier and `run_observations` takes ticks and depth on one stream, with `book_tiers` as the comparison — an L2 given no depth reproduces L0 exactly, an L1 told to assume 64 lots agrees to the fill with an L2 shown 64, and between 16 ahead and 64 most of a maker strategy stops existing. Two gaps remain: converting an archive into that stream is the caller's loop rather than a command, and depth does not go through `Event`, so an L2 run's journal replays its orders but not the book they matched against |
+| L2 | Book reconstruction, snapshot reconciliation, gap handling | Reconstruction is built and now **measured on a real archive**: 133,910 depth updates, 0 sequence errors, 0 gaps, 0 crossed books, 10,286 levels deep — `RECONSTRUCTS CLEANLY`. **Both sides are now measured from it.** `L2Engine` reads the displayed size at the level an order joins, replacing L1's assumed `QueueAhead`, and walks the levels for taker fills, replacing L1's square-root penalty. Each measurement displaces the policy rather than compounding with it, a fill the book cannot reach keeps the policy, and `swept` / `unswept` report which priced a run. Several takers in one observation deplete one working copy of the depth, so size is not free for the second. Where book and tick disagree the worse price wins, which keeps the ladder monotone. No MBP feed can tell a cancellation ahead of you from one behind, so the queue depletes on trades only and is conservative by construction. **A backtest can now reach it**: `RunConfig::at_tier` selects the tier and `run_observations` takes ticks and depth on one stream, with `book_tiers` as the comparison — an L2 given no depth reproduces L0 exactly, an L1 told to assume 64 lots agrees to the fill with an L2 shown 64, and between 16 ahead and 64 most of a maker strategy stops existing. The two gaps this row used to name — converting an archive into that stream, and depth in the journal — are both closed; see the next two L2 rows |
 | Validation | Stylized-facts test set | Built for the generated markets **and now measured on a real one**. `oq-data` reports the four facts for any tick file, so the comparison is a command rather than a study: four days of captured BTCUSDT (5,759 one-minute returns from 15.9M trades) hold three of four per day at excess kurtosis 8–11, against the fixtures' 0.03 / 0.07 / −0.05. The finding that matters is how little it takes to move that — pooled, kurtosis is 951 and ρ(1) fails; drop **two** of the 5,759 returns (one 4.1% minute on 251× median volume, and its rebound) and it is 24.6 with ρ(1) holding. A short sample's verdict is its largest event's verdict, which is why this stays a measurement and not a gate. **Order-flow autocorrelation is built**, and the order flow turned out to be in the archive already — the venue publishes which side crossed, and no adapter had read it. `oq-trade-check` reports it, `conformance` requires every adapter to parse it, and the measurement forced a distinction: over raw **trades** the lag-1 coefficient on an hour of BTCUSDT is 0.83 with a longest same-side run of 3,335 — which spans 14 milliseconds and is one order crossing three thousand resting ones, not three thousand decisions. Collapsed to **orders** (`as_orders`), 179,547 trades become 39,019 and lag-1 is **0.19**, decaying slowly and matching the published figure. Both are reported: the raw series is what a queue faces, the collapsed one is what the literature means |
 | L2 | **An archive converted into a run's input** | Built — `fold_into_observations` interleaves ticks and depth in the order the venue produced them, and `oq-tiers` is the command: one strategy, one archive, two tiers. Over ten hours spread across four days of captured BTCUSDT — 1.3M depth updates, **none refused** — a bid resting at the touch filled 13,972 times at L0 and 3,140 at L2. **77.5% of the backtest's fills are trades the queue never reached**, and no hour kept more than 44.6% or fewer than 12.5%. The book is bootstrapped from the first update rather than a REST snapshot, which the archive does not hold, so early queues read shorter than they were |
 | L2 | **Depth in the journal** | Built — `Event::Depth` is kind 9 and the first variable-length payload in the schema, carrying its own level counts so decode can refuse a body that disagrees with them. A test replays an L2 run and compares outputs and state against the live run, and fails if the depth is dropped. `Event` loses `Copy`, which a list of levels cannot be. The cost is journal size: a captured hour of one instrument is over a hundred thousand updates, so a run that does not read depth should not be handed any |
@@ -368,9 +375,9 @@ depends on the invariants established here.
 - **G3** throughput and **G4** sweep targets met. G4 is met and checked in
   CI by `cargo run --release -p oq-examples --example sweep_100`: 100
   configurations over 600,000 ticks each, with DSR and PBO, in 2.65 s of a
-  1,800 s budget on a development machine. G3 still needs the throughput mode
-  it is defined against, and a same-machine run of the predecessor to compare
-  with.
+  1,800 s budget on a development machine. G3 has been measured on one
+  machine against the predecessor, and is **not met** — 7.13× against a
+  target of 8×; see below.
 - **G5** margin fidelity verified; tail-divergence methodology published.
   **Met.** [MARGIN-FIDELITY.md](MARGIN-FIDELITY.md), with the instrument in
   `oq_backtest::fidelity` and the study in `examples/margin_fidelity`.
@@ -380,15 +387,16 @@ depends on the invariants established here.
   compatibility mode, converting it to throughput mode is a change to one
   method, and `compare_modes` asserts `batch=1` produces an identical run
   rather than the documentation asserting it. Re-passing *parity* means
-  against a predecessor baseline, which is the same blocker as G3.
+  against a predecessor baseline; that run has happened and came back with
+  an answer in the negative, below.
 - ~~**G11** initial verification~~ — **withdrawn**, not deferred. A
   stopwatch on a first backtest measures the wrong thing: a tool worth
   using is worth more than thirty minutes, and one that is not is not
   worth one. It also measured it with an instrument that cannot work —
   a single reader's trial is n=1 and varies more by who and what machine
   than by anything here. What the goal was reaching for is real and is
-  kept as ordinary work: the quickstart, the five examples and the
-  goldens all exist, and a documented command that does not run is a bug
+  kept as ordinary work: the quickstart, the examples and the goldens
+  all exist, and a documented command that does not run is a bug
   to fix when found, not a gate to fail.
 - **Beta release** with documented, if still unstable, APIs.
 
@@ -494,9 +502,10 @@ not in the matching kernel.
   submit and the venue's fill, replayed by a build whose mode was not set,
   would rest the order and match it too.
 
-  What remains is assembly — `oq-live` does not yet drive itself from a kernel
-  in `Venue` mode, it observes one beside itself. The kernel is ready for it;
-  the process is not.
+  That assembly is done. `oq-live`'s own books (`books.rs`) are a kernel in
+  `Venue` mode, so the process keeps its account with the backtest's
+  accounting, and the shadow beside them is a kernel in `Simulated` mode;
+  every run ends by handing both to `oq_parity::attribution`.
 - `oq-sim` at full strength: the entire scenario catalogue plus gateway fuzzing
   (disconnects, reordering, duplication, partial fills). **The gateway half
   exists** — `oq-live`'s `gateway_fuzz` drives the live books through every
@@ -558,12 +567,13 @@ not in the matching kernel.
   remains is the calibration this milestone is actually about: the model takes
   a `Policy` of assumptions, because the tick format carries neither book depth
   nor this deployment's real latency, and turning those assumptions into
-  measurements needs the recorded fills the entry trigger asks for. Three
-  further pieces are not built: a probabilistic queue model (the shipped one is
-  the conservative one, which is the stated order), latency as *distributions*
-  rather than constants, and **feed** latency — which is a property of the event
-  producer rather than the matcher, so it belongs to the host loop and putting
-  it in the engine as well would delay the same event twice.
+  measurements needs the recorded fills the entry trigger asks for. Latency as
+  *distributions* rather than constants is built — `Delay::Measured` takes
+  four quantiles. Two further pieces are not built: a probabilistic queue model
+  (the shipped one is the conservative one, which is the stated order), and
+  **feed** latency — which is a property of the event producer rather than the
+  matcher, so it belongs to the host loop and putting it in the engine as well
+  would delay the same event twice.
 - **L2**: order book reconstruction from incremental depth, matching against
   the reconstructed book, snapshot reconciliation and gap handling. Built:
   reconstruction, the measured queue, and the taker's walk up the levels.
@@ -644,20 +654,21 @@ confirmation recorded in the pull request.
 | Capture infrastructure undersized (volume, gaps, cost) | Medium-high | Dedicated capture host with local storage and batch archival; a 7-day trial run measures volume, gap rate, and cost before committing |
 | Insufficient calibration data for L1 | Medium | Capture starts at M0; until enough data exists, only the conservative queue model is enabled |
 | Type system splitting into Rust and Python dialects | Medium | Single type system rule; bindings expose the same types, never a parallel model. The sharper form of this risk is that whatever the bindings expose first becomes the API and freezes hardest, which argues for a small first surface rather than none — see D16 |
-| The Rust core becomes an implementation detail of a Python library | Medium | The engine must stay buildable and testable with no interpreter present. Enforced rather than intended: per-crate dependency budgets keep twelve crates at zero, and the composability check builds each crate on its own |
+| The Rust core becomes an implementation detail of a Python library | Medium | The engine must stay buildable and testable with no interpreter present. Enforced rather than intended: per-crate dependency budgets keep eighteen crates at zero, and the composability check builds each crate on its own |
 | Scope inflation | High | Committed scope ends at M2; everything later is trigger-gated |
 | Proprietary content leaking into the public repository | High | Fresh history; secret and pattern scanning in CI; proprietary material only in private overlays; pre-release manual audit |
 | Bus factor of one | Medium-high | Agent-friendly codebase (per-crate `AGENTS.md`, layered verification anchors); behavior encoded in deterministic tests; all design rationale written down rather than remembered |
 | Building the framework becomes the goal instead of using it | High | Every milestone states the capability it unlocks; the question "what got measurably better because of this?" is asked at each gate |
-| The execution seam has one implementation and no second | Medium | Was: no seam at all. `Execution` now exists and `oq-gateway` implements it for two venues, so the layers above no longer name one. Both sides now have a conformance suite their adapters pass — driven by payloads each adapter supplies, so each tests the contract rather than one venue's bytes; the market data one caught a wrongly stated convention on its first run, and the order-side one exists because Binance answers a refusal with an HTTP status while OKX answers one inside a 200, which silently mislabels every refusal for a classifier written around the first. What remains is narrower than the seam: OKX's signed half needs credentials and a live account to exercise, and until it is, the second implementation is verified on its unsigned half only |
-| ~~The instrument model is split in two, and neither half is in the core~~ | Partly closed | **The identity and precision half is done.** `oq_types::Instrument` is in the core and carries price and quantity scales, contract size, the price and quantity grids, and the venue's minimum notional; `oq_margin::Contract::of` derives the economics from it rather than restating them, so a hand-written `tick_cash` cannot drift from a definition after a relisting changes a precision. `oq-l2feed` no longer has a second one. **The currency half is now half-closed.** `Currency` is a ticker, `Balances` is what an account holds by currency, and `State` keeps one — so a book *settling* in more than one currency is expressible: a payout in something the account does not settle in is held and reported rather than converted at an implied rate of 1 or dropped. What is still open is *totalling* across currencies, which needs a rate source and the instant a rate was true at; until then an account can hold several currencies and equity is computed only in the one it settles in. `Cash` itself is unchanged and deliberately so — the currency belongs to the slot, as an instrument belongs to a book rather than to each price |
-| `Strategy` is defined in the backtest host | Medium-high | Live execution would either depend on `oq-backtest` or need a second strategy trait, and G7 — the same strategy unchanged in both modes — cannot hold either way. Move the trait below both hosts before external code implements it |
+| The execution seam has one implementation and no second | Medium | Was: no seam at all. `Execution` now exists and `oq-gateway` implements it for eight venues, so the layers above no longer name one. Both sides now have a conformance suite their adapters pass — driven by payloads each adapter supplies, so each tests the contract rather than one venue's bytes; the market data one caught a wrongly stated convention on its first run, and the order-side one exists because Binance answers a refusal with an HTTP status while OKX answers one inside a 200, which silently mislabels every refusal for a classifier written around the first. What remains is narrower than the seam: OKX's signed half needs credentials and a live account to exercise, and until it is, the second implementation is verified on its unsigned half only |
+| ~~The instrument model is split in two, and neither half is in the core~~ | Partly closed | **The identity and precision half is done.** `oq_types::Instrument` is in the core and carries price and quantity scales, contract size, the price and quantity grids, and the venue's minimum notional; `oq_margin::Contract::of` derives the economics from it rather than restating them, so a hand-written `tick_cash` cannot drift from a definition after a relisting changes a precision. `oq-l2feed` no longer has a second one. **The currency half is now half-closed.** `Currency` is a ticker, `Balances` is what an account holds by currency, and `State` keeps one — so a book *settling* in more than one currency is expressible: a payout in something the account does not settle in is held and reported rather than converted at an implied rate of 1 or dropped. *Totalling* across currencies is now built too: `State::equity_across` takes a table of rates with the instant they were read, triangulates nothing, and answers `None` rather than a partial sum when a rate is missing; `equity` still answers in the settlement currency, because that is what a venue liquidates against. `Cash` itself is unchanged and deliberately so — the currency belongs to the slot, as an instrument belongs to a book rather than to each price |
+| ~~`Strategy` is defined in the backtest host~~ | Closed | Live execution would either have depended on `oq-backtest` or needed a second strategy trait, and G7 — the same strategy unchanged in both modes — could not hold either way. The trait now lives in `oq-strategy`, below both hosts, and `oq-backtest` and `oq-live` both depend on it |
 | ~~L0 is the frozen regression anchor and has no matching seam~~ | Closed | Resolved for L1 without the refactor this entry proposed. `L1Engine` **owns** an `L0Engine` and never modifies it — orders are held outside it until they are entitled to be in it, and its fills are adjusted after it produces them. So L0 needed no seam, no trait and no change at all, and a test asserts a transparent L1 policy reproduces L0's fills exactly. L2 may still need the seam; L1 established that wrapping is enough to try first |
 
 
-The last four entries are not hypotheses. They are present-tense structural
-gaps found by reading the code against this plan, and they share a shape: each
-is cheap to fix now and grows more expensive with every crate, binding or
+The last four entries were not hypotheses. They were present-tense structural
+gaps found by reading the code against this plan — two are closed since and
+two narrowed to what their rows say — and they share a shape: each is cheap
+to fix now and grows more expensive with every crate, binding or
 external implementation that depends on the current arrangement. They are
 recorded here rather than in an issue because a risk register is where the
 project already asks "what will this cost us later".

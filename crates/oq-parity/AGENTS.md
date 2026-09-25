@@ -33,10 +33,11 @@ cargo clippy -p oq-parity --all-targets -- -D warnings
 
 ## Notes
 
-- SHA-256 is implemented in this crate rather than taken as a dependency:
-  a verification tool that cannot be built from the workspace alone is a
-  weak link. It is checked against the standard test vectors, and the
-  streaming path is checked against the one-shot path at many chunk
-  sizes — the buffering seam is where such implementations break.
+- SHA-256 comes from `oq-hash`, in this workspace, rather than from a
+  third-party dependency: a verification tool that cannot be built from
+  the workspace alone is a weak link. There it is checked against the
+  standard test vectors, and the streaming path against the one-shot
+  path at many chunk sizes — the buffering seam is where such
+  implementations break.
 - The aligner resynchronizes within a 32-fill window. Beyond that the
   runs are treated as structurally different rather than shifted.

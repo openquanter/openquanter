@@ -295,8 +295,11 @@ fn an_adapter_that_cannot_say_no_such_order_is_caught() {
     );
 }
 
-/// Both adapters, reported together — the form this suite is actually
-/// used in: adding a venue means adding a row here.
+/// Every adapter the suite can drive, reported together — the form this
+/// suite is actually used in: adding a venue means adding a row here.
+/// Hyperliquid is not among them: it finds an order by the venue's id or
+/// its own through the info endpoint, and has no `order_from_query` for
+/// the suite's query cases to call.
 #[test]
 fn every_shipped_adapter_is_listed() {
     let reports = [
@@ -316,10 +319,46 @@ fn every_shipped_adapter_is_listed() {
                 oq_gateway::okx::order_from_query,
             ),
         ),
+        (
+            "kraken-futures",
+            check(
+                &kraken(),
+                oq_gateway::kraken::classify,
+                oq_gateway::kraken::order_from_query,
+            ),
+        ),
+        (
+            "bitget",
+            check(
+                &bitget(),
+                oq_gateway::bitget::classify,
+                oq_gateway::bitget::order_from_query,
+            ),
+        ),
+        (
+            "backpack",
+            check(
+                &backpack(),
+                oq_gateway::backpack::classify,
+                oq_gateway::backpack::order_from_query,
+            ),
+        ),
+        (
+            "deribit",
+            check(
+                &deribit(),
+                oq_gateway::deribit::classify,
+                oq_gateway::deribit::order_from_query,
+            ),
+        ),
     ];
     for (venue, r) in &reports {
         println!("  {}", r.summary_line(venue));
     }
-    assert_eq!(reports.len(), 2, "two venues ship; both must be driven");
+    assert_eq!(
+        reports.len(),
+        6,
+        "six adapters answer the suite's queries; every one must be driven"
+    );
     assert!(reports.iter().all(|(_, r)| r.conforms()));
 }

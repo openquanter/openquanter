@@ -21,9 +21,10 @@
 //! it cannot ask about one order and send another.
 //!
 //! Making the asking itself mandatory needs a process host that hands
-//! out nothing else, which is `oq-live`'s job and does not exist yet.
-//! The permit is shaped for it now because retrofitting it after
-//! external code holds the alternative is the expensive order.
+//! out nothing else, which is `oq-live`'s job: its order path takes a
+//! permit, never a bare order. The permit was shaped for that before the
+//! host existed, because retrofitting it after external code held the
+//! alternative would have been the expensive order.
 //!
 //! # Refusals say what, not why-not
 //!

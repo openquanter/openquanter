@@ -25,8 +25,7 @@
 //! launches, and the budget check pins that at zero. What it adds is a
 //! list, a lookup, and an error message that names what is missing.
 
-/// Three commands the plan asked for that are deliberately absent, and
-/// why. Kept in the source rather than only in the roadmap, because this
+/// Commands the plan asked for that are deliberately absent, and why. Kept in the source rather than only in the roadmap, because this
 /// is where someone looks after typing `oq backtest` and getting nothing.
 ///
 /// - **`backtest` and `sweep`.** A strategy is compiled Rust. Running an
@@ -35,10 +34,6 @@
 ///   would be `cargo run --example hello` with fewer options — which the
 ///   quickstart already says. The subcommands would be a worse spelling
 ///   of something that works.
-/// - **`parity`.** Comparing two runs needs both runs in a file, and a
-///   run's output has no serialised format yet. Inventing one here would
-///   fix the format at the command line rather than where the
-///   attribution work will need it.
 pub const ABSENT: &[(&str, &str)] = &[
     (
         "backtest",

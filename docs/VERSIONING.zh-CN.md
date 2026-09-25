@@ -18,7 +18,7 @@
 
 这些 crate 是**同一列发布火车**。它们是可分离的——单独使用其中一个是被支持且被
 测试的性质（G0）——但它们一起开发、一起测试、一起发布，读者对比两个检出时不该
-需要去调和十二个数字。
+需要去调和二十三个数字。
 
 ## 为什么是 2，而公开的东西从来没有过 1
 
@@ -58,6 +58,8 @@ OpenQuanter 1.x 是一个闭源交易平台，实盘运行了数年。它从未�
 | 采集文件格式 | manifest 里的 `format_version`，当前为 2（读者仍接受 1） | [采集格式规范](CAPTURE-FORMAT.zh-CN.md) |
 | Tick 文件格式 | 文件头里的 `version`，当前为 2 | [Tick 格式规范](TICK-FORMAT.zh-CN.md) |
 | Journal 帧格式 | 帧头里的 `VERSION` | `oq-journal` |
+| run 文件格式 | 第一行的 `openquanter-run N`，当前为 1 | [run 文件格式](RUN-FORMAT.zh-CN.md) |
+| 扫描文件格式 | 第一行的 `openquanter-sweep N`，当前为 1 | [扫描文件格式](SWEEP-FORMAT.zh-CN.md) |
 
 **数据格式比写它的代码活得久。** 把格式版本绑到 crate 版本上，要么每次发布都要升
 格式版本——那这个数字就没有意义了；要么让它落在后面——那它就是个谎。它们是两个

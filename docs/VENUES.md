@@ -132,7 +132,7 @@ orders, so it is not an idempotency token — and all three surveyed
 projects treated it as one. Kraken's is unique across the account's
 history, up to 100 characters, and a repeat is refused by name
 (`clientOrderIdAlreadyExist`). That makes a resend after an
-[`Placed::Unknown`] answerable by the venue rather than by inference,
+`Placed::Unknown` answerable by the venue rather than by inference,
 which is the single hardest case in the order path. The adapter should
 use it; nothing else here can.
 
@@ -216,9 +216,9 @@ That policy is affordable for SHA-256 and HMAC, which are deterministic
 bit operations with published test vectors — `oq-hash` passes RFC 4231.
 It is not affordable for the asymmetric schemes:
 
-- **Kraken** needs **SHA-512**, which `oq-hash` does not have. This one
+- **Kraken** needs **SHA-512**, which `oq-hash` did not have. This one
   *is* affordable: it is the same shape of work as SHA-256, with the
-  same kind of vectors to check against.
+  same kind of vectors to check against — and it has since been added.
 - **Backpack** needs **Ed25519**. **Hyperliquid** needs **secp256k1
   ECDSA plus Keccak-256** for EIP-712. **Lighter** needs its own
   scheme, over a curve, with a per-API-key nonce.
@@ -306,7 +306,8 @@ or Coinbase leaves the list. Recorded rather than silently dropped.
 
 ### V4 — A venue reader returns a list, not an option
 
-`Events::read` currently answers `Option<UserEvent>`. OKX's `orders`
+`Events::read` answered `Option<UserEvent>` when this was written; it now
+returns `Vec<UserEvent>`. OKX's `orders`
 channel and Hyperliquid's `statuses` both carry several. The signature
 becomes a list, and `UserStreamReader` holds the surplus in a queue that
 `next` drains before reading the socket again. This is not a
@@ -373,7 +374,7 @@ a decision rather than a confidence level — see the section above.
 
 ## Where this got to
 
-Six venues were on the list. Five have adapters, one was declined, and
+Seven venues were on the list. Five have adapters, one was declined, and
 two were redirected before a line was written for them.
 
 | Venue | Order path | Account reads | Signing |
@@ -424,7 +425,8 @@ shape of the problem:
   shape. `IdRules`' two flags cannot express four, and adding one
   boolean per venue is not the fix — **that type needs rethinking**,
   and this is the note saying so rather than the commit that accretes
-  another flag.
+  another flag. It has since been rethought: `IdRules` is now an enum of
+  shapes — `Text`, `Number`, `Hex` — rather than a struct of flags.
 
 **What is verified rather than written.** Hyperliquid's signing, against
 the venue's own published vectors — a known key, a known action, a known

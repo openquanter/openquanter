@@ -4,8 +4,9 @@ Guidance for AI coding agents (and humans) working in this repository.
 
 ## Project shape
 
-- Cargo workspace; crates live under `crates/`. Each crate has its own
-  `AGENTS.md` with local commands and invariants (nearest file wins).
+- Cargo workspace; crates live under `crates/`. Most crates have their
+  own `AGENTS.md` with local commands and invariants; nearest file wins,
+  and a crate without one is covered by this file.
 - Language: Rust stable. Code comments in English.
 - The event core must stay deterministic: no wall-clock reads, no RNG,
   no I/O, no thread spawning inside `apply()`-style state machines.

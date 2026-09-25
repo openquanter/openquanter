@@ -1,7 +1,9 @@
 # oq-engine
 
-Matching. Fidelity tier L0 (tick replay) is implemented; L1 (queue
-position, latency, impact) and L2 (order book) are the rungs above it.
+Matching. All three fidelity tiers are implemented: L0 (tick replay,
+the frozen anchor), L1 (queue position, latency, impact) wrapping it,
+and L2 (queue and taker cost read from a reconstructed book) wrapping
+L1.
 
 ## Commands
 
