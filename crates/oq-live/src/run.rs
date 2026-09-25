@@ -2565,6 +2565,9 @@ pub fn smallest_allowed(instrument: &Instrument, price: PriceTicks) -> QtyLots {
 /// about what a fill looks like.
 const NOT_A_FILL: &str = "no traded quantity";
 
+/// A side that is neither buy nor sell, which upstream reads as absent.
+const UNKNOWN_SIDE: &str = "the fill's side is neither buy nor sell";
+
 fn fill_of(
     u: &oq_gateway::OrderUpdate,
     instrument: &Instrument,
@@ -2623,10 +2626,15 @@ fn fill_of(
         // The deduplication key. Without it the fill cannot be
         // booked at all, which `Books` enforces rather than trusting.
         trade: oq_types::TradeId(u.trade_id.unwrap_or(0).unsigned_abs()),
-        side: if u.side.eq_ignore_ascii_case("BUY") {
-            Side::Buy
-        } else {
-            Side::Sell
+        // Anything that is not one of the two sides is refused. Read as
+        // a sell it opens a short on an account that is flat, and the
+        // reconcile that catches it catches it after the fact — the
+        // position is wrong until then. The venue's own field is
+        // optional upstream, so an absent one arrives here as empty.
+        side: match u.side.to_ascii_uppercase().as_str() {
+            "BUY" => Side::Buy,
+            "SELL" => Side::Sell,
+            _ => return Err(UNKNOWN_SIDE),
         },
         // Which leg the fill belongs to decides whether it opened or
         // closed. A sell on the long leg reduces it; the same sell on
