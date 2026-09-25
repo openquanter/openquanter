@@ -32,3 +32,6 @@ Listing.inst_id                  # OKX's own instrument id, carried so a caller 
 PboReport.logits                 # the per-split distribution; its doc says it is more informative than the headline, and that is a consumer's call
 MacdValue.histogram              # the third MACD line; a strategy reads it, the catalogue's MACD happens not to
 Drift.worst_bin                  # which bin the index came from; the headline says how much drifted, this says where
+Pbo.splits                       # read by the console's sweeps page (quanterdeck), which shows how many splits the PBO rests on
+Pbo.degradation                  # read by the console's sweeps page; the slope the no-information refusal is judged on
+SweepFile.thresholds             # read by the console's sweeps page, which shows the limits beside the statistics they judge
