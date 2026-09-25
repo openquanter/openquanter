@@ -3859,13 +3859,28 @@ fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
     #[allow(clippy::cast_precision_loss)]
     let money = |c: Cash| format!("{}", c.0 as f64 / oq_types::CASH_SCALE as f64);
     let (realized, fees, funding) = v.books.realized_parts();
+    // With no fee schedule these books charge nothing, and `fees` is zero
+    // because nothing was ever added to it. Reporting that as a figure
+    // the run measured is the one thing this console must not do: the
+    // venue's fee is known to the same process from its own fills, so a
+    // zero here is not "unknown" but "wrong". Until the venue's own
+    // commission is booked, the fee and everything net of it are given
+    // as unavailable.
+    let fees = v.books.fees_configured().then_some(fees);
     j.field("pnl")
         .begin_object()
         .int("since_ms", v.started_ms)
-        .str("realized", &money(realized))
-        .str("fees", &money(fees))
-        .str("funding", &money(funding))
-        .str("net", &money(v.books.realized_net()))
+        .str("realized", &money(realized));
+    match fees {
+        Some(fees) => {
+            j.str("fees", &money(fees))
+                .str("net", &money(v.books.realized_net()));
+        }
+        None => {
+            j.null("fees").null("net");
+        }
+    }
+    j.str("funding", &money(funding))
         .str("equity", &money(v.books.equity()))
         .end_object();
     let limits = session.gate().limits();

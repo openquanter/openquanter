@@ -332,6 +332,15 @@ impl Books {
         });
     }
 
+    /// Whether these books were told what the venue charges.
+    ///
+    /// The live path is not: its fees are zero because nothing was ever
+    /// added to them, not because the venue charged nothing.
+    #[must_use]
+    pub const fn fees_configured(&self) -> bool {
+        self.kernel.state().fees_configured
+    }
+
     /// Realized P&L, fees and funding since this run started, apart.
     #[must_use]
     pub fn realized_parts(&self) -> (Cash, Cash, Cash) {

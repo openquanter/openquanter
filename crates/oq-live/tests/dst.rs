@@ -904,8 +904,11 @@ fn a_run_leaves_run_files_a_tick_file_and_answers_for_its_attribution() {
     for field in [
         r#""pnl":{"since_ms":"#,
         r#""realized":""#,
-        r#""fees":""#,
-        r#""net":""#,
+        // `fees` and `net` are null here on purpose: this run's books
+        // were never told what the venue charges, so a zero would be a
+        // measurement the run did not make. See `fees_configured`.
+        r#""fees":null,"#,
+        r#""net":null,"#,
         r#""equity":""#,
         r#""limits":{"max_order_qty":"#,
         r#""max_working":"#,
