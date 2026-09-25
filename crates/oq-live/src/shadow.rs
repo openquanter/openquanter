@@ -273,6 +273,26 @@ impl Shadow {
         });
     }
 
+    /// Withdraw every model order the process no longer has resting.
+    ///
+    /// The model must not keep an order the venue no longer holds: left
+    /// resting, it fills later and reports a fill nobody could have made.
+    pub fn withdraw_absent(&mut self, live: impl Fn(OrderId) -> bool, at: Nanos) {
+        let gone: Vec<OrderId> = self
+            .kernel
+            .working()
+            .iter()
+            .copied()
+            .filter(|id| !live(*id))
+            .collect();
+        for id in gone {
+            self.apply(&Event::Cancel {
+                id,
+                stamp: oq_types::Stamp::new(at.0, at.0),
+            });
+        }
+    }
+
     /// Tell the shadow what the venue actually did.
     pub fn on_venue_fill(
         &mut self,
