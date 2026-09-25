@@ -82,6 +82,12 @@
   不受影响——它从不把 2xx 交给这个函数。
 - **`RunResult::margin_usage` 是新增字段**;`RunConfig::track_margin` 默认关闭,既有
   运行既不改变也不为它付出代价。
+- **新增 `Record::Operator`(实盘 journal kind 10)和本机控制口。** *只新增记录类型,不改已有记录。*
+  在 systemd 下带运行目录启动的进程,会在那里监听一个 Unix socket,接受 `status`、`orders`、
+  `metrics`、`halt`、`shutdown`、`resume`,命令在主循环里像其他事件一样处理。对端按内核报告的
+  uid 放行;没有运行目录就不开控制口,绝不退回 `/tmp`。每个改变状态的命令都连同原因、已认证的
+  来源和结果写进 journal。`resume` 默认关闭,需以 `--control-allow-resume` 启动,且在最近一次
+  持仓核对不一致或 journal 无法记录时拒绝。操作者要求的干净退出以 98 退出,供 supervisor 不再拉起。
 - **新增 `Record::Cancelled`(实盘 journal kind 9),`Belief::from_journal` 会把它
   减掉。** *改变重建出来的结论,不改变运行本身。* 实盘 journal 记下了提交、结果和成交,
   唯独交易所撤单时什么都不记。于是一笔「已接受、未成交、没有结局」的挂单,重建时只能被

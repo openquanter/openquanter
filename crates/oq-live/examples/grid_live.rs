@@ -86,6 +86,7 @@ fn main() -> ExitCode {
             max_rate: 10,
             rate_window: Nanos(60 * 1_000_000_000),
         },
+        control_allow_resume: false,
     };
 
     // Testnet, and not by a flag: see the refusal above.

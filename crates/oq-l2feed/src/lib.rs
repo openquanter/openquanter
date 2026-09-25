@@ -23,6 +23,8 @@ pub mod day;
 pub mod disk;
 pub mod frame;
 pub mod manifest;
+#[cfg(unix)]
+pub mod peer;
 pub mod session;
 pub mod stream;
 pub mod venue;

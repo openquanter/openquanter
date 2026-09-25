@@ -272,6 +272,23 @@ fn run_kind(
     faults: Faults,
     kind: Kind,
 ) -> (Sim, ExitCode, Vec<u8>) {
+    run_controlled(tag, seed, minutes, faults, kind, &[], false)
+}
+
+/// A run with an operator: `control` lines delivered at their times.
+fn run_controlled(
+    tag: &str,
+    seed: u64,
+    minutes: i64,
+    faults: Faults,
+    kind: Kind,
+    control: &[(Duration, &str)],
+    allow_resume: bool,
+) -> (Sim, ExitCode, Vec<u8>) {
+    let control: Vec<(Duration, String)> = control
+        .iter()
+        .map(|(at, l)| (*at, (*l).to_string()))
+        .collect();
     let hedged = kind == Kind::Hedged;
     let root = dir(tag, seed);
     let sim = Sim::new(SimConfig {
@@ -285,6 +302,7 @@ fn run_kind(
         state_root: root.clone(),
         faults,
         hedged,
+        control: control.clone(),
     });
     let journal = root.join("run.oqj");
     let cfg = RunConfig {
@@ -299,6 +317,7 @@ fn run_kind(
         // prefix, and tests run in parallel.
         id_prefix: format!("d{tag}{seed}"),
         adopt_existing: false,
+        control_allow_resume: allow_resume,
         journal: Some(journal.display().to_string()),
         limits: Limits {
             max_order_qty: QtyLots(10),
@@ -589,4 +608,211 @@ fn a_journal_that_fills_up_stops_the_orders_and_halts_the_run() {
         "left resting: {:?}",
         sim.resting()
     );
+}
+
+/// Every operator record the journal holds, as (command, outcome).
+fn operator_records(tag: &str, seed: u64) -> Vec<(String, String)> {
+    let journal = dir_path(tag, seed).join("run.oqj");
+    oq_journal::Reader::open(&journal)
+        .expect("open")
+        .replay()
+        .expect("reads")
+        .since(0)
+        .filter_map(|f| oq_live::record::Record::decode(f.kind, &f.payload))
+        .filter_map(|r| match r {
+            oq_live::record::Record::Operator {
+                command, outcome, ..
+            } => Some((command, outcome)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An operator's halt through the control port does what the automatic
+/// halt does: nothing new is sent, and the resting opening order goes at
+/// once. The port answers status before and after, and the journal says
+/// who halted it and why.
+#[test]
+fn an_operator_halt_stops_the_orders_and_is_on_the_record() {
+    let (sim, code, _) = run_controlled(
+        "ophalt",
+        5,
+        3,
+        Faults::default(),
+        Kind::Patient,
+        &[
+            (Duration::from_secs(30), "status\tdeck test\t"),
+            (Duration::from_secs(31), "orders\tdeck test\t"),
+            (
+                Duration::from_secs(60),
+                "halt\tdeck test\tchecking the halt",
+            ),
+            (Duration::from_secs(90), "status\tdeck test\t"),
+        ],
+        false,
+    );
+    assert_eq!(code, ExitCode::SUCCESS);
+    let answers = sim.control_answers();
+    assert_eq!(answers.len(), 4, "{answers:?}");
+    assert!(
+        answers[0].1.contains(r#""halted":false"#),
+        "{}",
+        answers[0].1
+    );
+    assert!(
+        answers[0].1.contains(r#""symbol":"BTCUSDT""#),
+        "{}",
+        answers[0].1
+    );
+    assert!(
+        answers[1].1.contains(r#""closing":false"#),
+        "the bid is listed: {}",
+        answers[1].1
+    );
+    assert!(
+        answers[2].1.contains(r#""state":"halted""#),
+        "{}",
+        answers[2].1
+    );
+    assert!(
+        answers[3].1.contains(r#""halted":true"#),
+        "{}",
+        answers[3].1
+    );
+    assert!(
+        answers[3].1.contains("checking the halt"),
+        "{}",
+        answers[3].1
+    );
+
+    let halt = Duration::from_secs(60);
+    let late: Vec<_> = sim
+        .placed_at()
+        .into_iter()
+        .filter(|at| *at > halt)
+        .collect();
+    assert!(late.is_empty(), "sent after the halt at {late:?}");
+    let first = sim.placed()[0].clone();
+    let at = sim
+        .withdrawn_at()
+        .into_iter()
+        .find(|(id, _)| *id == first)
+        .map(|(_, at)| at)
+        .expect("withdrawn");
+    assert!(
+        at < halt + Duration::from_secs(5),
+        "withdrawn at {at:?}, not by the halt"
+    );
+    assert_eq!(
+        operator_records("ophalt", 5),
+        vec![("halt".to_string(), "halted".to_string())]
+    );
+}
+
+/// An operator's shutdown ends the run early, withdraws everything and
+/// exits with the status a supervisor is told not to restart on.
+#[test]
+fn an_operator_shutdown_ends_the_run_and_says_so_in_its_exit_status() {
+    let (sim, code, _) = run_controlled(
+        "opstop",
+        6,
+        10,
+        Faults::default(),
+        Kind::Patient,
+        &[(
+            Duration::from_secs(45),
+            "shutdown\tdeck test\tplanned maintenance",
+        )],
+        false,
+    );
+    assert_eq!(code, ExitCode::from(oq_live::run::OPERATOR_SHUTDOWN));
+    assert!(
+        sim.elapsed() < Duration::from_secs(120),
+        "ran on to {:?}",
+        sim.elapsed()
+    );
+    assert!(
+        sim.resting().is_empty(),
+        "left resting: {:?}",
+        sim.resting()
+    );
+    assert_eq!(
+        operator_records("opstop", 6),
+        vec![("shutdown".to_string(), "shutting down".to_string())]
+    );
+}
+
+/// Resume is refused unless the process was started allowing it, and
+/// allowed only once a position check since has agreed with the venue.
+/// Then trading starts again.
+#[test]
+fn resume_needs_permission_and_agreeing_books() {
+    let script: &[(Duration, &str)] = &[
+        (Duration::from_secs(30), "halt\tdeck test\tlooking"),
+        (Duration::from_secs(150), "resume\tdeck test\tlooked, fine"),
+    ];
+
+    let (_, _, _) = run_controlled(
+        "noresume",
+        7,
+        5,
+        Faults::default(),
+        Kind::Patient,
+        script,
+        false,
+    );
+    assert_eq!(
+        operator_records("noresume", 7),
+        vec![
+            ("halt".to_string(), "halted".to_string()),
+            (
+                "resume".to_string(),
+                "refused: resume is not enabled for this process (start it with \
+                 --control-allow-resume)"
+                    .to_string()
+            ),
+        ]
+    );
+
+    let (sim, _, _) = run_controlled(
+        "resume",
+        7,
+        5,
+        Faults::default(),
+        Kind::Patient,
+        script,
+        true,
+    );
+    let answers = sim.control_answers();
+    assert!(answers[1].1.contains(r#""state":"resumed""#), "{answers:?}");
+    let resumed = Duration::from_secs(150);
+    assert!(
+        sim.placed_at().into_iter().any(|at| at > resumed),
+        "nothing sent after the resume"
+    );
+}
+
+/// A request the port cannot read is answered as such and changes
+/// nothing.
+#[test]
+fn a_malformed_request_is_refused_and_changes_nothing() {
+    let (sim, _, _) = run_controlled(
+        "opbad",
+        8,
+        2,
+        Faults::default(),
+        Kind::Patient,
+        &[
+            (Duration::from_secs(20), "halt\tdeck test\t"),
+            (Duration::from_secs(21), "liquidate\tdeck test\tnow"),
+        ],
+        false,
+    );
+    let answers = sim.control_answers();
+    assert_eq!(answers.len(), 2);
+    assert!(
+        answers.iter().all(|(_, a)| a.contains(r#""ok":false"#)),
+        "{answers:?}"
+    );
+    assert!(operator_records("opbad", 8).is_empty());
 }

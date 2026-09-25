@@ -66,7 +66,20 @@ pub struct RunConfig {
     /// `oq_gateway::broker` for why conflating them eventually forces a
     /// fork.
     pub broker_code: Option<String>,
+    /// Whether the control port may clear the kill switch.
+    ///
+    /// Off unless asked for: every other command reduces what the process
+    /// does, and this one lets it trade again.
+    pub control_allow_resume: bool,
 }
+
+/// The exit status of a run an operator shut down, cleanly.
+///
+/// Distinct so a supervisor can tell it from a failure: a unit with
+/// `Restart=always` lists it in `RestartPreventExitStatus=`, and an
+/// operator's shutdown then stays down instead of coming back thirty
+/// seconds later to trade again.
+pub const OPERATOR_SHUTDOWN: u8 = 98;
 
 /// Side, quantity and offset of the intent an outcome answers.
 ///
@@ -410,6 +423,23 @@ where
         }
     };
     println!("interlock        held ({})", interlock.path().display());
+
+    // The operator's port, named as the interlock is. Opened after the
+    // interlock, so the name is certainly this process's to take.
+    let mut control = match env.control(&format!("oq-live.{deployment:?}.{symbol}.{id_prefix}")) {
+        Ok(Some(port)) => {
+            println!("control          listening");
+            Some(port)
+        }
+        Ok(None) => {
+            println!("control          none (no runtime directory)");
+            None
+        }
+        Err(why) => {
+            eprintln!("control          UNAVAILABLE: {why}; trading without it");
+            None
+        }
+    };
 
     // Keep ownership stable, but never recycle a sequence from an earlier
     // process. A timed-out submit queried under a reused id can otherwise
@@ -833,6 +863,10 @@ where
     let mut refused = 0_u64;
     let mut unresolved = 0_u64;
     let mut journal_halted = false;
+    // An operator's shutdown, once given: ends the loop like a signal.
+    let mut operator_exit: Option<String> = None;
+    // The last position check: when, and whether the books agreed.
+    let mut last_reconcile: Option<(Nanos, bool)> = None;
     let mut reported_unresolved = 0_u64;
     let mut reconnect = Retry::default();
     let mut cancel_failed = 0_u64;
@@ -852,7 +886,10 @@ where
     let mut recovered: std::collections::VecDeque<oq_gateway::OrderUpdate> =
         std::collections::VecDeque::new();
 
-    while deadline.is_none_or(|d| clock.elapsed() < d) && !env.shutdown_requested() {
+    while deadline.is_none_or(|d| clock.elapsed() < d)
+        && !env.shutdown_requested()
+        && operator_exit.is_none()
+    {
         let now = clock.wall();
 
         // Market data, drained rather than sampled.
@@ -1280,6 +1317,116 @@ where
             trader.halt(&format!("the journal can no longer be written: {why}"));
         }
 
+        // The operator's commands, acted on here like any other event.
+        if let Some(port) = control.as_mut() {
+            for req in port.poll() {
+                let now = clock.wall();
+                let reply = match &req.command {
+                    crate::control::Command::Status => {
+                        metrics.halted = trader.session().gate().kill_switch().is_tripped();
+                        status_reply(&StatusView {
+                            cfg,
+                            symbol: &symbol,
+                            trader: &trader,
+                            books: &books,
+                            instrument: &instrument,
+                            ticks,
+                            last_tick: last_tick.as_ref(),
+                            feed: agg.counts(),
+                            unreadable: unreadable_depth,
+                            metrics: &metrics,
+                            last_reconcile,
+                            now,
+                        })
+                    }
+                    crate::control::Command::Orders => orders_reply(&trader),
+                    crate::control::Command::Metrics => {
+                        metrics.halted = trader.session().gate().kill_switch().is_tripped();
+                        let mut j = crate::control::Json::new();
+                        j.begin_object()
+                            .bool("ok", true)
+                            .str(
+                                "metrics",
+                                &metrics.render(Some(trader.session().submit_latency())),
+                            )
+                            .end_object();
+                        j.finish()
+                    }
+                    crate::control::Command::Halt(reason) => {
+                        trader.halt(&format!("operator: {reason}"));
+                        trader.session_mut().record_operator(
+                            now,
+                            "halt",
+                            reason,
+                            &req.origin,
+                            "halted",
+                        );
+                        ok_reply("halted")
+                    }
+                    crate::control::Command::Shutdown(reason) => {
+                        println!("shutdown         requested by {}: {reason}", req.origin);
+                        trader.session_mut().record_operator(
+                            now,
+                            "shutdown",
+                            reason,
+                            &req.origin,
+                            "shutting down",
+                        );
+                        operator_exit = Some(reason.clone());
+                        ok_reply("shutting down")
+                    }
+                    crate::control::Command::Resume(reason) => {
+                        let books_disagree = trader
+                            .strategy()
+                            .waiting_on()
+                            .into_iter()
+                            .find(|(k, _)| *k == "books_disagree")
+                            .map_or(0, |(_, v)| v);
+                        let refused = resume_refusal(
+                            cfg.control_allow_resume,
+                            trader.session().gate().kill_switch().is_tripped(),
+                            trader.session().journal_lost(),
+                            last_reconcile.map(|(_, ok)| ok),
+                            books_disagree,
+                        );
+                        match refused {
+                            Some(why) => {
+                                trader.session_mut().record_operator(
+                                    now,
+                                    "resume",
+                                    reason,
+                                    &req.origin,
+                                    &format!("refused: {why}"),
+                                );
+                                crate::control::refusal(&why)
+                            }
+                            None => {
+                                eprintln!("RESUME           by {}: {reason}", req.origin);
+                                trader.session_mut().clear_halt();
+                                trader.session_mut().record_operator(
+                                    now,
+                                    "resume",
+                                    reason,
+                                    &req.origin,
+                                    "resumed",
+                                );
+                                ok_reply("resumed")
+                            }
+                        }
+                    }
+                };
+                if req.command.mutates() {
+                    println!(
+                        "operator         {} by {}: {}",
+                        req.command.name(),
+                        req.origin,
+                        req.command.reason()
+                    );
+                }
+                port.answer(req.id, &reply);
+            }
+        }
+
         // Upkeep that time makes due, whether or not anything arrived.
         for action in supervisor.due(now) {
             match action {
@@ -1317,7 +1464,11 @@ where
                             // destroy the evidence of how they came to
                             // differ, which is the only thing that could
                             // explain it afterwards.
-                            if let Some(m) = books.reconcile(net, clock.wall()) {
+                            let verdict = books.reconcile(net, clock.wall());
+                            if verdict.is_none() {
+                                last_reconcile = Some((clock.wall(), true));
+                            }
+                            if let Some(m) = verdict {
                                 // Ask before judging. A stream that
                                 // dropped does not replay what it missed,
                                 // and the commonest cause of this line is
@@ -1361,6 +1512,7 @@ where
                                     continue;
                                 }
                                 metrics.reconciliation_mismatches += 1;
+                                last_reconcile = Some((clock.wall(), false));
                                 eprintln!(
                                     "reconcile        MISMATCH ours {} theirs {}, drift {}",
                                     m.ours.0,
@@ -1635,10 +1787,10 @@ where
         market.trade().connections(),
         market.trade().stalls()
     );
-    if shutdown_clean {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    match (shutdown_clean, operator_exit.is_some()) {
+        (true, true) => ExitCode::from(OPERATOR_SHUTDOWN),
+        (true, false) => ExitCode::SUCCESS,
+        (false, _) => ExitCode::FAILURE,
     }
 }
 
@@ -1802,6 +1954,7 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     }
     fn halt(&mut self, why: &str) {
         eprintln!("HALT             {why}");
+        self.session_mut().note_halt(why);
         self.session().gate().kill_switch().trip();
         // Tripping the switch stops new orders and nothing else. Orders
         // already resting kept working for the whole of a halt: a ladder
@@ -3459,4 +3612,180 @@ mod venue_closes {
             }
         }
     }
+}
+
+/// Everything the status answer reads, gathered where the loop has it.
+struct StatusView<'a, S: Strategy> {
+    cfg: &'a RunConfig,
+    symbol: &'a str,
+    trader: &'a Trader<S, Box<dyn Account>>,
+    books: &'a crate::books::Books,
+    instrument: &'a Instrument,
+    ticks: u64,
+    last_tick: Option<&'a oq_engine::Tick>,
+    feed: oq_ingest::Counts,
+    unreadable: u64,
+    metrics: &'a crate::metrics::Snapshot,
+    last_reconcile: Option<(Nanos, bool)>,
+    now: Nanos,
+}
+
+fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
+    let session = v.trader.session();
+    let mut j = crate::control::Json::new();
+    j.begin_object()
+        .bool("ok", true)
+        .uint("pid", u64::from(std::process::id()))
+        .str("deployment", &format!("{:?}", v.cfg.deployment))
+        .str("symbol", v.symbol)
+        .str("prefix", &v.cfg.id_prefix)
+        .str("strategy", &v.cfg.strategy_name)
+        .int("now_ns", v.now.0)
+        .bool("halted", session.gate().kill_switch().is_tripped())
+        .opt_str("halt_reason", session.halt_reason())
+        .opt_str("journal_lost", session.journal_lost())
+        .bool("resume_allowed", v.cfg.control_allow_resume)
+        .uint("resting", u64::from(v.trader.working()))
+        .uint("ticks", v.ticks);
+    match v.last_tick {
+        Some(t) => {
+            j.field("last_tick")
+                .begin_object()
+                .int("exch_ns", t.stamp.exch.0)
+                .int("local_ns", t.stamp.local.0)
+                .int("last", t.last.0)
+                .end_object();
+        }
+        None => {
+            j.null("last_tick");
+        }
+    }
+    j.field("positions").begin_array();
+    for p in streamed_legs(v.books, v.symbol, v.instrument) {
+        j.begin_object()
+            .str("side", &p.position_side)
+            .str("amount", &format!("{}", p.amount))
+            .end_object();
+    }
+    j.end_array();
+    let c = &v.feed;
+    j.field("feed")
+        .begin_object()
+        .uint("depth", c.depth_applied)
+        .uint("trades", c.trades)
+        .uint("out_of_order", c.out_of_order)
+        .uint("quiet", c.quiet_windows)
+        .uint("snapshots", c.snapshots)
+        .uint("resyncs", c.resyncs)
+        .uint("unreadable", v.unreadable)
+        .end_object();
+    j.field("reconcile").begin_object();
+    match v.last_reconcile {
+        Some((at, ok)) => {
+            j.int("at_ns", at.0).bool("agreed", ok);
+        }
+        None => {
+            j.null("at_ns").null("agreed");
+        }
+    }
+    j.uint("mismatches", v.metrics.reconciliation_mismatches)
+        .uint("unread", v.metrics.incomplete_reads)
+        .end_object();
+    j.field("waiting_on").begin_object();
+    for (k, val) in v.trader.strategy().waiting_on() {
+        j.int(k, val);
+    }
+    j.end_object();
+    j.field("counters")
+        .begin_object()
+        .uint("sent", v.metrics.sent)
+        .uint("fills", v.metrics.fills)
+        .uint("disconnects", v.metrics.disconnects)
+        .uint("foreign_orders", v.metrics.foreign_orders)
+        .uint("unbookable_reports", v.metrics.unbookable_reports)
+        .end_object();
+    j.end_object();
+    j.finish()
+}
+
+fn orders_reply<S: Strategy>(trader: &Trader<S, Box<dyn Account>>) -> String {
+    let mut j = crate::control::Json::new();
+    j.begin_object()
+        .bool("ok", true)
+        .field("orders")
+        .begin_array();
+    for o in trader.resting_orders() {
+        j.begin_object()
+            .uint("local", o.local)
+            .str("client_id", &o.client_id)
+            .bool("closing", o.closing)
+            .opt_str(
+                "side",
+                o.side.map(|s| {
+                    if s == oq_types::Side::Buy {
+                        "BUY"
+                    } else {
+                        "SELL"
+                    }
+                }),
+            );
+        match o.price {
+            Some(p) => j.int("price_ticks", p.0),
+            None => j.null("price_ticks"),
+        };
+        match o.qty {
+            Some(q) => j.int("qty_lots", q.0),
+            None => j.null("qty_lots"),
+        };
+        j.end_object();
+    }
+    j.end_array().end_object();
+    j.finish()
+}
+
+fn ok_reply(state: &str) -> String {
+    let mut j = crate::control::Json::new();
+    j.begin_object()
+        .bool("ok", true)
+        .str("state", state)
+        .end_object();
+    j.finish()
+}
+
+/// Why a resume must be refused, or `None` if it may go ahead.
+///
+/// Each condition is one a resumed process would trade into blind: a
+/// journal that cannot record the orders, books that do not match the
+/// venue, or no check of them at all since whatever caused the halt.
+fn resume_refusal(
+    allowed: bool,
+    halted: bool,
+    journal_lost: Option<&str>,
+    last_reconcile_agreed: Option<bool>,
+    books_disagree: i64,
+) -> Option<String> {
+    if !allowed {
+        return Some(
+            "resume is not enabled for this process (start it with --control-allow-resume)".into(),
+        );
+    }
+    if !halted {
+        return Some("not halted".into());
+    }
+    if let Some(why) = journal_lost {
+        return Some(format!("the journal cannot record orders: {why}"));
+    }
+    match last_reconcile_agreed {
+        None => return Some("no position check has run yet; wait for one".into()),
+        Some(false) => {
+            return Some("the last position check disagreed with the venue".into());
+        }
+        Some(true) => {}
+    }
+    if books_disagree != 0 {
+        return Some(format!(
+            "the strategy reports books_disagree {books_disagree}"
+        ));
+    }
+    None
 }

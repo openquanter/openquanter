@@ -125,6 +125,18 @@ writing it down and better than leaving it out.
 - **`RunResult::margin_usage` replaces nothing and adds a field**;
   `RunConfig::track_margin` defaults to off, so no existing run changes
   or pays for it.
+- **`Record::Operator` (live journal kind 10) added, with a local
+  control port.** *Adds a record; changes no existing one.* A process
+  started under systemd with a runtime directory listens on a Unix
+  socket there for `status`, `orders`, `metrics`, `halt`, `shutdown` and
+  `resume`, acted on inside the loop like any other event. Peers are
+  checked by the uid the kernel reports; there is no port without a
+  runtime directory, never one in `/tmp`. Every state-changing command is
+  journalled with its reason, the authenticated origin and what came of
+  it. `resume` is off unless the process is started with
+  `--control-allow-resume`, and refused while the last position check
+  disagreed or the journal cannot record. An operator's clean shutdown
+  exits with status 98 so a supervisor can be told not to restart it.
 - **`Record::Cancelled` (live journal kind 9) added, and
   `Belief::from_journal` subtracts it.** *Changes what a reconstruction
   reports, not what a run does.* The live journal recorded a

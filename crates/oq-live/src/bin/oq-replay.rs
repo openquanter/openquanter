@@ -222,6 +222,16 @@ fn render(record: &Record) -> String {
             at.0
         ),
         Record::Refused { at, breach } => format!("refused {}  {breach}", at.0),
+        Record::Operator {
+            at,
+            command,
+            reason,
+            origin,
+            outcome,
+        } => format!(
+            "operator {}  {command} by {origin}: {reason} -> {outcome}",
+            at.0
+        ),
         Record::Waiting { at, entries } => {
             let body: Vec<String> = entries.iter().map(|(k, v)| format!("{k} {v}")).collect();
             format!("waiting {}  {}", at.0, body.join(", "))

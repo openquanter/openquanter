@@ -88,6 +88,21 @@ pub enum Outcome {
 pub const NOT_FOUND_IS_ANSWER_AFTER: Nanos = Nanos(10_000_000_000);
 
 /// A strategy, a session, and the map between them.
+/// One order believed resting, as [`Trader::resting_orders`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestingOrder {
+    /// The strategy's id for it.
+    pub local: u64,
+    /// The id the venue knows it by.
+    pub client_id: String,
+    /// Sent to reduce a position: a halt keeps it.
+    pub closing: bool,
+    /// What was asked; `None` only if the intent is no longer known.
+    pub side: Option<oq_types::Side>,
+    pub price: Option<PriceTicks>,
+    pub qty: Option<oq_types::QtyLots>,
+}
+
 pub struct Trader<S: Strategy, E: Execution> {
     strategy: S,
     session: Session<E>,
@@ -431,6 +446,38 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
     #[must_use]
     pub fn resting(&self) -> Vec<&str> {
         self.live.values().map(String::as_str).collect()
+    }
+
+    /// The orders believed resting, with what was asked of each: for an
+    /// operator's view, in the order they were sent.
+    #[must_use]
+    pub fn resting_orders(&self) -> Vec<RestingOrder> {
+        self.live
+            .iter()
+            .map(|(local, client_id)| {
+                let asked = self.intents.iter().find_map(|i| match i {
+                    Intent::Limit {
+                        id,
+                        side,
+                        price,
+                        qty,
+                        ..
+                    } if id.0 == *local => Some((*side, Some(*price), *qty)),
+                    Intent::Market { id, side, qty, .. } if id.0 == *local => {
+                        Some((*side, None, *qty))
+                    }
+                    _ => None,
+                });
+                RestingOrder {
+                    local: *local,
+                    client_id: client_id.clone(),
+                    closing: self.closing.contains(local),
+                    side: asked.map(|a| a.0),
+                    price: asked.and_then(|a| a.1),
+                    qty: asked.map(|a| a.2),
+                }
+            })
+            .collect()
     }
 
     fn act(&mut self, intent: &Intent, mark: PriceTicks, now: Nanos) -> Vec<Outcome> {
