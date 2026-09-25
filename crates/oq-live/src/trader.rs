@@ -448,6 +448,12 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             .map(|(k, _)| OrderId(*k))
     }
 
+    /// Whether the order with this strategy id is believed resting.
+    #[must_use]
+    pub fn is_live(&self, local: OrderId) -> bool {
+        self.live.contains_key(&local.0)
+    }
+
     /// Client ids this process believes are resting.
     #[must_use]
     pub fn resting(&self) -> Vec<&str> {

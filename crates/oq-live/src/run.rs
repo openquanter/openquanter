@@ -89,24 +89,70 @@ pub const OPERATOR_SHUTDOWN: u8 = 98;
 fn shape_of(
     intents: &[oq_strategy::Intent],
     id: oq_types::OrderId,
-) -> Option<(oq_types::Side, oq_types::QtyLots, oq_types::Offset)> {
+) -> Option<(
+    oq_types::Side,
+    Option<oq_types::PriceTicks>,
+    oq_types::QtyLots,
+    oq_types::Offset,
+)> {
     intents.iter().find_map(|i| match i {
         oq_strategy::Intent::Limit {
             id: this,
             side,
+            price,
             qty,
             offset,
             ..
-        }
-        | oq_strategy::Intent::Market {
+        } if *this == id => Some((*side, Some(*price), *qty, *offset)),
+        oq_strategy::Intent::Market {
             id: this,
             side,
             qty,
             offset,
             ..
-        } if *this == id => Some((*side, *qty, *offset)),
+        } if *this == id => Some((*side, None, *qty, *offset)),
         _ => None,
     })
+}
+
+/// Tell the books and the shadow what an outcome did.
+///
+/// Every place the trader acts — a tick, a fill, an order's end — goes
+/// through here, so the model sees each order as it was sent: a limit at
+/// its price, not as a market order, and a withdrawal as a withdrawal.
+/// Only the tick path used to, and it sent every order without a price,
+/// so the shadow filled resting ladders at once and reported fills the
+/// venue never made.
+fn mirror(
+    outcome: &Outcome,
+    intents: &[oq_strategy::Intent],
+    books: &mut crate::books::Books,
+    shadow: &mut crate::shadow::Shadow,
+    now: Nanos,
+) {
+    match outcome {
+        Outcome::Sent { local, .. } => {
+            if let Some((side, price, qty, offset)) = shape_of(intents, *local) {
+                books.on_submit(*local, side, qty, offset, now);
+                shadow.apply(&oq_core::Event::Submit {
+                    instrument: None,
+                    id: *local,
+                    side,
+                    price,
+                    qty,
+                    offset,
+                    stamp: oq_types::Stamp::new(now.0, now.0),
+                });
+            }
+        }
+        Outcome::Cancelled { local, .. } => {
+            shadow.apply(&oq_core::Event::Cancel {
+                id: *local,
+                stamp: oq_types::Stamp::new(now.0, now.0),
+            });
+        }
+        _ => {}
+    }
 }
 
 /// The name this process was invoked as.
@@ -996,27 +1042,7 @@ where
                             }
                             let ctx = context_for(&books, tick, trader.working());
                             for outcome in trader.on_tick(&ctx, now) {
-                                if let Outcome::Sent { local, .. } = &outcome {
-                                    // The kernel is told an order exists.
-                                    // Without this `Context::working` is zero
-                                    // for every live strategy that reads it,
-                                    // and the books hold no order for a fill
-                                    // to answer.
-                                    if let Some((side, qty, offset)) =
-                                        shape_of(trader.submitted(), *local)
-                                    {
-                                        books.on_submit(*local, side, qty, offset, now);
-                                        shadow.apply(&oq_core::Event::Submit {
-                                            instrument: None,
-                                            id: *local,
-                                            side,
-                                            price: None,
-                                            qty,
-                                            offset,
-                                            stamp: oq_types::Stamp::new(now.0, now.0),
-                                        });
-                                    }
-                                }
+                                mirror(&outcome, trader.submitted(), &mut books, &mut shadow, now);
                                 match &outcome {
                                     Outcome::Sent { .. } => sent += 1,
                                     Outcome::Cancelled { .. } => cancelled += 1,
@@ -1182,6 +1208,13 @@ where
                                     None => trader.on_fill(&fill, &ctx, now),
                                 };
                                 for outcome in outcomes {
+                                    mirror(
+                                        &outcome,
+                                        trader.submitted(),
+                                        &mut books,
+                                        &mut shadow,
+                                        now,
+                                    );
                                     match &outcome {
                                         Outcome::Sent { .. } => sent += 1,
                                         Outcome::Cancelled { .. } => cancelled += 1,
@@ -1240,7 +1273,9 @@ where
                     match last_tick {
                         Some(t) => {
                             let ctx = context_for(&books, t, trader.working());
-                            for outcome in trader.on_ended(&u.client_id, ending, &ctx, now) {
+                            let outcomes = trader.on_ended(&u.client_id, ending, &ctx, now);
+                            for outcome in outcomes {
+                                mirror(&outcome, trader.submitted(), &mut books, &mut shadow, now);
                                 match &outcome {
                                     Outcome::Sent { .. } => sent += 1,
                                     Outcome::Cancelled { .. } => cancelled += 1,
@@ -1335,6 +1370,10 @@ where
             journal_halted = true;
             trader.halt(&format!("the journal can no longer be written: {why}"));
         }
+
+        // Orders withdrawn where no outcome passes through here — a halt,
+        // a withdrawal the trader made itself — leave the model too.
+        shadow.withdraw_absent(|id| trader.is_live(id), clock.wall());
 
         // The operator's commands, acted on here like any other event.
         if let Some(port) = control.as_mut() {
@@ -3094,15 +3133,15 @@ mod tests {
         ];
         assert_eq!(
             shape_of(&intents, OrderId(2)),
-            Some((Side::Sell, QtyLots(7), Offset::Open))
+            Some((Side::Sell, None, QtyLots(7), Offset::Open))
         );
     }
 
-    /// A limit order carries its shape too, and the price is not part
-    /// of it: what the books need from a submission is that an order
-    /// exists, and a live order's resting price is the venue's.
+    /// A limit order is matched by id and carries its price: the shadow
+    /// must see a limit as a limit. Without it every order reached the
+    /// model as a market order and filled at once.
     #[test]
-    fn a_limit_order_is_matched_by_id_and_not_by_price() {
+    fn a_limit_order_is_matched_by_id_and_carries_its_price() {
         let intents = vec![Intent::Limit {
             instrument: oq_types::InstrumentId::new(1),
             id: OrderId(9),
@@ -3113,7 +3152,12 @@ mod tests {
         }];
         assert_eq!(
             shape_of(&intents, OrderId(9)),
-            Some((Side::Buy, QtyLots(2), Offset::Close))
+            Some((
+                Side::Buy,
+                Some(PriceTicks(6_000_000)),
+                QtyLots(2),
+                Offset::Close
+            ))
         );
     }
 

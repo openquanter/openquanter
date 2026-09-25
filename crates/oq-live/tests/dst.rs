@@ -891,3 +891,34 @@ fn a_run_leaves_run_files_a_tick_file_and_answers_for_its_attribution() {
         "written aside and renamed"
     );
 }
+
+/// The model sees a limit order as a limit order.
+///
+/// Every order reached the shadow without its price, so the model took
+/// each one as a market order and filled it at once: a bid a thousand
+/// ticks under the market, which the venue never touched, was a fill in
+/// the model, and the attribution reported fills that no one made.
+#[test]
+fn a_bid_far_under_the_market_fills_neither_at_the_venue_nor_in_the_model() {
+    let (_, code, _) = run_controlled(
+        "farbid",
+        4,
+        5,
+        Faults::default(),
+        Kind::Patient,
+        &[(Duration::from_secs(4 * 60), "attribution\tdeck test\t")],
+        false,
+    );
+    assert_eq!(code, ExitCode::SUCCESS);
+    let dir = dir_path("farbid", 4);
+    let read = |name: &str| {
+        oq_parity::wire::Run::parse(&std::fs::read_to_string(dir.join(name)).expect(name))
+            .expect(name)
+    };
+    assert!(read("run.live.run").output.fills.is_empty());
+    assert!(
+        read("run.model.run").output.fills.is_empty(),
+        "the model filled a resting limit order the market never reached: {:?}",
+        read("run.model.run").output.fills
+    );
+}
