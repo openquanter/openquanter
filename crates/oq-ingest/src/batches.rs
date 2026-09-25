@@ -57,6 +57,31 @@ pub fn files_for(archive: &Path, stream: &str, day: &str) -> Vec<PathBuf> {
     out
 }
 
+/// One hour of one stream: the file that holds it.
+///
+/// An hour is one file, whichever form the archive step left it in. A
+/// capture written before compression has both `<name>.oqcap` and its
+/// `.zst`, and the original is not always removed afterwards; reading
+/// both appends every record twice, and a doubled trade count reads like
+/// a busy market rather than like a mistake.
+///
+/// `hours` answers the same question from the same listing. There is one
+/// answer here so the two cannot come to different ones.
+fn files_for_hour(archive: &Path, stream: &str, day: &str, hour: &str) -> Vec<PathBuf> {
+    let mut taken = false;
+    files_for(archive, stream, day)
+        .into_iter()
+        .filter(|path| {
+            if oq_l2feed::archive::stem(path).as_deref() != Some(hour) {
+                return false;
+            }
+            let first = !taken;
+            taken = true;
+            first
+        })
+        .collect()
+}
+
 /// The hours an archive holds for one day, in order.
 ///
 /// Named by the file stem: an hourly rotation gives `00`..`23` and a
@@ -102,10 +127,7 @@ pub fn load_hour(archive: &Path, day: &str, hour: &str) -> Result<Vec<Batch>, St
     let mut out = Vec::new();
     for stream in STREAMS {
         let mut bytes = Vec::new();
-        for path in files_for(archive, stream, day) {
-            if oq_l2feed::archive::stem(&path).as_deref() != Some(hour) {
-                continue;
-            }
+        for path in files_for_hour(archive, stream, day, hour) {
             match oq_l2feed::archive::read(&path) {
                 Ok(b) => bytes.extend_from_slice(&b),
                 Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
@@ -152,5 +174,26 @@ mod tests {
     #[test]
     fn depth_is_read_before_trades() {
         assert_eq!(STREAMS, ["depth", "trade"]);
+    }
+
+    /// A capture and its compressed twin name the same hour. Reading
+    /// both would count every record twice.
+    #[test]
+    fn an_hour_is_one_file_however_the_archive_left_it() {
+        let root = std::env::temp_dir().join(format!("oq-ingest-{}", std::process::id()));
+        let day = root.join("depth").join("2026-08-19");
+        std::fs::create_dir_all(&day).expect("dir");
+        for name in ["12.oqcap", "12.oqcap.zst", "13.oqcap"] {
+            std::fs::write(day.join(name), b"").expect("write");
+        }
+
+        let picked = files_for_hour(&root, "depth", "2026-08-19", "12");
+        assert_eq!(picked.len(), 1, "one hour, one file: {picked:?}");
+        assert_eq!(files_for_hour(&root, "depth", "2026-08-19", "13").len(), 1);
+        assert!(files_for_hour(&root, "depth", "2026-08-19", "14").is_empty());
+
+        // And the two answers about the archive agree.
+        assert_eq!(hours(&root, "2026-08-19"), ["12", "13"]);
+        std::fs::remove_dir_all(&root).ok();
     }
 }
