@@ -238,6 +238,25 @@ fn render(record: &Record) -> String {
             "operator {}  {command} by {origin}: {reason} -> {outcome}",
             at.0
         ),
+        Record::Funding {
+            at,
+            settled_ms,
+            rate,
+            mark,
+            venue,
+            model,
+            verified,
+        } => format!(
+            "funding {}  settlement {settled_ms} rate {rate} mark {mark}: venue {} model {}{}",
+            at.0,
+            venue.0,
+            model.0,
+            if *verified {
+                ""
+            } else {
+                "  (live legs did not reproduce the venue's figure)"
+            }
+        ),
         Record::Waiting { at, entries } => {
             let body: Vec<String> = entries.iter().map(|(k, v)| format!("{k} {v}")).collect();
             format!("waiting {}  {}", at.0, body.join(", "))

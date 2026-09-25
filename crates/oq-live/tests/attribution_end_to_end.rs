@@ -91,7 +91,7 @@ fn a_session_where_the_venue_filled_worse_becomes_a_report_naming_slippage() {
     );
     s.finish(Nanos(10 * SEC));
 
-    let evidence = s.evidence(Some((Cash(0), Cash(0))), Some((Cash(0), Cash(0))));
+    let evidence = s.evidence(Ok((Cash(0), Cash(0))), Some((Cash(0), Cash(0))));
     assert_eq!(evidence.matched.len(), 1, "the pair must have been kept");
 
     // The model filled at the ask, one tick above the prevailing price;
@@ -147,7 +147,7 @@ fn a_fill_the_venue_and_the_model_agreed_on_is_still_carried() {
     );
     s.finish(Nanos(10 * SEC));
 
-    let evidence = s.evidence(Some((Cash(0), Cash(0))), Some((Cash(0), Cash(0))));
+    let evidence = s.evidence(Ok((Cash(0), Cash(0))), Some((Cash(0), Cash(0))));
     assert_eq!(
         evidence.matched.len(),
         1,
@@ -169,7 +169,7 @@ fn a_fill_the_venue_never_made_becomes_a_queue_component() {
     // The venue says nothing, ever.
     s.finish(Nanos(60 * SEC));
 
-    let evidence = s.evidence(Some((Cash(0), Cash(0))), Some((Cash(0), Cash(0))));
+    let evidence = s.evidence(Ok((Cash(0), Cash(0))), Some((Cash(0), Cash(0))));
     assert_eq!(evidence.unmatched.len(), 1);
     assert!(
         !evidence.unmatched[0].at_venue,
@@ -214,7 +214,7 @@ fn a_session_with_no_fee_statement_produces_no_residual() {
         Cash(-10),
         Cash(0),
         // Nobody read the fee statement.
-        &s.evidence(Some((Cash(0), Cash(0))), None),
+        &s.evidence(Ok((Cash(0), Cash(0))), None),
     );
 
     assert_eq!(report.residual, None);
@@ -235,13 +235,13 @@ fn evidence_taken_before_finishing_is_incomplete_and_finishing_completes_it() {
     let mut s = shadow().with_grace(Nanos(60 * SEC));
     buy(&mut s, 1, SEC, 6_000_000);
 
-    let early = s.evidence(None, None);
+    let early = s.evidence(Err("not measured here".into()), None);
     assert!(
         early.matched.is_empty() && early.unmatched.is_empty(),
         "the fill is still inside the grace period"
     );
 
     s.finish(Nanos(2 * SEC));
-    let late = s.evidence(None, None);
+    let late = s.evidence(Err("not measured here".into()), None);
     assert_eq!(late.unmatched.len(), 1, "and finishing flushes it");
 }

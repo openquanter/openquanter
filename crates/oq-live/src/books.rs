@@ -323,6 +323,15 @@ impl Books {
         (s.qty, s.short_qty)
     }
 
+    /// Book funding the venue charged, as its ledger states it.
+    pub fn on_funding_charged(&mut self, amount: Cash, at: Nanos) {
+        self.kernel.apply(&oq_core::Event::FundingCharged {
+            instrument: None,
+            at,
+            amount,
+        });
+    }
+
     /// Realized P&L, fees and funding since this run started, apart.
     #[must_use]
     pub fn realized_parts(&self) -> (Cash, Cash, Cash) {

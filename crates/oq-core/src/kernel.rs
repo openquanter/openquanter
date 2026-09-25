@@ -1039,6 +1039,30 @@ impl Kernel {
                     self.check_liquidation(mark);
                 }
             }
+            Event::FundingCharged {
+                instrument,
+                at,
+                amount,
+            } => {
+                self.state.now = at;
+                // Charged to a holding, as a rate would be: an amount
+                // for an instrument this account does not hold is a
+                // routing mistake, refused as an unnamed tick is.
+                if self.route(instrument).is_none() {
+                    self.outputs.push(Output::Rejected {
+                        id: OrderId::new(0),
+                        reason: RejectReason::UnroutableObservation,
+                    });
+                    return &self.outputs;
+                }
+                // The venue's figure, booked as it stands. No liquidation
+                // check here: the venue's own engine decides that live,
+                // and the next tick checks it in the model, as it does
+                // after a deposit.
+                self.state.credit(amount);
+                self.state.funding = self.state.funding.add(amount);
+                self.outputs.push(Output::Funded { amount, at });
+            }
             Event::Time(at) => self.state.now = at,
             Event::MarginDeposit { amount, at } => {
                 self.state.now = at;
@@ -1600,6 +1624,52 @@ mod tests {
         let s = k.summary();
         assert!(s.balance < before, "a long pays a positive rate");
         assert_eq!(s.funding, s.balance.sub(before));
+    }
+
+    #[test]
+    fn a_charged_amount_is_booked_as_funding_to_the_last_place() {
+        let mut k = kernel(10_000);
+        k.apply(&tick(1, 1_000_000));
+        k.apply(&buy(1, 1_000_000, 10, 1));
+        k.apply(&tick(2, 1_000_000));
+        let before = k.summary().balance;
+        // The venue's own line: no rate, no mark, no rounding here.
+        let outs = k
+            .apply(&Event::FundingCharged {
+                instrument: None,
+                at: Nanos::from_secs(28_800),
+                amount: Cash(-3_359_784),
+            })
+            .to_vec();
+        assert!(matches!(
+            outs.as_slice(),
+            [Output::Funded {
+                amount: Cash(-3_359_784),
+                ..
+            }]
+        ));
+        let s = k.summary();
+        assert_eq!(s.balance, before.sub(Cash(3_359_784)));
+        assert_eq!(s.funding, Cash(-3_359_784));
+        let refused = k
+            .apply(&Event::FundingCharged {
+                instrument: Some(InstrumentId(99)),
+                at: Nanos::from_secs(28_801),
+                amount: Cash(1),
+            })
+            .to_vec();
+        assert!(matches!(
+            refused.as_slice(),
+            [Output::Rejected {
+                reason: RejectReason::UnroutableObservation,
+                ..
+            }]
+        ));
+        assert_eq!(
+            k.summary().funding,
+            Cash(-3_359_784),
+            "a refused charge books nothing"
+        );
     }
 
     #[test]

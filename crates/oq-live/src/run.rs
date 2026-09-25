@@ -884,6 +884,20 @@ where
     // into this one's attribution, which is the sort of number that
     // looks plausible and is somebody else's.
     let started_ms = clock.wall().0 / 1_000_000;
+    // Funding: the venue's settlements, charged to the books from its
+    // ledger and to the shadow from its own positions (see `funding`).
+    let mut funding = crate::funding::FundingWatch::new(
+        instrument,
+        trader
+            .venue()
+            .next_funding_ms(&symbol)
+            .map_err(|e| e.to_string()),
+    );
+    match funding.problem() {
+        Some(why) => println!("funding          not measured: {why}"),
+        None => println!("funding          next settlement read; charged from the venue's ledger"),
+    }
+    let mut last_funding_poll = clock.elapsed();
     env.listen_for_shutdown();
     let deadline = match deadline_from(minutes, clock.elapsed()) {
         Ok(deadline) => deadline,
@@ -952,6 +966,11 @@ where
         && operator_exit.is_none()
     {
         let now = clock.wall();
+        // A settlement passed: what both books held at it, recorded now,
+        // because the rate and the ledger arrive after it.
+        funding.on_time(now.0 / 1_000_000, books.legs(), shadow.legs(), || {
+            trader.venue().next_funding_ms(&symbol).ok().flatten()
+        });
 
         // Market data, drained rather than sampled.
         //
@@ -1405,7 +1424,7 @@ where
                             &instrument,
                             books.realized_net(),
                             shadow.model_pnl(),
-                            &shadow.evidence(None, fee_pair),
+                            &shadow.evidence(funding.evidence(), fee_pair),
                         );
                         attribution_reply(&a, shadow.evidence_counts())
                     }
@@ -1614,6 +1633,21 @@ where
             }
         }
 
+        if funding.waiting() && clock.elapsed().saturating_sub(last_funding_poll) >= FUNDING_POLL {
+            last_funding_poll = clock.elapsed();
+            let at = clock.wall();
+            for settled in poll_funding(
+                &mut funding,
+                trader.venue(),
+                &symbol,
+                &mut books,
+                &mut shadow,
+                at,
+            ) {
+                trader.session_mut().record_funding(at, &settled);
+            }
+        }
+
         if let Some(a) = &artifacts
             && clock.elapsed().saturating_sub(last_artifacts) >= ARTIFACTS_EVERY
         {
@@ -1760,6 +1794,24 @@ where
             d.summary_line()
         );
     }
+    // A settlement crossed just before the end is asked about once more,
+    // so a run that stops soon after one can still account for it.
+    if funding.waiting() {
+        let at = clock.wall();
+        for settled in poll_funding(
+            &mut funding,
+            trader.venue(),
+            &symbol,
+            &mut books,
+            &mut shadow,
+            at,
+        ) {
+            trader.session_mut().record_funding(at, &settled);
+        }
+    }
+    if let Some(why) = funding.problem() {
+        println!("funding          unavailable: {why}");
+    }
     let attribution = oq_parity::attribution::attribute(
         // Identified by what this run was, so a report cannot be
         // mistaken for one from a different build or contract. The
@@ -1769,13 +1821,15 @@ where
         &instrument,
         books.realized_net(),
         shadow.model_pnl(),
-        // Funding stays `None`: the venue reports it on an endpoint this
-        // adapter does not read, and zero is a measurement nobody took.
-        // Fees are asked for, and an adapter that does not report them
-        // says so rather than answering zero — either way `attribution`
-        // renders the component honestly and the residual carries what
-        // is missing.
-        &shadow.evidence(None, venue_fees.map(|v| fee_evidence(v, shadow_fees))),
+        // Funding from the watch: the venue's ledger against the model's
+        // positions, or `None` with a reason. Fees are asked for, and an
+        // adapter that does not report them says so rather than
+        // answering zero — either way `attribution` renders the
+        // component honestly and the residual carries what is missing.
+        &shadow.evidence(
+            funding.evidence(),
+            venue_fees.map(|v| fee_evidence(v, shadow_fees)),
+        ),
     );
     print!("{}", attribution.render());
     if let Some(a) = &artifacts {
@@ -3913,6 +3967,75 @@ fn resume_refusal(
 
 /// How often the run files are rewritten while a run goes on.
 const ARTIFACTS_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// How often a crossed funding settlement is asked about until the
+/// venue has published its rate and ledger lines.
+const FUNDING_POLL: Duration = Duration::from_secs(60);
+
+/// Ask the venue about crossed settlements, and book what it answers:
+/// its ledger to the live books, the model's charge to the shadow. The
+/// settlements booked are returned for the journal.
+fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
+    funding: &mut crate::funding::FundingWatch,
+    venue: &A,
+    symbol: &str,
+    books: &mut crate::books::Books,
+    shadow: &mut crate::shadow::Shadow,
+    at: Nanos,
+) -> Vec<crate::funding::Settled> {
+    let Some(since) = funding.asking_since() else {
+        return Vec::new();
+    };
+    let before = funding.problem().map(str::to_string);
+    let settled = match (
+        venue.funding_rates(symbol, since),
+        venue.funding_charged(symbol, since),
+    ) {
+        (Ok(Some(rates)), Ok(Some(lines))) => funding.resolve(&rates, &lines, at.0 / 1_000_000),
+        // Asked again at the next poll; a settlement that stays
+        // unanswered is given up on, with a reason.
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("funding          could not be read: {e}");
+            return Vec::new();
+        }
+        _ => return Vec::new(),
+    };
+    for s in &settled {
+        books.on_funding_charged(s.venue, at);
+        shadow.apply(&oq_core::Event::FundingCharged {
+            instrument: None,
+            at,
+            amount: s.model,
+        });
+        println!(
+            "funding          settlement {} rate {} mark {}: venue {} model {}{}",
+            s.at_ms,
+            s.rate,
+            s.mark,
+            cash_text(s.venue),
+            cash_text(s.model),
+            if s.verified {
+                ""
+            } else {
+                "  NOT REPRODUCED from the live positions"
+            }
+        );
+    }
+    // Said once, when it becomes so; the end of the run says it again.
+    if let Some(why) = funding.problem()
+        && before.as_deref() != Some(why)
+    {
+        eprintln!("funding          unavailable for this run: {why}");
+    }
+    settled
+}
+
+/// Cash to its last place, as the venue writes it.
+fn cash_text(c: Cash) -> String {
+    let sign = if c.0 < 0 { "-" } else { "" };
+    let v = c.0.unsigned_abs();
+    format!("{sign}{}.{:08}", v / 100_000_000, v % 100_000_000)
+}
 
 /// Observations kept for the tick file: a week at one a second. A run
 /// that goes on longer keeps its latest week, which is what a markout of

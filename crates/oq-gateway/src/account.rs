@@ -170,6 +170,45 @@ pub trait Account: Execution {
         Ok(None)
     }
 
+    /// Funding the account was charged or paid on this symbol since
+    /// `since_ms`, one entry per ledger line, oldest first.
+    ///
+    /// `Ok(None)` when the adapter does not report it, as with
+    /// [`Account::fees_charged`]: funding nobody read is unavailable,
+    /// never zero.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    fn funding_charged(
+        &self,
+        _symbol: &str,
+        _since_ms: i64,
+    ) -> Result<Option<Vec<FundingCharge>>, VenueError> {
+        Ok(None)
+    }
+
+    /// The rates and marks the venue settled at since `since_ms`, oldest
+    /// first. `Ok(None)` when the adapter does not report them.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    fn funding_rates(
+        &self,
+        _symbol: &str,
+        _since_ms: i64,
+    ) -> Result<Option<Vec<SettledRate>>, VenueError> {
+        Ok(None)
+    }
+
+    /// When the next funding settlement is, by the venue's clock.
+    /// `Ok(None)` when the adapter does not report it.
+    ///
+    /// # Errors
+    /// Anything the request reports.
+    fn next_funding_ms(&self, _symbol: &str) -> Result<Option<i64>, VenueError> {
+        Ok(None)
+    }
+
     fn open_user_stream(&self) -> Result<UserStream, VenueError>;
 
     /// Tell the venue the stream is still wanted.
@@ -187,6 +226,33 @@ pub trait Account: Execution {
     /// # Errors
     /// Whatever the request reports.
     fn close_user_stream(&self) -> Result<(), VenueError>;
+}
+
+/// One funding settlement on the account, as the venue booked it.
+///
+/// The venue's own ledger entry, not a figure derived from a rate: the
+/// point of reading it is to have the number that was actually paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FundingCharge {
+    /// When the venue booked it.
+    pub time_ms: i64,
+    /// Received positive, paid negative — the kernel's sign for funding.
+    pub amount: Cash,
+    /// The venue's id for the entry, so pages that overlap count it once.
+    pub id: i64,
+}
+
+/// A settled funding rate: the rate and mark price the venue charged
+/// every position at one settlement.
+///
+/// Kept as the venue's decimal text. The mark carries more places than
+/// the contract's price grid, and rounding it to a tick would make the
+/// amount computed from it differ from the one the venue charged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettledRate {
+    pub time_ms: i64,
+    pub rate: String,
+    pub mark: String,
 }
 
 /// One of the account's own trades, as the venue records it.
@@ -271,6 +337,23 @@ impl Account for Box<dyn Account> {
     }
     fn trade_history(&self, symbol: &str) -> Result<Option<Vec<AccountTrade>>, VenueError> {
         (**self).trade_history(symbol)
+    }
+    fn funding_charged(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<FundingCharge>>, VenueError> {
+        (**self).funding_charged(symbol, since_ms)
+    }
+    fn funding_rates(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<SettledRate>>, VenueError> {
+        (**self).funding_rates(symbol, since_ms)
+    }
+    fn next_funding_ms(&self, symbol: &str) -> Result<Option<i64>, VenueError> {
+        (**self).next_funding_ms(symbol)
     }
     fn open_user_stream(&self) -> Result<UserStream, VenueError> {
         (**self).open_user_stream()

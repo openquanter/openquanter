@@ -45,6 +45,7 @@ pub mod clock;
 pub mod control;
 pub mod env;
 pub mod feed;
+pub mod funding;
 pub mod interlock;
 pub mod latency;
 pub mod metrics;

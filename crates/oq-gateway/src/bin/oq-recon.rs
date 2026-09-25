@@ -45,7 +45,8 @@ fn main() -> std::process::ExitCode {
              \x20                      [--order CLIENT_ID]... [--interval SECS] [--testnet]\n\
              \x20      oq-recon <SYMBOL> --watch [--interval SECS] [--latest FILE] [--testnet]\n\
              \x20      oq-recon <SYMBOL> --record FILE      [--testnet]\n\
-             \x20      oq-recon <SYMBOL> --against FILE     [--testnet]\n\n\
+             \x20      oq-recon <SYMBOL> --against FILE     [--testnet]\n\
+             \x20      oq-recon <SYMBOL> --funding SINCE_MS [--testnet]\n\n\
              Reads the account. Places nothing.\n\n\
              Default is a gate: it compares against the expectation you give and \n\
              exits non-zero on a position that does not match.\n\
@@ -57,6 +58,9 @@ fn main() -> std::process::ExitCode {
              and exits non-zero on any difference. That pair is the cutover \n\
              procedure's steps 2 and 5, which were otherwise an operator \n\
              comparing two terminal outputs by eye with the position naked.\n\n\
+             --funding lists every settlement since SINCE_MS (unix ms): the \n\
+             rate and mark the venue settled at, and the account's funding \n\
+             ledger lines, as the venue booked them.\n\n\
              Exits 0 matched, 1 diverged, 2 bad arguments, 3 could not read \n\
              the account. 3 is not 0: not checking is not the same as passing."
         );
@@ -73,6 +77,8 @@ fn main() -> std::process::ExitCode {
     // Under --watch: the latest reading, rewritten after every read.
     let mut latest: Option<String> = None;
     let mut watching = false;
+    // Under --funding: list settlements since this time instead.
+    let mut funding_since: Option<i64> = None;
     let mut base = Binance::MAINNET;
 
     let mut i = 1;
@@ -129,6 +135,14 @@ fn main() -> std::process::ExitCode {
                     return std::process::ExitCode::from(2);
                 };
                 against = Some(v.clone());
+                i += 1;
+            }
+            "--funding" => {
+                let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) else {
+                    eprintln!("--funding needs a time in unix milliseconds");
+                    return std::process::ExitCode::from(2);
+                };
+                funding_since = Some(v);
                 i += 1;
             }
             "--interval" => {
@@ -219,6 +233,10 @@ fn main() -> std::process::ExitCode {
         // account is unread, which is a different thing to tell a caller.
         eprintln!("giving up on the venue clock; signed reads would be refused");
         return std::process::ExitCode::from(3);
+    }
+
+    if let Some(since) = funding_since {
+        return list_funding(&venue, &symbol, since);
     }
 
     let describe_only = !watching && expected.legs.is_empty() && expected.working_orders.is_empty();
@@ -549,6 +567,43 @@ fn parse_leg(side: &str, spec: &str) -> Result<ExpectedLeg, String> {
             .parse()
             .map_err(|_| format!("{price:?} is not a price"))?,
     })
+}
+
+/// Settlements since `since`: the venue's rate and mark, then the
+/// account's ledger lines. Read only; for checking what a funding
+/// computation should reproduce.
+fn list_funding(venue: &Binance, symbol: &str, since: i64) -> std::process::ExitCode {
+    use oq_gateway::account::Account;
+    let rates = match venue.funding_rates(symbol, since) {
+        Ok(Some(r)) => r,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            eprintln!("funding rates could not be read: {e}");
+            return std::process::ExitCode::from(3);
+        }
+    };
+    for r in &rates {
+        println!("rate    {} {} mark {}", r.time_ms, r.rate, r.mark);
+    }
+    match venue.funding_charged(symbol, since) {
+        Ok(Some(lines)) => {
+            for l in &lines {
+                let v = l.amount.0;
+                let sign = if v < 0 { "-" } else { "" };
+                let (whole, frac) = (
+                    v.unsigned_abs() / 100_000_000,
+                    v.unsigned_abs() % 100_000_000,
+                );
+                println!("charged {} {sign}{whole}.{frac:08} id {}", l.time_ms, l.id);
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(None) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("funding ledger could not be read: {e}");
+            std::process::ExitCode::from(3)
+        }
+    }
 }
 
 #[cfg(test)]

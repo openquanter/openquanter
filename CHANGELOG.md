@@ -75,6 +75,15 @@ writing it down and better than leaving it out.
   rather than refusing it. The first 64 bytes are byte-identical, so
   one decoder reads both and the kind decides whether the tail is
   there.
+- **`Event::FundingCharged`, and `kind::FUNDING_CHARGED` (13), are added
+  to the schema.** *Changes nothing that does not write one.* Funding
+  booked at the amount the venue charged, as its ledger states it, where
+  `Event::Funding` carries a rate and a mark for the kernel to work the
+  amount out. The distinction is the one between a venue fill and a
+  matched one: a live account has the venue's figure to the last place,
+  and recomputing it would round the venue's mark to the contract's price
+  grid, which the venue does not. The payload is 16 bytes, or 20 with an
+  instrument.
 - **`Event::Submit` names an instrument, and `kind::SUBMIT_ON` (11) is
   added to the schema.** *Changes nothing for a single-instrument
   account.* The same move as `TICK_ON`, for the same reason: an order
@@ -377,6 +386,32 @@ Nothing here has traded real money, and the entry triggers in
   conformance suite drives Hyperliquid, and it now checks the state and
   filled quantity a status answer gives rather than only that the state
   is not empty, which is why it had passed the flat reading.
+
+- **A live run measures funding on both sides.** *Changes the live
+  run's P&L and what attribution reports.* At every settlement the run
+  crosses, both books' legs are recorded; once the venue publishes the
+  settlement, its funding ledger lines are booked to the live books as
+  they stand, and the model's legs are charged at the settlement's rate
+  and mark by the venue's own arithmetic — quantity times mark times
+  rate, truncated toward zero at eight places, the mark unrounded. The
+  same arithmetic on the live legs must reproduce the venue's lines
+  exactly; checked against a testnet account's ledger before release, it
+  reproduced all nine lines across five settlements, four of which
+  rounding would have got wrong. When the check fails, or a settlement
+  goes unanswered, funding is unavailable for the run with that reason.
+  Each settlement is journalled (record kind 11, `funding`). The run's
+  P&L now includes funding, which it claimed to and did not. Venues
+  whose adapters do not read funding report it unavailable, as before.
+- **Attribution says why funding is unavailable.** `Evidence` gains
+  `funding_unavailable`, rendered in place of "no funding was recorded",
+  which was wrong for a settlement still waiting and for a check that
+  failed.
+- **`oq-recon --funding SINCE_MS`** lists the settlements since then: the
+  venue's rate and mark, and the account's funding ledger lines. Read
+  only.
+- **The shadow's net position adds its legs.** It subtracted the short
+  leg, which is held negative, as the books once did before it was
+  caught there; nothing in the live loop read it, so no report changed.
 
 **`Outcome::Unresolved` split from `Outcome::Refused`.** *Changes live
 behaviour.* A submission that was sent and never answered was reported
