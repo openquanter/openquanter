@@ -94,6 +94,14 @@ pub enum Divergence {
     /// Better caught as its own class than as a thousand tiny position
     /// differences.
     OffGrid { what: &'static str, value: f64 },
+    /// A venue figure that is not a number at all.
+    ///
+    /// `NaN` compares false against everything, so every check in
+    /// [`reconcile`] passes it: the account is reported to agree with a
+    /// position nobody reported. Its own class for the same reason
+    /// [`Self::OffGrid`] has one — it is a fact about the venue's answer
+    /// rather than a difference in it.
+    NotANumber { what: &'static str, value: f64 },
 }
 
 impl Divergence {
@@ -116,6 +124,7 @@ impl Divergence {
                 | Self::PositionAbsentAtVenue { .. }
                 | Self::PositionUnknownLocally { .. }
                 | Self::OffGrid { .. }
+                | Self::NotANumber { .. }
         )
     }
 
@@ -153,6 +162,10 @@ impl Divergence {
                 "{what} {value} does not land on the instrument's grid; \
                  the assumed tick or lot size is wrong and every comparison \
                  through it is meaningless"
+            ),
+            Self::NotANumber { what, value } => format!(
+                "the venue's {what} is {value}, which is not a number; \
+                 nothing can be compared against it"
             ),
         }
     }
@@ -248,6 +261,26 @@ impl Default for Tolerance {
 #[must_use]
 pub fn reconcile(expected: &Expectation, venue: &Snapshot, tol: Tolerance) -> Reconciliation {
     let mut divergences = Vec::new();
+
+    // A figure that is not a number compares false against everything,
+    // so each check below would pass it and this would agree with a
+    // position the venue never reported. It is checked once, here,
+    // rather than inside every comparison: it is one fact about the
+    // venue's answer, not a difference per field.
+    for p in &venue.positions {
+        if !p.amount.is_finite() {
+            divergences.push(Divergence::NotANumber {
+                what: "position size",
+                value: p.amount,
+            });
+        }
+        if !p.entry_price.is_finite() {
+            divergences.push(Divergence::NotANumber {
+                what: "position entry price",
+                value: p.entry_price,
+            });
+        }
+    }
 
     if tol.lot > 0.0 {
         for p in &venue.positions {
@@ -409,6 +442,34 @@ mod tests {
         );
         assert!(r.agrees(), "{}", r.render());
         assert!(!r.is_fatal());
+    }
+
+    /// A venue figure of `NaN` compares false against everything, so it
+    /// used to pass every check and the account was reported to agree
+    /// with a position the venue never reported.
+    ///
+    /// This is what `oq-recon` exists to catch — it answers "is the
+    /// venue still where we left it" — so the shape of a wrong green
+    /// light is worth a test of its own.
+    #[test]
+    fn a_venue_figure_that_is_not_a_number_is_a_fatal_divergence() {
+        for (amount, entry) in [(f64::NAN, 71_444.87), (0.256, f64::NAN)] {
+            let venue = snapshot(vec![leg("LONG", amount, entry)], Vec::new());
+            let r = reconcile(
+                &expect(vec![want("LONG", 0.256, 71_444.87)], Vec::new()),
+                &venue,
+                Tolerance::default(),
+            );
+            assert!(!r.agrees(), "a NaN must not read as agreement");
+            assert!(r.is_fatal(), "nothing can be compared against it");
+            assert!(
+                r.divergences
+                    .iter()
+                    .any(|d| matches!(d, Divergence::NotANumber { .. })),
+                "amount {amount}, entry {entry}: {:?}",
+                r.divergences
+            );
+        }
     }
 
     /// A leg closed to zero locally and a leg the venue does not mention
