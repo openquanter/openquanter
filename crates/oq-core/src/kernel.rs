@@ -192,6 +192,13 @@ pub struct State {
     /// Trading fees charged so far, positive.
     pub fees: Cash,
     pub fee_schedule: Fees,
+    /// Whether a schedule was configured at all.
+    ///
+    /// A schedule of zero rates and no schedule are the same arithmetic
+    /// and different facts: the first says nothing is charged, the second
+    /// says nobody has told these books what is charged. A run's fees are
+    /// a measurement only in the first case.
+    pub fees_configured: bool,
     pub now: Nanos,
     pub enforce_liquidation: bool,
     pub matching: Matching,
@@ -303,6 +310,7 @@ impl State {
             now: Nanos::ZERO,
             fees: Cash::ZERO,
             fee_schedule: Fees::none(),
+            fees_configured: false,
             enforce_liquidation: true,
             matching: Matching::Simulated,
         }
@@ -318,6 +326,7 @@ impl State {
     #[must_use]
     pub const fn with_fees(mut self, fees: Fees) -> Self {
         self.fee_schedule = fees;
+        self.fees_configured = true;
         self
     }
 
@@ -1359,6 +1368,7 @@ impl Kernel {
             realized: self.state.realized,
             funding: self.state.funding,
             fees: self.state.fees,
+            fees_configured: self.state.fees_configured,
             equity: self.state.equity(),
             mark: self.state.holding().mark,
             now: self.state.now,
@@ -1412,6 +1422,8 @@ pub struct Summary {
     pub short_qty: QtyLots,
     pub short_entry: PriceTicks,
     pub balance: Cash,
+    /// Whether a fee schedule was configured; see `State::fees_configured`.
+    pub fees_configured: bool,
     pub realized: Cash,
     pub funding: Cash,
     pub fees: Cash,
@@ -1521,6 +1533,10 @@ mod tests {
         assert!(fees.charge(BTC, &fill).0 < 0, "a rebate must stay negative");
     }
 
+    /// Zero fees from a schedule of zero rates and zero fees from no
+    /// schedule are the same number and different facts, and a run that
+    /// reports the second as the first claims a measurement it never
+    /// made.
     #[test]
     fn no_fee_schedule_means_no_fees() {
         let mut k = kernel(10_000);
@@ -1528,6 +1544,19 @@ mod tests {
         k.apply(&buy(1, 1_000_000, 10, 1));
         k.apply(&tick(2, 1_000_000));
         assert_eq!(k.summary().fees, Cash::ZERO);
+        assert!(!k.summary().fees_configured, "nothing was configured");
+
+        // And configuring one — even one that charges nothing — is a
+        // different answer to "is this a measurement".
+        let mut rated = Kernel::new(
+            State::new(InstrumentId::new(1), BTC, table(), Cash::from_units(10_000))
+                .with_fees(Fees::none()),
+        );
+        rated.apply(&tick(1, 1_000_000));
+        rated.apply(&buy(1, 1_000_000, 10, 1));
+        rated.apply(&tick(2, 1_000_000));
+        assert_eq!(rated.summary().fees, Cash::ZERO);
+        assert!(rated.summary().fees_configured);
     }
 
     #[test]
