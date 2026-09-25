@@ -170,6 +170,9 @@ pub struct Session<E: Execution> {
     journal: Option<oq_journal::Writer>,
     /// Why the journal stopped taking records, once it has.
     journal_lost: Option<String>,
+    /// Why the kill switch was tripped, from the first halt until a
+    /// resume clears it.
+    halt_reason: Option<String>,
     venue: E,
     gate: RiskGate,
     book: Book,
@@ -249,6 +252,7 @@ impl<E: Execution> Session<E> {
             submit_latency: Latency::new(),
             journal: None,
             journal_lost: None,
+            halt_reason: None,
             venue,
             gate,
             book,
@@ -353,6 +357,52 @@ impl<E: Execution> Session<E> {
                 false
             }
         }
+    }
+
+    /// Note why trading was halted. The first reason is kept: later
+    /// halts are usually consequences of it.
+    pub fn note_halt(&mut self, why: &str) {
+        if self.halt_reason.is_none() {
+            self.halt_reason = Some(why.to_string());
+        }
+    }
+
+    /// Why trading is halted, if it is.
+    #[must_use]
+    pub fn halt_reason(&self) -> Option<&str> {
+        if self.gate.kill_switch().is_tripped() {
+            Some(
+                self.halt_reason
+                    .as_deref()
+                    .unwrap_or("halted, reason not recorded"),
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Clear the kill switch, and the reason with it.
+    pub fn clear_halt(&mut self) {
+        self.gate.kill_switch().clear();
+        self.halt_reason = None;
+    }
+
+    /// Record an operator's command and what came of it.
+    pub fn record_operator(
+        &mut self,
+        at: oq_types::Nanos,
+        command: &str,
+        reason: &str,
+        origin: &str,
+        outcome: &str,
+    ) {
+        self.write(&Record::Operator {
+            at,
+            command: command.to_string(),
+            reason: reason.to_string(),
+            origin: origin.to_string(),
+            outcome: outcome.to_string(),
+        });
     }
 
     /// Why the journal stopped taking records, if it has.

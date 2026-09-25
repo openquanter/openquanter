@@ -62,6 +62,8 @@ pub mod kind {
     /// order submitted and accepted, and could see no fill, and had no
     /// way to learn it was gone.
     pub const CANCELLED: u16 = 9;
+    /// A command an operator gave through the control port.
+    pub const OPERATOR: u16 = 10;
 }
 
 /// How a submitted order turned out.
@@ -195,6 +197,21 @@ pub enum Record {
         at: Nanos,
         entries: Vec<(String, i64)>,
     },
+    /// An operator's command through the control port, and whether it
+    /// was carried out.
+    ///
+    /// In the journal beside the trading it changed, so "who stopped it,
+    /// when, and why" is read from the same record as what it was doing.
+    /// `origin` is who asked as authenticated upstream plus the uid the
+    /// kernel reported for the connection — never a name the caller
+    /// merely claimed.
+    Operator {
+        at: Nanos,
+        command: String,
+        reason: String,
+        origin: String,
+        outcome: String,
+    },
 }
 
 impl Record {
@@ -211,6 +228,7 @@ impl Record {
             Self::Cancelled { .. } => kind::CANCELLED,
             Self::Reconciled { .. } => kind::RECONCILED,
             Self::Waiting { .. } => kind::WAITING,
+            Self::Operator { .. } => kind::OPERATOR,
         }
     }
 
@@ -316,6 +334,19 @@ impl Record {
                     put_i64(&mut out, *value);
                 }
             }
+            Self::Operator {
+                at,
+                command,
+                reason,
+                origin,
+                outcome,
+            } => {
+                put_i64(&mut out, at.0);
+                put_str(&mut out, command);
+                put_str(&mut out, reason);
+                put_str(&mut out, origin);
+                put_str(&mut out, outcome);
+            }
             Self::Reconciled { at, legs } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(legs.len()).unwrap_or(0));
@@ -397,6 +428,13 @@ impl Record {
                 }
                 Self::Waiting { at, entries }
             }
+            kind::OPERATOR => Self::Operator {
+                at: Nanos(take_i64(&mut p)?),
+                command: take_str(&mut p)?,
+                reason: take_str(&mut p)?,
+                origin: take_str(&mut p)?,
+                outcome: take_str(&mut p)?,
+            },
             kind::RECONCILED => {
                 let at = Nanos(take_i64(&mut p)?);
                 let n = take_i64(&mut p)?;
@@ -509,6 +547,13 @@ mod tests {
         roundtrip(&Record::Refused {
             at: Nanos(10),
             breach: "Halted".into(),
+        });
+        roundtrip(&Record::Operator {
+            at: Nanos(9),
+            command: "halt".into(),
+            reason: "feed looks wrong".into(),
+            origin: "uid 995 deck alice".into(),
+            outcome: "halted".into(),
         });
         roundtrip(&Record::Waiting {
             at: Nanos(12),

@@ -74,6 +74,17 @@ pub trait Environment {
     /// Where durable process state — the reserved order ids — lives.
     fn state_root(&self) -> Option<PathBuf>;
 
+    /// The operator's control port for the process named `name`, if this
+    /// environment has one. `None` is a process without a port, which
+    /// trades exactly as before.
+    ///
+    /// # Errors
+    /// A port that should exist and could not be made; the caller reports
+    /// it and trades on without one.
+    fn control(&self, _name: &str) -> Result<Option<Box<dyn crate::control::Control>>, String> {
+        Ok(None)
+    }
+
     /// Open the journal at `path` for appending.
     ///
     /// # Errors
@@ -144,6 +155,26 @@ impl Environment for Production {
 
     fn shutdown_requested(&self) -> bool {
         oq_l2feed::session::shutdown_requested()
+    }
+
+    /// A socket in the service's runtime directory, when it has one.
+    ///
+    /// No runtime directory is not an error: a process started from a
+    /// shell has none, and gets no port rather than one in `/tmp`.
+    fn control(&self, name: &str) -> Result<Option<Box<dyn crate::control::Control>>, String> {
+        #[cfg(unix)]
+        {
+            if std::env::var_os("RUNTIME_DIRECTORY").is_none() {
+                return Ok(None);
+            }
+            crate::control::Socket::open(name)
+                .map(|s| Some(Box::new(s) as Box<dyn crate::control::Control>))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            Ok(None)
+        }
     }
 
     fn listen_for_shutdown(&self) {

@@ -67,6 +67,9 @@ pub struct SimConfig {
     /// Hedge mode: a long and a short leg held at once, each order
     /// naming its leg. Off is one-way netting.
     pub hedged: bool,
+    /// Control-port request lines, each delivered once the run has been
+    /// going this long: an operator, scripted.
+    pub control: Vec<(Duration, String)>,
 }
 
 /// Failures the simulated venue injects, each in parts per million of
@@ -151,6 +154,8 @@ struct Core {
     placed: Vec<(String, Duration)>,
     /// Every order withdrawn by a cancel, and when.
     withdrawn: Vec<(String, Duration)>,
+    /// Each scripted control request and the answer it got.
+    control_answers: Rc<RefCell<Vec<(String, String)>>>,
     /// When the silent fill happened, if it has.
     silent_at: Option<Duration>,
 }
@@ -180,6 +185,7 @@ impl Core {
             generation: 0,
             placed: Vec::new(),
             withdrawn: Vec::new(),
+            control_answers: Rc::new(RefCell::new(Vec::new())),
             silent_at: None,
             cfg,
         }
@@ -440,6 +446,13 @@ impl Sim {
         self.0.borrow().withdrawn.clone()
     }
 
+    /// Each scripted control request, with the line of JSON it was
+    /// answered with, in the order answered.
+    #[must_use]
+    pub fn control_answers(&self) -> Vec<(String, String)> {
+        self.0.borrow().control_answers.borrow().clone()
+    }
+
     /// When the silent fill happened, if it has.
     #[must_use]
     pub fn silent_at(&self) -> Option<Duration> {
@@ -616,6 +629,22 @@ impl Events for NoWire {
 impl Environment for SimEnv {
     fn clock(&self) -> &dyn Clock {
         &self.clock
+    }
+
+    fn control(&self, _name: &str) -> Result<Option<Box<dyn crate::control::Control>>, String> {
+        let (script, answers) = {
+            let core = self.sim.0.borrow();
+            (core.cfg.control.clone(), Rc::clone(&core.control_answers))
+        };
+        if script.is_empty() {
+            return Ok(None);
+        }
+        let sim = self.sim.clone();
+        Ok(Some(Box::new(crate::control::Scripted::new(
+            script,
+            Box::new(move || sim.elapsed()),
+            answers,
+        ))))
     }
 
     fn open_journal(&self, path: &std::path::Path) -> oq_journal::Result<oq_journal::Writer> {

@@ -82,6 +82,7 @@ OPTIONS:
     --journal <PATH>       Where to record decisions [default: oq-trade.oqj]
     --no-journal           Trade without recording. Nothing can be replayed
     --adopt-existing       Start beside a position the venue already holds
+    --control-allow-resume Let the control port clear the kill switch; off by default
     --live                 Trade with real money; needs OQ_ALLOW_LIVE=i-understand
     --help
 ";
@@ -311,6 +312,7 @@ fn main() -> ExitCode {
             max_rate: 10,
             rate_window: Nanos(60 * 1_000_000_000),
         },
+        control_allow_resume: args.iter().any(|a| a == "--control-allow-resume"),
     };
 
     // The venue is built here rather than inside `run`, because which
