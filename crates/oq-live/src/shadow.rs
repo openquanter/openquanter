@@ -193,6 +193,10 @@ pub struct Shadow {
     /// Venue fills waiting for the model to produce them.
     unmatched_venue: Vec<Pending>,
     divergences: Vec<Divergence>,
+    /// Every fill each side made, in order, for the run files a console
+    /// compares: `(at, order, side, price, qty)`.
+    model_log: Vec<(Nanos, OrderId, Side, PriceTicks, QtyLots)>,
+    venue_log: Vec<(Nanos, OrderId, Side, PriceTicks, QtyLots)>,
     /// Events applied, so a run can say how much comparing it did.
     applied: usize,
     /// How long a fill may go unmatched before it is called a
@@ -223,6 +227,8 @@ impl Shadow {
             unmatched_model: Vec::new(),
             unmatched_venue: Vec::new(),
             divergences: Vec::new(),
+            model_log: Vec::new(),
+            venue_log: Vec::new(),
             applied: 0,
             grace: Nanos(2_000_000_000),
         }
@@ -276,6 +282,7 @@ impl Shadow {
         qty: QtyLots,
         at: Nanos,
     ) {
+        self.venue_log.push((at, id, side, price, qty));
         // Match against a model fill for the same order, if there is
         // one. Matching by order id rather than by price: the whole
         // point is to notice when the prices differ.
@@ -435,7 +442,33 @@ impl Shadow {
         self.expire(at);
     }
 
+    /// Each side's fills as run-file records: `(venue, model)`.
+    ///
+    /// Tagged with the strategy's order id, so the two lists line up by
+    /// the decision that produced them.
+    #[must_use]
+    pub fn fills(&self, symbol: &str) -> (Vec<oq_parity::Fill>, Vec<oq_parity::Fill>) {
+        let convert = |log: &[(Nanos, OrderId, Side, PriceTicks, QtyLots)]| {
+            log.iter()
+                .map(|(at, id, side, price, qty)| {
+                    oq_parity::Fill::new(at.0, symbol, *side, price.0, qty.0)
+                        .with_tag(id.0.to_string())
+                })
+                .collect()
+        };
+        (convert(&self.venue_log), convert(&self.model_log))
+    }
+
+    /// The matched and unmatched fills so far, for a report taken
+    /// mid-run: `(matched, unmatched)`.
+    #[must_use]
+    pub fn evidence_counts(&self) -> (usize, usize) {
+        (self.matched.len(), self.unpaired.len())
+    }
+
     fn record_model_fill(&mut self, fill: &Fill, at: Nanos) {
+        self.model_log
+            .push((at, fill.order, fill.side, fill.price, fill.qty));
         if let Some(i) = self.unmatched_venue.iter().position(|p| p.id == fill.order) {
             let venue = self.unmatched_venue.remove(i);
             if venue.price != fill.price {

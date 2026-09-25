@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 oq-core.workspace = true
+oq-data.workspace = true
 oq-engine.workspace = true
 oq-margin.workspace = true
 oq-gateway.workspace = true

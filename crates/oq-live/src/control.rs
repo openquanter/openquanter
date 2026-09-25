@@ -23,8 +23,8 @@
 //! <command>\t<origin>\t<reason>
 //! ```
 //!
-//! `command` is `status`, `orders`, `metrics`, `halt`, `shutdown` or
-//! `resume`. `origin` is who is asking as the caller authenticated them
+//! `command` is `status`, `orders`, `metrics`, `attribution`, `halt`,
+//! `shutdown` or `resume`. `origin` is who is asking as the caller authenticated them
 //! (for the agent: the deck user and step-up credential); the port adds
 //! the peer's uid, which it read from the kernel, and records both.
 //! `reason` is required for the three that change anything. The answer is
@@ -58,6 +58,9 @@ pub enum Command {
     Orders,
     /// The Prometheus text the heartbeat's numbers come from.
     Metrics,
+    /// The gap between what the venue made and what the shadow backtest
+    /// made on the same observations, decomposed, as of now.
+    Attribution,
     /// Stop opening, withdraw opening orders, keep the closing ones.
     Halt(String),
     /// Withdraw everything and exit, as on SIGTERM, and do not come back.
@@ -80,6 +83,7 @@ impl Command {
             Self::Status => "status",
             Self::Orders => "orders",
             Self::Metrics => "metrics",
+            Self::Attribution => "attribution",
             Self::Halt(_) => "halt",
             Self::Shutdown(_) => "shutdown",
             Self::Resume(_) => "resume",
@@ -140,6 +144,7 @@ pub fn parse(line: &str) -> Result<(Command, String), String> {
         "status" => Command::Status,
         "orders" => Command::Orders,
         "metrics" => Command::Metrics,
+        "attribution" => Command::Attribution,
         "halt" => needs_reason(Command::Halt)?,
         "shutdown" => needs_reason(Command::Shutdown)?,
         "resume" => needs_reason(Command::Resume)?,

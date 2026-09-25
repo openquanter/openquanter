@@ -273,15 +273,16 @@ crates (23)
 
 the live path
   oq-live
-    oq-core oq-engine oq-gateway oq-ingest oq-journal oq-l2feed
-    oq-margin oq-parity oq-risk oq-sim oq-strategy oq-types
+    oq-core oq-data oq-engine oq-gateway oq-ingest oq-journal
+    oq-l2feed oq-margin oq-parity oq-risk oq-sim oq-strategy
+    oq-types
   oq-backtest
     oq-core oq-engine oq-margin oq-stats oq-strategy oq-types
 
 shared by both
   oq-core oq-engine oq-margin oq-strategy oq-types
 live only
-  oq-gateway oq-ingest oq-journal oq-l2feed oq-parity oq-risk oq-sim
+  oq-data oq-gateway oq-ingest oq-journal oq-l2feed oq-parity oq-risk oq-sim
 backtest only
   oq-stats
 ```

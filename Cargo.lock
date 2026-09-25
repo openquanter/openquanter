@@ -1039,6 +1039,7 @@ name = "oq-live"
 version = "2.0.0-alpha.1"
 dependencies = [
  "oq-core",
+ "oq-data",
  "oq-engine",
  "oq-examples",
  "oq-gateway",

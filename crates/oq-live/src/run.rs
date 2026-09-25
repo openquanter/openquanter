@@ -865,6 +865,21 @@ where
     let mut journal_halted = false;
     // An operator's shutdown, once given: ends the loop like a signal.
     let mut operator_exit: Option<String> = None;
+    // What a console reads besides the journal: the run's own fills and
+    // the model's as run files, and the observations as a tick file, all
+    // beside the journal and rewritten on a schedule and at the end.
+    let artifacts = (!no_journal).then(|| Artifacts {
+        stem: std::path::Path::new(&journal_path).with_extension(""),
+        manifest: run_manifest(cfg, &symbol),
+        symbol: symbol.clone(),
+    });
+    let mut observed: std::collections::VecDeque<oq_engine::Tick> =
+        std::collections::VecDeque::new();
+    let mut last_artifacts = clock.elapsed();
+    // The venue's fee statement, asked for when the files are written and
+    // kept for an attribution asked for in between. `None` until asked,
+    // and after an adapter that does not report fees.
+    let mut fee_pair: Option<(Cash, Cash)> = None;
     // The last position check: when, and whether the books agreed.
     let mut last_reconcile: Option<(Nanos, bool)> = None;
     let mut reported_unresolved = 0_u64;
@@ -975,6 +990,10 @@ where
                                 println!("books            {output:?}");
                             }
                             last_tick = Some(tick);
+                            observed.push_back(tick);
+                            while observed.len() > MAX_OBSERVED {
+                                observed.pop_front();
+                            }
                             let ctx = context_for(&books, tick, trader.working());
                             for outcome in trader.on_tick(&ctx, now) {
                                 if let Outcome::Sent { local, .. } = &outcome {
@@ -1340,6 +1359,16 @@ where
                         })
                     }
                     crate::control::Command::Orders => orders_reply(&trader),
+                    crate::control::Command::Attribution => {
+                        let a = oq_parity::attribution::attribute(
+                            run_manifest(cfg, &symbol),
+                            &instrument,
+                            books.realized_net(),
+                            shadow.model_pnl(),
+                            &shadow.evidence(None, fee_pair),
+                        );
+                        attribution_reply(&a, shadow.evidence_counts())
+                    }
                     crate::control::Command::Metrics => {
                         metrics.halted = trader.session().gate().kill_switch().is_tripped();
                         let mut j = crate::control::Json::new();
@@ -1545,6 +1574,21 @@ where
             }
         }
 
+        if let Some(a) = &artifacts
+            && clock.elapsed().saturating_sub(last_artifacts) >= ARTIFACTS_EVERY
+        {
+            last_artifacts = clock.elapsed();
+            fee_pair = trader
+                .venue()
+                .fees_charged(&symbol, started_ms)
+                .ok()
+                .flatten()
+                .map(|v| fee_evidence(v, shadow.model_fees()));
+            if let Err(e) = a.write(&shadow, books.realized_net(), &observed) {
+                eprintln!("artifacts        could not be written: {e}");
+            }
+        }
+
         if clock.elapsed().saturating_sub(last_tick_report) >= Duration::from_secs(30) {
             last_tick_report = clock.elapsed();
             // Submissions the venue never answered, asked about again.
@@ -1681,12 +1725,7 @@ where
         // mistaken for one from a different build or contract. The
         // limits are in the config hash because a limit that fired is
         // part of why the two arms differ.
-        oq_parity::RunManifest::from_content(
-            option_env!("GIT_COMMIT").unwrap_or("unknown"),
-            symbol.as_bytes(),
-            format!("{:?}", cfg.limits).as_bytes(),
-            format!("{}-{symbol}", cfg.strategy_name),
-        ),
+        run_manifest(cfg, &symbol),
         &instrument,
         books.realized_net(),
         shadow.model_pnl(),
@@ -1699,6 +1738,15 @@ where
         &shadow.evidence(None, venue_fees.map(|v| fee_evidence(v, shadow_fees))),
     );
     print!("{}", attribution.render());
+    if let Some(a) = &artifacts {
+        match a.write(&shadow, books.realized_net(), &observed) {
+            Ok(()) => println!(
+                "artifacts        {}.{{live.run,model.run,oqtk}}",
+                a.stem.display()
+            ),
+            Err(e) => eprintln!("artifacts        could not be written: {e}"),
+        }
+    }
 
     // What a monitoring system would have read, and what it would have
     // woken somebody for. Printed at the end because this build has no
@@ -3790,4 +3838,127 @@ fn resume_refusal(
         ));
     }
     None
+}
+
+/// How often the run files are rewritten while a run goes on.
+const ARTIFACTS_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// Observations kept for the tick file: a week at one a second. A run
+/// that goes on longer keeps its latest week, which is what a markout of
+/// recent fills is priced against.
+const MAX_OBSERVED: usize = 7 * 24 * 3600;
+
+/// Identified by what this run was, so a report cannot be mistaken for
+/// one from a different build or contract. The limits are in the config
+/// hash because a limit that fired is part of why the two arms differ.
+fn run_manifest(cfg: &RunConfig, symbol: &str) -> oq_parity::RunManifest {
+    oq_parity::RunManifest::from_content(
+        option_env!("GIT_COMMIT").unwrap_or("unknown"),
+        symbol.as_bytes(),
+        format!("{:?}", cfg.limits).as_bytes(),
+        format!("{}-{symbol}", cfg.strategy_name),
+    )
+}
+
+/// The files a console reads beside a run's journal.
+///
+/// `<stem>.live.run` is what the venue filled and `<stem>.model.run`
+/// what the shadow backtest filled on the same observations, under one
+/// identity — so comparing them is the parity question the console asks,
+/// and never an invalidated one. `<stem>.oqtk` is the observations, for
+/// a markout to price fills against. All three are written aside and
+/// renamed, so a reader never sees half of one.
+struct Artifacts {
+    stem: std::path::PathBuf,
+    manifest: oq_parity::RunManifest,
+    symbol: String,
+}
+
+impl Artifacts {
+    fn write(
+        &self,
+        shadow: &crate::shadow::Shadow,
+        live_pnl: Cash,
+        observed: &std::collections::VecDeque<oq_engine::Tick>,
+    ) -> Result<(), String> {
+        #[allow(clippy::cast_precision_loss)]
+        let money = |c: Cash| c.0 as f64 / oq_types::CASH_SCALE as f64;
+        let (venue, model) = shadow.fills(&self.symbol);
+        let live = oq_parity::wire::Run::new(
+            oq_parity::RunManifest {
+                label: format!("{} live", self.manifest.label),
+                ..self.manifest.clone()
+            },
+            oq_parity::RunOutput::new(venue, money(live_pnl)),
+        );
+        let modelled = oq_parity::wire::Run::new(
+            oq_parity::RunManifest {
+                label: format!("{} model", self.manifest.label),
+                ..self.manifest.clone()
+            },
+            oq_parity::RunOutput::new(model, money(shadow.model_pnl())),
+        );
+        let ticks: Vec<oq_engine::Tick> = observed.iter().copied().collect();
+        write_aside(&self.path("live.run"), live.render().as_bytes())?;
+        write_aside(&self.path("model.run"), modelled.render().as_bytes())?;
+        write_aside(&self.path("oqtk"), &oq_data::ticks::encode(1, &ticks))
+    }
+
+    fn path(&self, suffix: &str) -> std::path::PathBuf {
+        let mut name = self.stem.clone().into_os_string();
+        name.push(".");
+        name.push(suffix);
+        std::path::PathBuf::from(name)
+    }
+}
+
+fn write_aside(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// An attribution as the control port answers it.
+fn attribution_reply(a: &oq_parity::attribution::Attribution, counts: (usize, usize)) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let money = |c: Cash| c.0 as f64 / oq_types::CASH_SCALE as f64;
+    let mut j = crate::control::Json::new();
+    j.begin_object()
+        .bool("ok", true)
+        .str("method", "shadow")
+        .str("label", &a.manifest.label)
+        .str("code_commit", &a.manifest.code_commit)
+        .str("live_pnl", &format!("{}", money(a.live_pnl)))
+        .str("model_pnl", &format!("{}", money(a.model_pnl)))
+        .str("gap", &format!("{}", money(a.gap)))
+        .uint("matched_fills", counts.0 as u64)
+        .uint("unmatched_fills", counts.1 as u64);
+    match a.residual {
+        Some(r) => j.str("residual", &format!("{}", money(r))),
+        None => j.null("residual"),
+    };
+    match a.residual_share() {
+        Some(r) => j.str("residual_share", &format!("{r}")),
+        None => j.null("residual_share"),
+    };
+    j.field("components").begin_array();
+    for (component, value) in &a.components {
+        j.begin_object()
+            .str("name", component.label())
+            .bool("observed", component.is_observed());
+        match value {
+            oq_parity::attribution::Attributed::Explained(c) => {
+                j.str("amount", &format!("{}", money(*c)))
+                    .null("unavailable");
+            }
+            oq_parity::attribution::Attributed::Unavailable(why) => {
+                j.null("amount").str("unavailable", why);
+            }
+        }
+        j.end_object();
+    }
+    j.end_array().end_object();
+    j.finish()
 }

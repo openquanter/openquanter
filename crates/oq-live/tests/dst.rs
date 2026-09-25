@@ -823,3 +823,71 @@ fn a_malformed_request_is_refused_and_changes_nothing() {
     );
     assert!(operator_records("opbad", 8).is_empty());
 }
+
+/// A run leaves what a console reads beside its journal: its own fills
+/// and the shadow backtest's as run files under one identity, and its
+/// observations as a tick file. And it answers for its attribution while
+/// it runs.
+#[test]
+fn a_run_leaves_run_files_a_tick_file_and_answers_for_its_attribution() {
+    let (sim, code, _) = run_controlled(
+        "artifacts",
+        9,
+        20,
+        Faults::default(),
+        Kind::Quoter,
+        &[(Duration::from_secs(10 * 60), "attribution\tdeck test\t")],
+        false,
+    );
+    assert_eq!(code, ExitCode::SUCCESS);
+    let dir = dir_path("artifacts", 9);
+    let read = |name: &str| {
+        let text = std::fs::read_to_string(dir.join(name)).expect(name);
+        oq_parity::wire::Run::parse(&text).expect(name)
+    };
+    let live = read("run.live.run");
+    let model = read("run.model.run");
+    assert!(!live.output.fills.is_empty(), "the venue filled something");
+    assert_eq!(
+        (
+            &live.manifest.code_commit,
+            &live.manifest.data_hash,
+            &live.manifest.config_hash
+        ),
+        (
+            &model.manifest.code_commit,
+            &model.manifest.data_hash,
+            &model.manifest.config_hash
+        ),
+        "one identity, so comparing them is a parity question and never an invalidated one"
+    );
+    assert!(live.manifest.label.ends_with("live") && model.manifest.label.ends_with("model"));
+
+    let (header, ticks) =
+        oq_data::ticks::read_file(&dir.join("run.oqtk")).expect("the tick file reads");
+    assert!(ticks.len() > 1000, "{} ticks", ticks.len());
+    assert_eq!(header.count as usize, ticks.len());
+
+    let answers = sim.control_answers();
+    assert_eq!(answers.len(), 1);
+    let a = &answers[0].1;
+    assert!(a.contains(r#""method":"shadow""#), "{a}");
+    for name in [
+        "slippage",
+        "queue position",
+        "latency",
+        "funding vs model",
+        "fee tier",
+    ] {
+        assert!(
+            a.contains(&format!(r#""name":"{name}""#)),
+            "{name} missing: {a}"
+        );
+    }
+    // Funding is never measured here, so the residual must not be a number.
+    assert!(a.contains(r#""residual":null"#), "{a}");
+    assert!(
+        !dir.join("run.live.run.tmp").exists(),
+        "written aside and renamed"
+    );
+}
