@@ -319,7 +319,7 @@ Nothing here has traded real money, and the entry triggers in
   because an error lets a caller `?` past the one case that must be
   handled. A conformance suite drives both adapters through the same
   cases and is itself checked against three deliberately-wrong adapters
-  *(it drives six adapters now; Aster shares Binance's)*.
+  *(it drives all seven adapters now; Aster shares Binance's)*.
   `broker::IdScheme` composes client ids carrying a venue-issued referral
   code, kept separate from the prefix that answers *is this order mine*.
 - `oq-risk` — pre-trade gate, kill switch, startup reconciliation.
@@ -366,6 +366,17 @@ Nothing here has traded real money, and the entry triggers in
   `--record`'s format, rewritten atomically after every read, so a
   journal can be reconciled against the venue without anyone pasting a
   record.
+- **Hyperliquid's order status reads the order, not its envelope.**
+  *Changes what the Hyperliquid adapter reports.* The `orderStatus`
+  answer nests the order inside an envelope with its own `status`, and
+  read flat it gave every order the state `order`; it also reported the
+  quantity still open as the quantity filled, so a full fill read as
+  nothing filled. The order's own state and `origSz` less `sz` are read
+  now, and only `unknownOid` is taken as "no such order" — anything else
+  unreadable is an error rather than a licence to resend. The
+  conformance suite drives Hyperliquid, and it now checks the state and
+  filled quantity a status answer gives rather than only that the state
+  is not empty, which is why it had passed the flat reading.
 
 **`Outcome::Unresolved` split from `Outcome::Refused`.** *Changes live
 behaviour.* A submission that was sent and never answered was reported

@@ -140,10 +140,21 @@ pub(crate) fn raw_field(body: &str, key: &str) -> Option<String> {
 /// the first object anywhere that has the field — which on a response
 /// carrying both `marginSummary` and `crossMarginSummary` is whichever
 /// the venue happened to serialise first.
+///
+/// A match that is not a key is passed over, as [`raw_field`] does: the
+/// name can appear first as a value, and Hyperliquid's `orderStatus`
+/// answer does exactly that — `{"status":"order","order":{…}}` — which
+/// stopping at the first match read as no object at all.
 pub(crate) fn object_field(body: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
-    let at = body.find(&needle)? + needle.len();
-    let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
+    let mut from = 0usize;
+    let rest = loop {
+        let at = body[from..].find(&needle)? + from + needle.len();
+        match body[at..].trim_start().strip_prefix(':') {
+            Some(rest) => break rest.trim_start(),
+            None => from = at,
+        }
+    };
     if !rest.starts_with('{') {
         return None;
     }
@@ -317,6 +328,13 @@ mod tests {
         assert_eq!(raw_field(body, "result").as_deref(), Some("error"));
         // And a key that genuinely is not there is still absent.
         assert_eq!(raw_field(body, "reason"), None);
+    }
+
+    #[test]
+    fn an_object_field_named_first_as_a_value_is_still_found() {
+        let body = r#"{"status":"order","order":{"oid":1}}"#;
+        assert_eq!(object_field(body, "order").as_deref(), Some(r#"{"oid":1}"#));
+        assert_eq!(object_field(r#"{"a":"order"}"#, "order"), None);
     }
 
     #[test]
