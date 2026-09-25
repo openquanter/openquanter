@@ -670,7 +670,9 @@ fn an_operator_halt_stops_the_orders_and_is_on_the_record() {
         answers[0].1
     );
     assert!(
-        answers[1].1.contains(r#""closing":false"#),
+        answers[1].1.contains(r#""closing":false"#)
+            && answers[1].1.contains(r#""side":"BUY""#)
+            && !answers[1].1.contains(r#""price_ticks":null"#),
         "the bid is listed: {}",
         answers[1].1
     );

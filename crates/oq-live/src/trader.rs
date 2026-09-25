@@ -127,6 +127,9 @@ pub struct Trader<S: Strategy, E: Execution> {
     /// cancel did not go through stays out of this set and is tried again.
     withdrawn: BTreeSet<u64>,
     intents: Vec<Intent>,
+    /// What each order was, by strategy id, from when it was sent until
+    /// it is forgotten. `intents` holds only the latest tick's.
+    asked: BTreeMap<u64, (oq_types::Side, Option<PriceTicks>, oq_types::QtyLots)>,
     /// Submissions the venue has not answered, and the id it was given.
     unanswered: Vec<(OrderId, String, Nanos)>,
 }
@@ -157,6 +160,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             closing: BTreeSet::new(),
             withdrawn: BTreeSet::new(),
             intents: Vec::new(),
+            asked: BTreeMap::new(),
             unanswered: Vec::new(),
         }
     }
@@ -290,6 +294,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
             .collect();
         for local in gone {
             self.live.remove(&local);
+            self.asked.remove(&local);
             self.closing.remove(&local);
             self.withdrawn.remove(&local);
         }
@@ -373,6 +378,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
                 }
                 Ok(None) if now.0.saturating_sub(sent.0) >= NOT_FOUND_IS_ANSWER_AFTER.0 => {
                     self.closing.remove(&local.0);
+                    self.asked.remove(&local.0);
                     settled.push((local, false));
                 }
                 // Not found yet, or no answer at all. Kept, not guessed at.
@@ -455,19 +461,7 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         self.live
             .iter()
             .map(|(local, client_id)| {
-                let asked = self.intents.iter().find_map(|i| match i {
-                    Intent::Limit {
-                        id,
-                        side,
-                        price,
-                        qty,
-                        ..
-                    } if id.0 == *local => Some((*side, Some(*price), *qty)),
-                    Intent::Market { id, side, qty, .. } if id.0 == *local => {
-                        Some((*side, None, *qty))
-                    }
-                    _ => None,
-                });
+                let asked = self.asked.get(local).copied();
                 RestingOrder {
                     local: *local,
                     client_id: client_id.clone(),
@@ -570,7 +564,13 @@ impl<S: Strategy, E: Execution> Trader<S, E> {
         now: Nanos,
     ) -> Outcome {
         let closing = order.reduce_only;
-        match self.session.submit(order, mark, now) {
+        self.asked
+            .insert(local.0, (order.side, order.limit_price, order.qty));
+        let submitted = self.session.submit(order, mark, now);
+        if matches!(submitted, Submission::Refused(_) | Submission::Rejected(_)) {
+            self.asked.remove(&local.0);
+        }
+        match submitted {
             Submission::Sent(client_id) => {
                 self.live.insert(local.0, client_id.clone());
                 if closing {
