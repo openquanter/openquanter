@@ -1,5 +1,7 @@
 # Position-carrying cutover
 
+[English](CUTOVER.md) · [中文](CUTOVER.zh-CN.md)
+
 Moving a live strategy from one system to another **without flattening
 the position first**.
 
@@ -213,8 +215,8 @@ were ready.
 - **No freeze command.** Step 1 assumes the old system can be told to
   stop opening while continuing to manage. Whether it can, and how, is a
   property of that system and is not recorded here.
-- ~~**No adoption verification tool.**~~ Closed. `oq-recon --record FILE`
-  writes the account at step 2 and `oq-recon --against FILE` compares a
+- ~~**No adoption verification tool.**~~ Closed. `oq-recon <SYMBOL> --record FILE`
+  writes the account at step 2 and `oq-recon <SYMBOL> --against FILE` compares a
   later reading, exiting non-zero on any difference — a leg that moved, an
   average entry that moved, an order that appeared or vanished. The
   timestamp is deliberately not compared, because the second reading is

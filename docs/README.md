@@ -15,6 +15,7 @@ document links to its counterpart at the top.
 | [Implementation Plan](IMPLEMENTATION.md) · [中文](IMPLEMENTATION.zh-CN.md) | Architecture, design decisions, crate map, phase-by-phase task plan, testing strategy, performance budgets |
 | [Tick Format](TICK-FORMAT.md) · [中文](TICK-FORMAT.zh-CN.md) | The on-disk format a backtest reads: layout, the append-only field rule, integrity versus identity. **§4 onward specifies a proposed v3**; `oq-data` implements v2 |
 | [Run Format](RUN-FORMAT.md) · [中文](RUN-FORMAT.zh-CN.md) | **What a run produced and the identity it produced it under, in one file** — why the manifest is inside it, and why a truncated baseline is refused rather than compared |
+| [Sweep Format](SWEEP-FORMAT.md) · [中文](SWEEP-FORMAT.zh-CN.md) | **What a parameter sweep found and whether it can be trusted, in one file** — every configuration beside the overfitting statistics that judge it, and why a statistic that could not be computed says so |
 | [Cutover](CUTOVER.md) · [中文](CUTOVER.zh-CN.md) | **Moving a live strategy between systems without flattening the position**: the one-system invariant, the exposed interval, and what an abort is — a skeleton, unrehearsed, and explicit about which |
 | [Margin Fidelity](MARGIN-FIDELITY.md) · [中文](MARGIN-FIDELITY.zh-CN.md) | **How wrong a backtest with no margin model is**, why the answer is a cross-window tail rather than a mean, and which of its numbers survive a change of window mix |
 | [Execution](EXECUTION.md) · [中文](EXECUTION.zh-CN.md) | The venue-independent order contract: the three-state outcome, client order ids, and what a lost answer costs |
@@ -42,6 +43,12 @@ the easiest way to misread the project:
 |---|---|
 | Quickstart, Versioning, Changelog | **What exists.** Commands that run today; numbers pinned by `crates/oq-examples/tests/golden.rs` |
 | Capture Format | **What is implemented**, by `oq-l2feed` |
+| Run Format, Sweep Format | **What is implemented**, by `oq-parity` and `oq-backtest` |
+| Execution | **What is implemented**: the order contract `oq-gateway`'s adapters answer to |
+| Margin Fidelity | **What was measured**, and the methodology behind it; the study is `examples/margin_fidelity` |
+| Live Path, More Venues | **Designs written before the code**, annotated where the code has since answered them |
+| Cutover | **A procedure, written and never rehearsed**; every command in it exists |
+| Why OpenQuanter exists | **Motivation and direction**, not state |
 | Tick Format | §1–§3 what `oq-data` implements (v2); §4 onward a **proposed v3** |
 | Requirements, Roadmap, Implementation Plan | **Intent.** Drafts for review — what the framework must do and how it will be built, not what is shipped |
 

@@ -345,7 +345,7 @@ the licence are the same shape.
 
 > This section is about **motivation** — who would pay the switching cost. The
 > **capability matrix** (which user needs which feature) is in [Requirements
-> §2](REQUIREMENTS.md#2-target-users-and-scenarios), and the formal niche and
+> §2](REQUIREMENTS.md#2-users-and-use-cases), and the formal niche and
 > differentiators are in [§1 Positioning](REQUIREMENTS.md#1-positioning).
 
 **How the predecessor and this project coexist** is in that document too: the
@@ -431,10 +431,12 @@ a field unusually good at fooling you and unusually quick to charge for it.
 **This document describes a direction, not a state.** What is built, what is
 not, and what has test coverage is in [the README's status
 section](../README.md#status), which is written to be deliberately unflattering
-— including the admission that "every cent accounted for" currently accounts
-for **none of them**: the first link of the chain is connected — the live
-process journals its decisions now — and the second is not, because the kernel
-is not in the live path, so there is a record and nowhere to replay it into.
+— including what still keeps "every cent accounted for" short of the aim. The
+chain is now joined: the live process journals its decisions, keeps its books
+with the backtest's kernel, runs a shadow of that kernel beside the venue, and
+ends every run with the gap decomposed. What it has not had is a long run to
+decompose, and funding is not yet read from the venue, so the residual carries
+it.
 
 What each milestone unlocks, what triggers it, and what its exit gate is, is in
 the [roadmap](ROADMAP.md).

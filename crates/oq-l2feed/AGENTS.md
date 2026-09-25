@@ -11,8 +11,10 @@ Two halves, and the split matters:
 - **Writing** (`frame`, `writer`, `day`, `manifest`, `disk`, `session`,
   `ws`, `venue`, `stream`) — gets bytes to disk and never transforms
   them.
-- **Reading back** (`depth`, `book`, `bin/oq-book-check`) — replays
-  those bytes into an order book to establish that they reconstruct.
+- **Reading back** (`depth` and `book`, which live in `oq-book` and are
+  re-exported here at their old paths; `bin/oq-book-check`,
+  `bin/oq-trade-check`) — replays those bytes into an order book, or
+  follows the venue's trade ids, to establish that they are usable.
   This half has no live counterpart and never runs during capture.
 
 ## Commands
@@ -68,13 +70,15 @@ cargo run --bin oq-book-check -- --file ./archive/<...>.oqcap
 
 ## Notes
 
-- Third-party dependencies live here and nowhere else in the workspace:
-  `tungstenite` and `ureq` (with their TLS stack), because this is the
-  crate that has to speak to a venue. The budget is declared in
+- This crate carries third-party dependencies because it has to speak
+  to a venue: `tungstenite` and `ureq` (with their TLS stack), and
+  `ruzstd` to read compressed archives. It is not the only one —
+  `oq-gateway`, `oq-ingest`, `oq-live` and `oq-py` carry trees too, each
+  for what it speaks to. Every budget is declared in
   `scripts/check-composability.sh` and enforced in CI; the engine crates
-  stay at zero and must not inherit this tree.
-- Everything except `ws.rs` and the two binaries is reachable without
-  the network: framing, sealing, depth parsing and reconstruction are
+  stay at zero and must not inherit these trees.
+- Everything except `ws.rs` is reachable without the network, and of
+  the five binaries only `oq-capture` opens a connection: framing, sealing, depth parsing and reconstruction are
   pure functions over bytes, and their tests need no venue.
 - Manifest JSON is hand-written for the same reason. The schema is fixed
   by the format document; if you add a field there, add it here.

@@ -148,7 +148,8 @@ as-of join 默认严格 `<`，因为常见 dataframe 库的闭区间语义会把
 - **每账户一进程。** 一个进程拥有一个账户、其策略与自己的 journal。故障域不重叠，
   一个账户的对账失败不会污染另一个。组合层视图由读 journal 构建，而不是共享
   交易状态。
-- **凭证处理。** API key 永不出现在提交的配置中；从环境变量或 OS keyring 注入，
+- **凭证处理。** API key 永不出现在提交的配置中；先从 systemd 凭证读取
+  (`$CREDENTIALS_DIRECTORY`，即 `LoadCredential=` 放置它们的地方)，没有时再读环境变量，
   且只存在于网关进程内存中；研究与回测进程没有访问路径。
 - **时钟纪律。** 主机运行 NTP/chrony。采集进程在启动时记录时钟偏移估计并随数据
   归档——建立在未经校验的本机时钟之上的延迟建模，地基是歪的。
@@ -238,10 +239,11 @@ mismatch 根本不是回归。
 反对 Python 层的理由是"它会稀释零依赖卖点"。**拿仓库实际强制的东西去核,这句话不成立**,
 而它依赖的那个说法本项目从来没有做过。
 
-`scripts/check-composability.sh` 的依赖预算是**按 crate 设的**:12 个为零,4 个为六十。
+`scripts/check-composability.sh` 的依赖预算是**按 crate 设的**:18 个为零,另有 5 个带依赖树——`oq-py` 因为它要和
+Python 说话,`oq-ingest`、`oq-l2feed`、`oq-gateway`、`oq-live` 因为它们要和交易所说话。
 README 的声称也是相应地具体——**引擎**没有第三方依赖,凡是带依赖树的,都是必须和进程外
 某样东西通信的那一类。`oq-l2feed` 带 TLS 栈是因为它要和交易所说话;一个绑定 crate 带
-PyO3 是因为它要和 Python 说话。**两者都不改变那 12 个零**,而 CI 在每个 PR 上证明这一点,
+PyO3 是因为它要和 Python 说话。**两者都不改变那 18 个零**,而 CI 在每个 PR 上证明这一点,
 不是请谁相信。
 
 所以对 Python 该谨慎的原因不是依赖卫生,是另外三件,值得点名,因为它们才是真的有代价:
@@ -346,7 +348,7 @@ PyO3 是因为它要和 Python 说话。**两者都不改变那 12 个零**,而 
 | Crate | 职责 | 里程碑 |
 |---|---|---|
 | `oq-types` | 领域类型、`i64` 定点、typestate 订单/持仓状态机 | M1 |
-| `oq-hash` | SHA-256 与 CRC-32，供 journal、采集、parity 共用 | M1 |
+| `oq-hash` | SHA-256、SHA-512、HMAC 与 CRC-32，供 journal、采集、parity 与交易所签名共用 | M1 |
 | `oq-examples` | 教学示例，及其运行所用的 seed 确定的合成行情 | M2 |
 | `oq-journal` | mmap journal、快照、重放、撕裂尾容错 | M1 |
 | `oq-core` | sequencer、确定性内核、注入时钟、分片 | M1 |
@@ -361,11 +363,11 @@ PyO3 是因为它要和 Python 说话。**两者都不改变那 12 个零**,而 
 | `oq-strategy` | Tier A trait、指标组件 | M2 |
 | `oq-py` | Tier B：兼容模式与达速模式 | M2 |
 | `oq-stats` | DSR、PBO/CSCV、试验登记 | M0 |
-| `oq-cli` | `backtest` / `sweep` / `live` / `replay` / `parity` / `data` | M2 |
+| `oq-cli` | `oq` 启动器：在 `PATH` 上找到工具并运行它（`capture`、`book-check`、`trade-check`、`merge`、`resequence`、`ingest`、`data`、`parity`、`recon`、`order-check`、`trade`、`replay`）。`backtest` 与 `sweep` 刻意不提供，因为策略是编译进二进制的 Rust | M2 |
 | `oq-sim` | 随机化全系统故障仿真与场景语料 | M1 起持续 |
 | `oq-risk` | RiskGate：限额、kill switch、对账 | M3 |
 | `oq-gateway` | 交易所适配器、一致性套件、对账协议、订单 ID 归因 | M3 ★ |
-| `oq-live` | 进程装配、快照恢复、平滑重启 | M3 |
+| `oq-live` | 进程装配、快照恢复、平滑重启；由 `Venue` 模式内核记的账本、旁边的影子内核、以及每次运行结束时的归因；journal 旁边的运行文件；本机控制端口；整个进程可以在注入的时钟上对着模拟交易所运行（`sim`） | M3 |
 | `oq-features` | PIT 特征层、线上/线下一致性度量 | M2 骨架 / M5 |
 | `oq-infer` | ONNX 与编译树推理、预测 parity 门 | M5 |
 | `oq-env` | gym 式向量化环境 | M5 |
@@ -407,7 +409,8 @@ openquanter/
     oq-l2feed/
       src/
         *.rs            分帧、密封、深度解析、订单簿重建
-        bin/            oq-capture、oq-book-check、oq-merge、oq-resequence
+        bin/            oq-capture、oq-book-check、oq-trade-check、
+                        oq-merge、oq-resequence
     oq-ingest/
       src/
         agg.rs          从归档到 tick 的按窗口聚合
@@ -419,8 +422,10 @@ openquanter/
     oq-gateway/
       src/
         exec.rs         每个交易所都要实现的连接器契约
-        binance.rs、okx.rs   一家一个适配器
-        conformance.rs  两个适配器都要过的那套一致性测试
+        binance.rs、okx.rs、kraken.rs、deribit.rs、hyperliquid.rs、
+        backpack.rs、bitget.rs   一家一个适配器；Aster 是 binance.rs
+                        里的一张表
+        conformance.rs  各适配器都要过的那套一致性测试
     ...
   docs/                 需求、路线图、格式规范、快速上手
   scripts/              仓库工具：DCO 检查、秘密扫描、
@@ -606,8 +611,9 @@ gap 标记并重拉快照；时钟偏移估计随数据归档。采集运行在�
    结构上不同的交易所验证过。这一条自写下之后已被回答了一部分：OKX 就是第二个，采集
    侧和下单侧都有，而且两侧各有一套两个适配器都能通过的一致性测试。它也验证了"第二个
    交易所"到底是干什么用的——Binance 用 HTTP 状态码回答拒单，OKX 把拒单包在 200 里，
-   这类分歧不是靠再多设计就能了结的。仍然敞着的是第三个交易所的优先级，以及 OKX
-   的签名那一半——它需要一个真实账户。
+   这类分歧不是靠再多设计就能了结的。第三个交易所的优先级此后是靠**做**而不是靠选
+   回答的：现在有八家交易所有下单通路（见[交易所](VENUES.zh-CN.md)）。仍然敞着的是
+   OKX 的签名那一半——它需要一个真实账户。
 4. **排队模型的选择策略。** 校准数据不足时，框架应如何在保守档与概率档之间选择
    ——目前是手动配置，或许应改为自动选择并给出告警。
 5. **Python 打包面。** Rust API 暴露多少给 Python 绑定。暴露全部会招致对内部实现

@@ -13,7 +13,7 @@ dev-dependency `criterion`。引擎本身——类型、journal、内核、撮�
 数据、parity、统计——是纯 std Rust，这一点由 `scripts/check-composability.sh`
 在 CI 里强制。只要引擎的话，`cargo build -p oq-core` 什么都不拉。
 
-**`cargo install` 现在还不能用，而这是唯一说出这件事的地方。** crates.io 上那些
+**`cargo install` 现在还不能用。** crates.io 上那些
 名字是 `0.0.1` 的占位发布，只为占名——`oq-cli` 发布出去是 1306 字节，而源码有 16K
 ——它们自己的发布描述就写着"实现在仓库里"。装一个会拿到一个空 crate，而且**不会
 报错**，这比包不存在更糟。
@@ -41,13 +41,14 @@ cargo test
 ```bash
 cargo run --bin oq          # 一个名字找到其余全部
 cargo run --bin oq-capture  # 另有 oq-book-check、oq-trade-check、oq-merge、oq-resequence
-cargo run --bin oq-ingest
+cargo run --bin oq-ingest   # 另有 oq-tiers
 cargo run --bin oq-recon    # 另有 oq-order-check
 cargo run --bin oq-trade    # 另有 oq-belief、oq-replay
 ```
 
-`oq` 单独执行会列出每个工具和它的用途，`oq <工具>` 则把参数原样转发给它。
-**它值得第一个跑：它是唯一一个会告诉你其余工具存在的。**
+`oq` 单独执行会列出它能启动的工具和各自的用途，`oq <工具>` 则把参数原样转发给它。
+**它值得第一个跑：是它告诉你其余工具存在的。** 有两个不在它的列表里，要用自己的
+名字运行——`oq-tiers` 和 `oq-belief`。
 
 等这些 crate 真正发布之后，`cargo install oq-cli` 会成为更短的那条路，这一段就
 可以删掉。
@@ -187,7 +188,7 @@ cargo run --bin oq-book-check -- --file ./archive/<venue>/BTCUSDT/depth/<date>.o
 
 ## 7. 用你采到的数据跑回测
 
-归档还不是引擎能读的东西。`oq-ingest` 把采集到的深度和成交折叠成回测重放的 tick
+tick 回测不直接读归档。`oq-ingest` 把采集到的深度和成交折叠成回测重放的 tick
 格式：
 
 ```bash
@@ -201,9 +202,20 @@ cargo run --bin oq-ingest -- \
 
 **转换是有意有损的。** 一个窗口的 L2 深度只留下最优买价和最优卖价，背后的簿被丢弃。
 这个取舍能成立，只因为归档被保留着：采集才是记录本身，这只是它的一个投影，服务于
-投影能承载其决策的那类策略。**需要簿本身的策略需要 L2 保真层**，那一层的引擎已经
-存在，但没有任何东西在喂它：深度本来就该从这个投影里来，而它在这里被丢掉了。更丰富
-的 tick 替代不了它——簿不是一个字段。
+投影能承载其决策的那类策略。**需要簿本身的策略需要 L2 保真层**，而喂它的是归档
+本身，不是这个投影——更丰富的 tick 替代不了它，因为簿不是一个字段。做这件事的命令
+是 `oq-tiers`：一个内置策略（一张挂在最优价上的买单），在一天的归档上分别用 L0 和
+L2 跑一遍，深度被重放进 L2 撮合器：
+
+```bash
+cargo run --release --bin oq-tiers -- \
+  --archive ./archive/binance-perp/BTCUSDT --day 2026-08-16
+```
+
+它报告 L0 的成交里有多少是队列根本排不到的。`--window-ms`、`--venue`、`--symbol`
+与 `oq-ingest` 的用法相同。它跑的是自己的策略而不是你的；要在归档上用 L2 跑你自己
+的策略，程序走的是同一条路：`oq_ingest::fold_into_observations` 与
+`oq_backtest::run_observations`。
 
 如果你要直接读产出，有两个约定必须知道。**极值属于自己的窗口**：`high` 和 `low`
 是**这个窗口内**成交的最高最低，绝不是向前滚动的最大值。**成交量是累计的**，所以

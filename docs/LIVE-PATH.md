@@ -1,5 +1,7 @@
 # The live path
 
+[English](LIVE-PATH.md) · [中文](LIVE-PATH.zh-CN.md)
+
 How `oq-gateway` connects a venue account to the deterministic core, and
 why it is shaped this way. Written before the code, because the survey
 below found that every project in this space built the order path first
@@ -184,10 +186,14 @@ That is anti-idempotent by construction: after a crash you cannot ask the
 venue "did my order land?", because you cannot regenerate the id you
 would be asking about.
 
-Ours derives the id from state the core already holds — instrument, leg,
-ladder rung, sequence — so the same intent always produces the same id,
-and recovery can ask about it. Uniqueness across reuse comes from our own
-dedup store, because the venue does not provide one.
+Ours is composed by `broker::IdScheme::compose`: an optional
+venue-issued broker code, the process's ownership prefix, and a sequence
+number. The sequence comes from a range reserved durably before the
+session can send (`oq-live`'s `order_ids.rs`), so a restart never
+assigns an id twice — a crash burns unused ids instead — and the id is
+journaled before the order is sent (L5), so recovery reads it back and
+can ask the venue about it. Uniqueness across reuse therefore comes from
+our own records, because the venue does not provide it.
 
 ### L5 — Intent is journaled before it is sent
 
@@ -441,9 +447,11 @@ from reading it.
    position divergence, which is exactly the test that matters.
 3. **Order path.** Journal-before-send, reconstructible ids, dedup store,
    two-channel terminality.
-4. **Risk gate.** Inside the core (`D7`), so its decisions are
-   deterministic, journaled, and exercised by every backtest rather than
-   living beside the path they are supposed to guard.
+4. **Risk gate.** Planned inside the core (`D7`). As built it is
+   `oq-risk`, which the live session consults before every send and
+   whose passing check returns a permit carrying the order it approved.
+   It is not in the core, and a backtest does not link it, so its
+   decisions are not exercised by backtests.
 5. **Assembly and recovery.** Snapshot restore, reconciliation on
    startup, graceful restart.
 
@@ -466,13 +474,18 @@ sees: transfers, cross-collateral, sub-account movement. A divergence
 that can be explained by any of those is not evidence about execution,
 which is why this reconciles the things that are.
 
-Venues other than one. The design is written against Binance USDT-M
-because that is what runs; `DownloadBegin`/`DownloadEnd`, the three-valued
-failure classification and the staleness diff are venue-independent, but
-nothing here has been tested against a second venue's idea of what an
-order report contains.
+Venues other than one — no longer. The design was written against
+Binance USDT-M because that is what ran. OKX now has an account reader
+and an event stream too, and `oq-trade` trades Binance, Aster and OKX;
+the execution conformance suite drives six adapters through the same
+cases. The second venue did disagree about what an order report
+contains — OKX answers a refusal inside a 200 — which is what the suite
+exists to catch.
 
-And the whole of it is a design, not a result. The section above on
-Nautilus's 195 reconciliation entries is the honest expectation: the
-first version of this will be wrong in ways the survey cannot predict,
-and the read-only phase exists so that being wrong is cheap.
+This was written as a design before it was a result. The section above
+on Nautilus's 195 reconciliation entries is still the honest
+expectation: the first version of this will be wrong in ways the survey
+cannot predict. It is now also exercised end to end without a venue:
+`oq_live::sim` runs the whole live process against a seeded simulated
+venue that can be told to misbehave, and `tests/dst.rs` holds it to the
+same seed producing the same run.

@@ -10,8 +10,8 @@
 #
 #   1. Every crate builds on its own. A crate that only compiles as part
 #      of the workspace is not a component anyone can adopt piecemeal.
-#   2. Third-party dependencies stay within a declared budget. Eleven of
-#      twelve crates are at zero: the entire engine — types, journal,
+#   2. Third-party dependencies stay within a declared budget. Eighteen
+#      of twenty-three crates are at zero: the entire engine — types, journal,
 #      core, matching, margin, backtest, data, parity, statistics — is
 #      plain std Rust. That is worth defending, because it erodes one
 #      convenient dependency at a time and is very hard to walk back.

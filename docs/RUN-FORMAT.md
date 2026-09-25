@@ -34,6 +34,16 @@ as the missing piece:
   line to name
 - an attribution report had nothing to bind to (`FR-ATTRIB-5`)
 
+A live run writes them too. Beside its journal `oq-live` keeps
+`<stem>.live.run` — what the venue filled — and `<stem>.model.run` —
+what the shadow backtest filled on the same observations — under one
+identity, plus `<stem>.oqtk`, the observations as a tick file. All three
+are rewritten every fifteen minutes and at exit, each written aside and
+renamed so a reader never sees half of one. So comparing a live run with
+its model is the same `oq parity` as comparing two backtests, and
+`oq-parity markout <RUN.run> <TICKS.oqtk>` prices either side's fills
+against what the market did next.
+
 ## Four decisions
 
 **The manifest is inside the file.** This is D13's whole point: a

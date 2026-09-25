@@ -15,8 +15,7 @@ margin, backtest, data, parity, statistics — is plain std Rust, which
 `scripts/check-composability.sh` enforces in CI. If you only want the
 engine, `cargo build -p oq-core` pulls nothing.
 
-**`cargo install` does not work yet, and this is the only place that
-says so.** The names on crates.io are `0.0.1` placeholders reserving
+**`cargo install` does not work yet.** The names on crates.io are `0.0.1` placeholders reserving
 them — `oq-cli` is 1306 bytes against 16K of source — and their own
 published descriptions say the implementation lives in this repository.
 Installing one gets an empty crate and no error, which is worse than a
@@ -50,14 +49,16 @@ either. Run them with `cargo run`:
 ```bash
 cargo run --bin oq          # one name that finds the rest
 cargo run --bin oq-capture  # also oq-book-check, oq-trade-check, oq-merge, oq-resequence
-cargo run --bin oq-ingest
+cargo run --bin oq-ingest   # also oq-tiers
 cargo run --bin oq-recon    # also oq-order-check
 cargo run --bin oq-trade    # also oq-belief, oq-replay
 ```
 
-`oq` on its own lists every tool with what it is for, and `oq <tool>`
-runs it with the arguments passed through unchanged. It is worth
-running first: it is the only one that tells you the others exist.
+`oq` on its own lists the tools it launches with what each is for, and
+`oq <tool>` runs one with the arguments passed through unchanged. It is
+worth running first: it is the one that tells you the others exist.
+Two are not in its list and are run by their own names — `oq-tiers`
+and `oq-belief`.
 
 When the crates are published for real, `cargo install oq-cli` becomes
 the shorter path and this paragraph goes away.
@@ -217,7 +218,7 @@ including the streams that accept a subscription and then send nothing.
 
 ## 7. Backtest on what you captured
 
-An archive is not yet something the engine reads. `oq-ingest` folds
+A tick backtest does not read an archive directly. `oq-ingest` folds
 captured depth and trades into the tick format a backtest replays:
 
 ```bash
@@ -235,9 +236,22 @@ bid and a best ask, and the book behind them is dropped. That is only an
 acceptable trade because the archive is kept: the capture is the record,
 and this is a projection of it for the strategies a projection can
 carry. Strategies that need the book itself need the L2 fidelity tier,
-which exists as an engine but has nothing feeding it: this projection is
-where the depth would have come from, and it is dropped here. A richer
-tick would not substitute for it — a book is not a field.
+and that is fed from the archive rather than from this projection — a
+richer tick would not substitute for it, because a book is not a field.
+`oq-tiers` is the command that does it: one built-in strategy, a bid
+resting at the touch, run over one archived day at L0 and at L2, with
+the depth replayed into the L2 matcher:
+
+```bash
+cargo run --release --bin oq-tiers -- \
+  --archive ./archive/binance-perp/BTCUSDT --day 2026-08-16
+```
+
+It reports how many of L0's fills the queue would never have reached.
+`--window-ms`, `--venue` and `--symbol` work as they do for
+`oq-ingest`. It runs its own strategy, not yours; to run yours at L2
+over an archive, a program takes the same path through
+`oq_ingest::fold_into_observations` and `oq_backtest::run_observations`.
 
 Two conventions matter if you read the output directly. Extremes belong
 to their own window: `high` and `low` are the highest and lowest trades

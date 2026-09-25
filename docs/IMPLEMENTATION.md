@@ -184,8 +184,10 @@ behavior rather than documentation that describes intent.
   account cannot corrupt another. Portfolio-level views are built by reading
   journals, not by sharing trading state.
 - **Credential handling.** API keys never appear in committed configuration.
-  They are injected from environment or OS keyring and exist only in gateway
-  process memory; research and backtest processes have no access path.
+  They are read from systemd credentials (`$CREDENTIALS_DIRECTORY`, where
+  `LoadCredential=` puts them) and, failing that, from environment
+  variables, and exist only in gateway process memory; research and
+  backtest processes have no access path.
 - **Clock discipline.** Hosts run NTP/chrony. Capture processes record a
   clock-offset estimate at startup and archive it with the data — latency
   modeling built on an unverified local clock is built on sand.
@@ -304,12 +306,14 @@ claim. Checked against what the repository actually enforces, it does not,
 and the objection rests on a claim this project does not make.
 
 `scripts/check-composability.sh` sets a dependency budget **per crate**:
-twelve crates at zero, four at sixty. The README's claim is correspondingly
+eighteen crates at zero, and five that carry a tree — `oq-py` because
+it speaks to Python, and `oq-ingest`, `oq-l2feed`, `oq-gateway` and
+`oq-live` because they speak to a venue. The README's claim is correspondingly
 specific — the *engine* has no third-party dependencies, and every crate
 that carries a tree is one that has to talk to something outside the
 process. `oq-l2feed` carries a TLS stack because it speaks to a venue.
 A binding crate would carry PyO3 because it speaks to Python. Neither
-changes the twelve zeros, and CI proves it on every pull request rather
+changes the eighteen zeros, and CI proves it on every pull request rather
 than asking anyone to believe it.
 
 So the reason to be careful about Python is not dependency hygiene. It is
@@ -448,7 +452,7 @@ which venue is being traded.
 | Crate | Responsibility | Milestone |
 |---|---|---|
 | `oq-types` | Domain types, `i64` fixed point, typestate order/position machines | M1 |
-| `oq-hash` | SHA-256 and CRC-32, shared by the journal, capture and parity | M1 |
+| `oq-hash` | SHA-256, SHA-512, HMAC and CRC-32, shared by the journal, capture, parity and venue signing | M1 |
 | `oq-examples` | Teaching examples and the seeded synthetic market they run on | M2 |
 | `oq-journal` | mmap journal, snapshots, replay, torn-tail tolerance | M1 |
 | `oq-core` | Sequencer, deterministic kernel, injected clock, sharding | M1 |
@@ -463,11 +467,11 @@ which venue is being traded.
 | `oq-strategy` | Tier A traits, indicator components | M2 |
 | `oq-py` | Tier B: compatibility mode and throughput mode | M2 |
 | `oq-stats` | DSR, PBO/CSCV, trial registry | M0 |
-| `oq-cli` | `backtest` / `sweep` / `live` / `replay` / `parity` / `data` | M2 |
+| `oq-cli` | The `oq` launcher: finds a tool on `PATH` and runs it (`capture`, `book-check`, `trade-check`, `merge`, `resequence`, `ingest`, `data`, `parity`, `recon`, `order-check`, `trade`, `replay`). `backtest` and `sweep` are deliberately absent, because a strategy is compiled Rust | M2 |
 | `oq-sim` | Randomized whole-system fault simulation and scenario corpus | M1 onward |
 | `oq-risk` | RiskGate: limits, kill switch, reconciliation | M3 |
 | `oq-gateway` | Venue adapters, **execution conformance suite** (`conformance::check` drives an adapter through the placement contract using payloads it supplies), reconciliation protocol, order-ID attribution | M3 ★ |
-| `oq-live` | Process assembly, snapshot recovery, graceful restart | M3 |
+| `oq-live` | Process assembly, snapshot recovery, graceful restart; books kept by the kernel in `Venue` mode, a shadow kernel beside them and the attribution at the end of every run; run files beside the journal; a local control port; the whole process runnable against a simulated venue on an injected clock (`sim`) | M3 |
 | `oq-features` | Point-in-time feature layer, online/offline consistency metrics | M2 skeleton / M5 |
 | `oq-infer` | ONNX and compiled-tree inference, prediction parity gate | M5 |
 | `oq-env` | Gym-style vectorized environments | M5 |
@@ -515,7 +519,8 @@ openquanter/
     oq-l2feed/
       src/
         *.rs            framing, sealing, depth parsing, reconstruction
-        bin/            oq-capture, oq-book-check, oq-merge, oq-resequence
+        bin/            oq-capture, oq-book-check, oq-trade-check,
+                        oq-merge, oq-resequence
     oq-ingest/
       src/
         agg.rs          windowed aggregation from archive to tick
@@ -527,8 +532,10 @@ openquanter/
     oq-gateway/
       src/
         exec.rs         the connector contract every venue implements
-        binance.rs, okx.rs   one adapter each
-        conformance.rs  the suite both adapters answer to
+        binance.rs, okx.rs, kraken.rs, deribit.rs, hyperliquid.rs,
+        backpack.rs, bitget.rs   one adapter each; Aster is a table
+                        inside binance.rs
+        conformance.rs  the suite the adapters answer to
     ...
   docs/                 requirements, roadmap, formats, quickstart
   scripts/              repository tooling: DCO check, secret scan,
@@ -733,8 +740,10 @@ welcome as issues.
    both the capture and the order side, and each side has a conformance suite
    both adapters pass. It found what a second venue is for — Binance answers a
    refusal with an HTTP status, OKX answers one inside a 200 — which is the
-   kind of disagreement no amount of design settles. What is still open is the
-   third venue's priority, and OKX's signed half, which needs a live account.
+   kind of disagreement no amount of design settles. The third venue's
+   priority has since been answered by doing rather than choosing: eight
+   venues now have an order path ([Venues](VENUES.md)). What is still open
+   is OKX's signed half, which needs a live account.
 4. **Queue model selection policy.** How the framework should choose between
    conservative and probabilistic queue models when calibration data is thin —
    currently a manual setting, arguably should be automatic with a warning.
