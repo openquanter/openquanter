@@ -139,7 +139,7 @@ pub struct Trade {
     pub price: f64,
     pub qty: f64,
     pub realized_pnl: f64,
-    pub commission: f64,
+    pub commission: oq_types::Cash,
     /// What the commission was paid in. Not always the settlement
     /// currency: an account paying fees in BNB is charged in BNB.
     pub commission_asset: String,
@@ -444,7 +444,10 @@ impl Binance {
     /// about than one carrying a single clock and some gaps.
     #[must_use]
     pub fn venue_time_ms(&self) -> i64 {
-        now_ms() + self.clock_offset_ms()
+        // Saturating: the offset is derived from a `serverTime` the
+        // venue chose, and an absurd one must give an absurd timestamp
+        // the venue then refuses, not a panic on the order path.
+        now_ms().saturating_add(self.clock_offset_ms())
     }
 
     /// Account balance and unrealized profit.
@@ -453,7 +456,7 @@ impl Binance {
     /// Anything the request reports.
     pub fn account(&self) -> Result<AccountSnapshot, VenueError> {
         let body = self.get_signed(self.dialect.wire().account, "")?;
-        let read_at_ms = now_ms() + self.clock_offset_ms();
+        let read_at_ms = self.venue_time_ms();
         Ok(AccountSnapshot {
             wallet_balance: need_f64(&body, "totalWalletBalance")?,
             unrealized: need_f64(&body, "totalUnrealizedProfit")?,
@@ -612,7 +615,7 @@ impl Binance {
             &self.base,
             path,
             query,
-            now_ms() + self.clock_offset_ms(),
+            self.venue_time_ms(),
             self.creds.secret_bytes(),
         );
         self.send(&url, true)
@@ -691,7 +694,7 @@ impl Binance {
                         .get("retry-after")
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.trim().parse::<i64>().ok());
-                    let until = cooldown_until(now_ms() + self.clock_offset_ms(), retry_after);
+                    let until = cooldown_until(self.venue_time_ms(), retry_after);
                     self.banned_until_ms
                         .fetch_max(until, core::sync::atomic::Ordering::Relaxed);
                 }
@@ -737,7 +740,13 @@ fn parse_trades(body: &str) -> Result<Vec<Trade>, VenueError> {
                 price: need_f64(&o, "price")?,
                 qty: need_f64(&o, "qty")?,
                 realized_pnl: need_f64(&o, "realizedPnl")?,
-                commission: need_f64(&o, "commission")?,
+                commission: {
+                    let text = need_str(&o, "commission")?;
+                    cash_of(&text).ok_or(VenueError::Malformed {
+                        what: "commission is not a decimal amount",
+                        body: text,
+                    })?
+                },
                 commission_asset: field_str(&o, "commissionAsset").unwrap_or_default(),
                 time_ms: need_i64(&o, "time")?,
                 maker: need_bool(&o, "maker")?,
@@ -753,17 +762,22 @@ fn parse_trades(body: &str) -> Result<Vec<Trade>, VenueError> {
 /// the settlement currency, a 0.0002 BNB fee read as 0.0002 USDT and the
 /// fee component of attribution showed the tier as cheaper than it was.
 /// Refused instead, so attribution renders the component unavailable.
-fn settlement_commission(symbol: &str, trades: &[Trade]) -> Result<f64, VenueError> {
+fn settlement_commission(symbol: &str, trades: &[Trade]) -> Result<oq_types::Cash, VenueError> {
     if let Some(t) = trades
         .iter()
         .find(|t| !t.commission_asset.is_empty() && !symbol.ends_with(t.commission_asset.as_str()))
     {
         return Err(VenueError::Malformed {
             what: "commission paid in an asset other than the settlement currency",
-            body: format!("{} paid in {}", t.commission, t.commission_asset),
+            body: format!("{} paid in {}", t.commission.0, t.commission_asset),
         });
     }
-    Ok(trades.iter().map(|t| t.commission).sum())
+    // Summed as integers, saturating: a float sum of fees drifts, and
+    // the drift lands in the attribution residual where it reads as an
+    // unexplained difference rather than as rounding.
+    Ok(trades
+        .iter()
+        .fold(oq_types::Cash::ZERO, |sum, t| sum.add(t.commission)))
 }
 
 /// Build the full signed URL.
@@ -794,7 +808,7 @@ impl Binance {
             .banned_until_ms
             .load(core::sync::atomic::Ordering::Relaxed);
         (until > 0)
-            .then(|| until - (now_ms() + self.clock_offset_ms()))
+            .then(|| until.saturating_sub(self.venue_time_ms()))
             .filter(|remaining| *remaining > 0)
     }
 }
@@ -806,7 +820,7 @@ impl Binance {
 /// minute when it did not: the venue's request-weight window.
 fn cooldown_until(now_venue_ms: i64, retry_after_s: Option<i64>) -> i64 {
     let seconds = retry_after_s.map_or(60, |s| s.max(1));
-    now_venue_ms + seconds * 1000
+    now_venue_ms.saturating_add(seconds.saturating_mul(1000))
 }
 
 /// The moment a `-1003` says its ban lifts, in venue milliseconds.
@@ -864,7 +878,10 @@ fn redact(url: &str) -> &str {
 /// reading the local clock only after the reply, a method whose error is
 /// the entire return leg however symmetric the link.
 const fn offset_from(before: i64, venue: i64, after: i64) -> i64 {
-    venue - (before + after) / 2
+    // Saturating throughout: `venue` is a figure the venue sent. The
+    // estimate being wrong only makes the venue refuse a request; the
+    // arithmetic panicking takes the process down with orders resting.
+    venue.saturating_sub(before.saturating_add(after) / 2)
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -1147,7 +1164,7 @@ impl Execution for Binance {
             &self.base,
             self.dialect.wire().order,
             &order_query(order, instrument),
-            now_ms() + self.clock_offset_ms(),
+            self.venue_time_ms(),
             self.creds.secret_bytes(),
         );
         match self.send_method(Method::Post, &url, true) {
@@ -1181,7 +1198,7 @@ impl Execution for Binance {
             &self.base,
             self.dialect.wire().order,
             &format!("symbol={symbol}&origClientOrderId={client_id}"),
-            now_ms() + self.clock_offset_ms(),
+            self.venue_time_ms(),
             self.creds.secret_bytes(),
         );
         match self.send_method(Method::Delete, &url, true) {
@@ -1394,10 +1411,7 @@ impl crate::account::Account for Binance {
         since_ms: i64,
     ) -> Result<Option<oq_types::Cash>, VenueError> {
         let trades = self.my_trades(symbol, Some(since_ms))?;
-        let total = settlement_commission(symbol, &trades)?;
-        #[allow(clippy::cast_possible_truncation)]
-        let cash = (total * oq_types::CASH_SCALE as f64).round() as i64;
-        Ok(Some(oq_types::Cash(cash)))
+        Ok(Some(settlement_commission(symbol, &trades)?))
     }
 
     /// Seven days, the furthest one `startTime` reaches, paged.
@@ -1406,7 +1420,7 @@ impl crate::account::Account for Binance {
         symbol: &str,
     ) -> Result<Option<Vec<crate::account::AccountTrade>>, VenueError> {
         const WEEK_MS: i64 = 7 * 24 * 3_600_000;
-        let since = now_ms() + self.clock_offset_ms() - WEEK_MS;
+        let since = self.venue_time_ms().saturating_sub(WEEK_MS);
         let mut trades: Vec<crate::account::AccountTrade> = self
             .my_trades(symbol, Some(since))?
             .into_iter()
@@ -2869,9 +2883,9 @@ mod recovery {
 
 #[cfg(test)]
 mod commission {
-    use super::{Trade, settlement_commission};
+    use super::{Trade, parse_trades, settlement_commission};
 
-    fn paid(amount: f64, asset: &str) -> Trade {
+    fn paid(amount: oq_types::Cash, asset: &str) -> Trade {
         Trade {
             symbol: "BTCUSDT".into(),
             id: 1,
@@ -2890,16 +2904,39 @@ mod commission {
 
     #[test]
     fn commission_in_the_settlement_currency_is_summed() {
-        let total = settlement_commission("BTCUSDT", &[paid(0.5, "USDT"), paid(0.25, "USDT")])
-            .expect("one currency");
-        assert!((total - 0.75).abs() < 1e-12);
+        let total = settlement_commission(
+            "BTCUSDT",
+            &[
+                paid(oq_types::Cash(50_000_000), "USDT"),
+                paid(oq_types::Cash(25_000_000), "USDT"),
+            ],
+        )
+        .expect("one currency");
+        assert_eq!(total, oq_types::Cash(75_000_000));
+    }
+
+    /// A fee that is not a decimal amount is refused. `NaN` parses into an
+    /// `f64` and then saturates to zero through `as i64`, which records
+    /// "the venue charged nothing" — a measurement, where the truth is
+    /// that the figure could not be read.
+    #[test]
+    fn a_commission_that_is_not_a_decimal_amount_is_refused() {
+        let body = r#"[{"symbol":"BTCUSDT","id":1,"orderId":1,"price":"1","qty":"1","realizedPnl":"0","commission":"NaN","commissionAsset":"USDT","time":0,"side":"BUY","positionSide":"LONG","maker":true}]"#;
+        assert!(parse_trades(body).is_err(), "NaN is not a commission");
     }
 
     /// A fee paid in BNB is not that many USDT.
     #[test]
     fn commission_in_another_asset_is_refused_rather_than_added() {
         assert!(
-            settlement_commission("BTCUSDT", &[paid(0.5, "USDT"), paid(0.0002, "BNB")]).is_err()
+            settlement_commission(
+                "BTCUSDT",
+                &[
+                    paid(oq_types::Cash(50_000_000), "USDT"),
+                    paid(oq_types::Cash(20_000), "BNB")
+                ]
+            )
+            .is_err()
         );
     }
 }
