@@ -204,6 +204,9 @@ struct Wire {
     position_side_dual: &'static str,
     klines: &'static str,
     exchange_info: &'static str,
+    income: &'static str,
+    funding_rate: &'static str,
+    premium_index: &'static str,
 }
 
 const BINANCE_WIRE: Wire = Wire {
@@ -223,6 +226,9 @@ const BINANCE_WIRE: Wire = Wire {
     position_side_dual: "/fapi/v1/positionSide/dual",
     klines: "/fapi/v1/klines",
     exchange_info: "/fapi/v1/exchangeInfo",
+    income: "/fapi/v1/income",
+    funding_rate: "/fapi/v1/fundingRate",
+    premium_index: "/fapi/v1/premiumIndex",
 };
 
 const ASTER_WIRE: Wire = Wire {
@@ -242,6 +248,10 @@ const ASTER_WIRE: Wire = Wire {
     position_side_dual: "/fapi/v3/positionSide/dual",
     klines: "/fapi/v3/klines",
     exchange_info: "/fapi/v3/exchangeInfo",
+    // Following the rest of its table; not yet exercised against Aster.
+    income: "/fapi/v3/income",
+    funding_rate: "/fapi/v3/fundingRate",
+    premium_index: "/fapi/v3/premiumIndex",
 };
 
 impl Dialect {
@@ -1419,6 +1429,67 @@ impl crate::account::Account for Binance {
         Ok(Some(trades))
     }
 
+    /// The account's `FUNDING_FEE` ledger lines for the symbol, paged by
+    /// time. Each page starts at the last one's final timestamp rather
+    /// than after it — two lines can share a millisecond, one per leg
+    /// of a hedged position — and lines already read are dropped.
+    fn funding_charged(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<crate::account::FundingCharge>>, VenueError> {
+        const PAGE: usize = 1000;
+        const MAX_PAGES: usize = 50;
+        let mut out: Vec<crate::account::FundingCharge> = Vec::new();
+        let mut from = since_ms;
+        for _ in 0..MAX_PAGES {
+            let query =
+                format!("symbol={symbol}&incomeType=FUNDING_FEE&startTime={from}&limit={PAGE}");
+            let body = self.get_signed(self.dialect.wire().income, &query)?;
+            let page = parse_funding_income(&body, symbol)?;
+            let full = crate::json::objects(&body).len() >= PAGE;
+            let last = page.iter().map(|c| c.time_ms).max();
+            for c in page {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+            match (full, last) {
+                (true, Some(t)) if t > from => from = t,
+                _ => {
+                    out.sort_by_key(|c| (c.time_ms, c.id));
+                    return Ok(Some(out));
+                }
+            }
+        }
+        Err(VenueError::Malformed {
+            what: "funding history longer than the paging bound",
+            body: format!("{} entries read and more remain", out.len()),
+        })
+    }
+
+    fn funding_rates(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<crate::account::SettledRate>>, VenueError> {
+        // A thousand settlements is most of a year at eight hours; a run
+        // asks about the ones since it started.
+        let body = self.get_public(
+            self.dialect.wire().funding_rate,
+            &format!("symbol={symbol}&startTime={since_ms}&limit=1000"),
+        )?;
+        parse_funding_rates(&body).map(Some)
+    }
+
+    fn next_funding_ms(&self, symbol: &str) -> Result<Option<i64>, VenueError> {
+        let body = self.get_public(
+            self.dialect.wire().premium_index,
+            &format!("symbol={symbol}"),
+        )?;
+        Ok(Some(crate::json::need_i64(&body, "nextFundingTime")?))
+    }
+
     fn id(&self) -> &'static str {
         // Matches the market-data side's identifier for the same venue,
         // so a run's records and its archive file under one name.
@@ -1543,6 +1614,64 @@ fn decimal_field(body: &str, key: &str, scale: u8) -> Option<i64> {
     }
     digits.push_str(&frac);
     digits.parse().ok()
+}
+
+/// A decimal amount as cash, exactly: the venue writes eight places,
+/// and so does [`oq_types::Cash`].
+fn cash_of(text: &str) -> Option<oq_types::Cash> {
+    let t = text.trim();
+    let (whole, frac) = t.split_once('.').unwrap_or((t, ""));
+    if frac.len() > 8 || frac.bytes().any(|b| !b.is_ascii_digit()) {
+        return None;
+    }
+    let negative = whole.starts_with('-');
+    let digits = format!("{}{frac:0<8}", whole.trim_start_matches(['-', '+']));
+    let v: i64 = digits.parse().ok()?;
+    Some(oq_types::Cash(if negative { -v } else { v }))
+}
+
+/// `FUNDING_FEE` lines for one symbol out of an income page.
+///
+/// # Errors
+/// A line of that type whose amount, time or id does not read.
+pub fn parse_funding_income(
+    body: &str,
+    symbol: &str,
+) -> Result<Vec<crate::account::FundingCharge>, VenueError> {
+    let mut out = Vec::new();
+    for o in crate::json::objects(body) {
+        if crate::json::field_str(&o, "incomeType").as_deref() != Some("FUNDING_FEE")
+            || crate::json::field_str(&o, "symbol").as_deref() != Some(symbol)
+        {
+            continue;
+        }
+        let amount = crate::json::field_str(&o, "income")
+            .and_then(|v| cash_of(&v))
+            .ok_or_else(|| crate::json::malformed("income", &o))?;
+        out.push(crate::account::FundingCharge {
+            time_ms: crate::json::need_i64(&o, "time")?,
+            amount,
+            id: crate::json::need_i64(&o, "tranId")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Settled rates out of a `fundingRate` page, oldest first.
+///
+/// # Errors
+/// An entry whose time, rate or mark does not read.
+pub fn parse_funding_rates(body: &str) -> Result<Vec<crate::account::SettledRate>, VenueError> {
+    let mut out = Vec::new();
+    for o in crate::json::objects(body) {
+        out.push(crate::account::SettledRate {
+            time_ms: crate::json::need_i64(&o, "fundingTime")?,
+            rate: crate::json::need_str(&o, "fundingRate")?,
+            mark: crate::json::need_str(&o, "markPrice")?,
+        });
+    }
+    out.sort_by_key(|r| r.time_ms);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -2772,5 +2901,51 @@ mod commission {
         assert!(
             settlement_commission("BTCUSDT", &[paid(0.5, "USDT"), paid(0.0002, "BNB")]).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod funding_reads {
+    use super::*;
+
+    /// Binance's "Get Income History" example, with a funding line
+    /// added beside its transfer and commission lines. The two lines the
+    /// documentation shows share one `tranId`, which is why lines are
+    /// told apart by more than their id.
+    const INCOME: &str = r#"[{"symbol":"","incomeType":"TRANSFER","income":"-0.37500000","asset":"USDT","info":"TRANSFER","time":1570608000000,"tranId":9689322392,"tradeId":""},{"symbol":"BTCUSDT","incomeType":"COMMISSION","income":"-0.01000000","asset":"USDT","info":"COMMISSION","time":1570636800000,"tranId":9689322392,"tradeId":"2059192"},{"symbol":"BTCUSDT","incomeType":"FUNDING_FEE","income":"-0.00033600","asset":"USDT","info":"FUNDING_FEE","time":1570636800012,"tranId":9689322393,"tradeId":""},{"symbol":"ETHUSDT","incomeType":"FUNDING_FEE","income":"0.1","asset":"USDT","info":"FUNDING_FEE","time":1570636800012,"tranId":9689322394,"tradeId":""}]"#;
+
+    /// The testnet's own answer, read on 2026-09-25.
+    const RATES: &str = r#"[{"symbol":"BTCUSDT","fundingTime":1790265600000,"fundingRate":"-0.00001633","markPrice":"84397.47284420"},{"symbol":"BTCUSDT","fundingTime":1790236800000,"fundingRate":"0.00010000","markPrice":"84475.60000000"}]"#;
+
+    #[test]
+    fn only_this_symbols_funding_lines_are_read_and_to_the_last_place() {
+        let lines = parse_funding_income(INCOME, "BTCUSDT").expect("reads");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].amount, oq_types::Cash(-33_600));
+        assert_eq!(lines[0].time_ms, 1_570_636_800_012);
+    }
+
+    #[test]
+    fn settled_rates_keep_the_venues_digits_and_come_oldest_first() {
+        let rates = parse_funding_rates(RATES).expect("reads");
+        assert_eq!(rates[0].time_ms, 1_790_236_800_000);
+        assert_eq!(rates[1].rate, "-0.00001633");
+        assert_eq!(
+            rates[1].mark, "84397.47284420",
+            "not rounded to the price grid"
+        );
+    }
+
+    #[test]
+    fn a_decimal_amount_is_cash_exactly_or_not_at_all() {
+        assert_eq!(cash_of("-0.00033600"), Some(oq_types::Cash(-33_600)));
+        assert_eq!(cash_of("12.5"), Some(oq_types::Cash(1_250_000_000)));
+        assert_eq!(cash_of("3"), Some(oq_types::Cash(300_000_000)));
+        assert_eq!(
+            cash_of("0.000000001"),
+            None,
+            "more places than cash holds is refused, not rounded"
+        );
+        assert_eq!(cash_of("1e-8"), None);
     }
 }
