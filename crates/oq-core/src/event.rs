@@ -19,7 +19,9 @@
 //! reused**, because a journal outlives the build that wrote it.
 
 use oq_engine::Tick;
-use oq_types::{InstrumentId, Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp};
+use oq_types::{
+    Cash, InstrumentId, Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side, Stamp,
+};
 
 /// Journal record kinds. Append-only; values are permanent.
 pub mod kind {
@@ -78,6 +80,17 @@ pub mod kind {
     /// belongs to one of them, and charging it to "the only holding" is
     /// a refusal once there are two. Appended like [`TICK_ON`].
     pub const FUNDING_ON: u16 = 12;
+    /// Funding the **venue** charged, as an amount.
+    ///
+    /// [`FUNDING`] carries a rate and a mark and lets the kernel work
+    /// the amount out, which is what a backtest has. A live account has
+    /// better: the venue's own ledger line, to the last place. Booking
+    /// that rather than a recomputation is the same distinction as
+    /// [`VENUE_FILL`] against a matched fill — and a recomputation would
+    /// round the venue's mark to the contract's price grid, which the
+    /// venue does not. The instrument is optional, as for [`FUNDING_ON`]:
+    /// a 16-byte payload names none, a 20-byte one names it.
+    pub const FUNDING_CHARGED: u16 = 13;
 }
 
 /// An input to the core.
@@ -142,6 +155,14 @@ pub enum Event {
         rate: Ratio,
         mark: PriceTicks,
     },
+    /// A funding settlement booked at the amount the venue charged.
+    FundingCharged {
+        /// Which holding it is charged to; `None` for the only one.
+        instrument: Option<InstrumentId>,
+        at: Nanos,
+        /// Received positive, paid negative.
+        amount: Cash,
+    },
     /// The clock advanced. The only way the core learns the time.
     Time(Nanos),
     /// Collateral added to or removed from the account.
@@ -189,6 +210,7 @@ impl Event {
                 instrument: None, ..
             } => kind::FUNDING,
             Self::Funding { .. } => kind::FUNDING_ON,
+            Self::FundingCharged { .. } => kind::FUNDING_CHARGED,
             Self::Time(_) => kind::TIME,
             Self::MarginDeposit { .. } => kind::MARGIN_DEPOSIT,
             Self::VenueFill(_) => kind::VENUE_FILL,
@@ -202,7 +224,10 @@ impl Event {
         match self {
             Self::Tick { tick, .. } => tick.stamp.exch,
             Self::Submit { stamp, .. } | Self::Cancel { stamp, .. } => stamp.exch,
-            Self::Funding { at, .. } | Self::Time(at) | Self::MarginDeposit { at, .. } => *at,
+            Self::Funding { at, .. }
+            | Self::FundingCharged { at, .. }
+            | Self::Time(at)
+            | Self::MarginDeposit { at, .. } => *at,
             // The venue's clock, not this process's. A fill is ordered
             // by when it happened, and the local receive time is a
             // property of the link rather than of the trade.
@@ -320,6 +345,17 @@ impl Event {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, rate.0);
                 put_i64(&mut out, mark.0);
+                if let Some(id) = instrument {
+                    out.extend_from_slice(&id.0.to_le_bytes());
+                }
+            }
+            Self::FundingCharged {
+                instrument,
+                at,
+                amount,
+            } => {
+                put_i64(&mut out, at.0);
+                put_i64(&mut out, amount.0);
                 if let Some(id) = instrument {
                     out.extend_from_slice(&id.0.to_le_bytes());
                 }
@@ -476,6 +512,20 @@ impl Event {
                     at: Nanos(i64_at(payload, 0)?),
                     rate: Ratio(i64_at(payload, 1)?),
                     mark: PriceTicks(i64_at(payload, 2)?),
+                })
+            }
+            kind::FUNDING_CHARGED => {
+                let instrument = match payload.len() {
+                    16 => None,
+                    20 => Some(InstrumentId(u32::from_le_bytes(
+                        payload[16..20].try_into().expect("4 bytes"),
+                    ))),
+                    _ => return None,
+                };
+                Some(Self::FundingCharged {
+                    instrument,
+                    at: Nanos(i64_at(payload, 0)?),
+                    amount: Cash(i64_at(payload, 1)?),
                 })
             }
             kind::TIME => {
@@ -962,5 +1012,25 @@ mod tests {
         kinds.dedup();
         // Two Tick samples and two Submit samples share kinds by design.
         assert_eq!(before - kinds.len(), 2);
+    }
+
+    #[test]
+    fn a_charged_amount_round_trips_named_or_not_and_a_wrong_length_is_refused() {
+        for e in [
+            Event::FundingCharged {
+                instrument: None,
+                at: Nanos(1_790_323_200_000_000_000),
+                amount: Cash(-3_359_784),
+            },
+            Event::FundingCharged {
+                instrument: Some(InstrumentId(7)),
+                at: Nanos(1),
+                amount: Cash(6_719_568),
+            },
+        ] {
+            assert_eq!(Event::decode(e.kind(), &e.encode()).expect("decodes"), e);
+        }
+        assert!(Event::decode(kind::FUNDING_CHARGED, &[0; 12]).is_none());
+        assert!(Event::decode(kind::FUNDING_CHARGED, &[0; 24]).is_none());
     }
 }

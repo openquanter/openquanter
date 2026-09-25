@@ -569,6 +569,43 @@ fn parse_leg(side: &str, spec: &str) -> Result<ExpectedLeg, String> {
     })
 }
 
+/// Settlements since `since`: the venue's rate and mark, then the
+/// account's ledger lines. Read only; for checking what a funding
+/// computation should reproduce.
+fn list_funding(venue: &Binance, symbol: &str, since: i64) -> std::process::ExitCode {
+    use oq_gateway::account::Account;
+    let rates = match venue.funding_rates(symbol, since) {
+        Ok(Some(r)) => r,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            eprintln!("funding rates could not be read: {e}");
+            return std::process::ExitCode::from(3);
+        }
+    };
+    for r in &rates {
+        println!("rate    {} {} mark {}", r.time_ms, r.rate, r.mark);
+    }
+    match venue.funding_charged(symbol, since) {
+        Ok(Some(lines)) => {
+            for l in &lines {
+                let v = l.amount.0;
+                let sign = if v < 0 { "-" } else { "" };
+                let (whole, frac) = (
+                    v.unsigned_abs() / 100_000_000,
+                    v.unsigned_abs() % 100_000_000,
+                );
+                println!("charged {} {sign}{whole}.{frac:08} id {}", l.time_ms, l.id);
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(None) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("funding ledger could not be read: {e}");
+            std::process::ExitCode::from(3)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,42 +664,5 @@ mod tests {
         assert!(err.contains("0.256"), "{err}");
         assert!(parse_leg("LONG", "x@1").is_err());
         assert!(parse_leg("LONG", "1@x").is_err());
-    }
-}
-
-/// Settlements since `since`: the venue's rate and mark, then the
-/// account's ledger lines. Read only; for checking what a funding
-/// computation should reproduce.
-fn list_funding(venue: &Binance, symbol: &str, since: i64) -> std::process::ExitCode {
-    use oq_gateway::account::Account;
-    let rates = match venue.funding_rates(symbol, since) {
-        Ok(Some(r)) => r,
-        Ok(None) => Vec::new(),
-        Err(e) => {
-            eprintln!("funding rates could not be read: {e}");
-            return std::process::ExitCode::from(3);
-        }
-    };
-    for r in &rates {
-        println!("rate    {} {} mark {}", r.time_ms, r.rate, r.mark);
-    }
-    match venue.funding_charged(symbol, since) {
-        Ok(Some(lines)) => {
-            for l in &lines {
-                let v = l.amount.0;
-                let sign = if v < 0 { "-" } else { "" };
-                let (whole, frac) = (
-                    v.unsigned_abs() / 100_000_000,
-                    v.unsigned_abs() % 100_000_000,
-                );
-                println!("charged {} {sign}{whole}.{frac:08} id {}", l.time_ms, l.id);
-            }
-            std::process::ExitCode::SUCCESS
-        }
-        Ok(None) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("funding ledger could not be read: {e}");
-            std::process::ExitCode::from(3)
-        }
     }
 }

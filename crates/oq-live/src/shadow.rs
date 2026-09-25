@@ -359,11 +359,24 @@ impl Shadow {
         }
     }
 
-    /// The model's net position, long minus short.
+    /// The model's net position.
+    ///
+    /// The short leg is held negative, so the net is the sum. This read
+    /// `qty - short_qty` — long *plus* the short's size — as the books'
+    /// own version once did before it was caught there; on a hedged
+    /// account every position comparison would have been wrong.
     #[must_use]
     pub fn net_position(&self) -> QtyLots {
         let s = self.kernel.state();
-        QtyLots(s.holding().qty.0 - s.holding().short_qty.0)
+        QtyLots(s.holding().qty.0 + s.holding().short_qty.0)
+    }
+
+    /// The model's two legs, long then short (the short negative), for
+    /// charging each at a funding settlement.
+    #[must_use]
+    pub fn legs(&self) -> (QtyLots, QtyLots) {
+        let s = self.kernel.state();
+        (s.holding().qty, s.holding().short_qty)
     }
 
     /// The model's equity at the last mark it saw.
@@ -419,13 +432,18 @@ impl Shadow {
     #[must_use]
     pub fn evidence(
         &self,
-        funding: Option<(Cash, Cash)>,
+        funding: Result<(Cash, Cash), String>,
         fees: Option<(Cash, Cash)>,
     ) -> oq_parity::attribution::Evidence {
+        let (funding, funding_unavailable) = match funding {
+            Ok(pair) => (Some(pair), None),
+            Err(why) => (None, Some(why)),
+        };
         oq_parity::attribution::Evidence {
             matched: self.matched.clone(),
             unmatched: self.unpaired.clone(),
             funding,
+            funding_unavailable,
             fees,
         }
     }

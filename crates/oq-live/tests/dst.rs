@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use oq_l2feed::venue::Deployment;
 use oq_live::run::{RunConfig, run_on};
-use oq_live::sim::{Faults, Sim, SimConfig, SimEnv};
+use oq_live::sim::{Faults, Sim, SimConfig, SimEnv, SimFunding};
 use oq_risk::Limits;
 use oq_strategy::{Context, Intent, Strategy};
 use oq_types::{Cash, Nanos, OrderId, PriceTicks, QtyLots, Ratio, Side};
@@ -285,6 +285,30 @@ fn run_controlled(
     control: &[(Duration, &str)],
     allow_resume: bool,
 ) -> (Sim, ExitCode, Vec<u8>) {
+    run_sim(
+        tag,
+        seed,
+        minutes,
+        faults,
+        kind,
+        control,
+        allow_resume,
+        None,
+    )
+}
+
+/// The whole harness, with the venue's funding settlements when given.
+#[allow(clippy::too_many_arguments)]
+fn run_sim(
+    tag: &str,
+    seed: u64,
+    minutes: i64,
+    faults: Faults,
+    kind: Kind,
+    control: &[(Duration, &str)],
+    allow_resume: bool,
+    funding: Option<SimFunding>,
+) -> (Sim, ExitCode, Vec<u8>) {
     let control: Vec<(Duration, String)> = control
         .iter()
         .map(|(at, l)| (*at, (*l).to_string()))
@@ -303,6 +327,7 @@ fn run_controlled(
         faults,
         hedged,
         control: control.clone(),
+        funding,
     });
     let journal = root.join("run.oqj");
     let cfg = RunConfig {
@@ -943,4 +968,105 @@ fn a_bid_far_under_the_market_fills_neither_at_the_venue_nor_in_the_model() {
         "the model filled a resting limit order the market never reached: {:?}",
         read("run.model.run").output.fills
     );
+}
+
+/// Funding settlements the run crossed, as its journal recorded them:
+/// `(venue, model, verified)`.
+fn funding_records(tag: &str, seed: u64) -> Vec<(i64, i64, bool)> {
+    oq_journal::Reader::open(dir_path(tag, seed).join("run.oqj"))
+        .expect("open")
+        .replay()
+        .expect("what was written reads")
+        .since(0)
+        .filter_map(|f| oq_live::record::Record::decode(f.kind, &f.payload))
+        .filter_map(|r| match r {
+            oq_live::record::Record::Funding {
+                venue,
+                model,
+                verified,
+                ..
+            } => Some((venue.0, model.0, verified)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The component the attribution reply gives for funding.
+fn funding_component(answer: &str) -> &str {
+    let at = answer
+        .find(r#""funding vs model""#)
+        .expect("a funding component");
+    let start = answer[..at].rfind('{').expect("its object");
+    let end = at + answer[at..].find('}').expect("its end");
+    &answer[start..=end]
+}
+
+/// Funding is booked from the venue's ledger and charged to the model
+/// from its own legs, every settlement the run crossed, and attribution
+/// then has it as a measurement.
+///
+/// The venue's mark carries more places than the price grid; the check
+/// passes only because nothing rounds it to the grid.
+#[test]
+fn every_settlement_is_booked_from_the_ledger_checked_and_attributed() {
+    let (_, code, _) = run_sim(
+        "funding",
+        21,
+        20,
+        Faults::default(),
+        Kind::Hedged,
+        &[(Duration::from_secs(19 * 60), "attribution\tdeck test\t")],
+        false,
+        Some(SimFunding {
+            every: Duration::from_secs(5 * 60),
+            rate: "0.00010000",
+            misbook: 0,
+        }),
+    );
+    assert_eq!(code, ExitCode::SUCCESS);
+    let settled = funding_records("funding", 21);
+    assert!(
+        settled.len() >= 3,
+        "a settlement every five minutes of twenty: {settled:?}"
+    );
+    assert!(
+        settled.iter().all(|(_, _, verified)| *verified),
+        "{settled:?}"
+    );
+    assert!(
+        settled.iter().any(|(venue, _, _)| *venue != 0),
+        "positions were held and charged: {settled:?}"
+    );
+}
+
+/// A venue whose ledger does not agree with its own rate — or anything
+/// else that makes the live positions fail to reproduce it — leaves the
+/// model's funding untrusted, and attribution says why rather than
+/// showing a number.
+#[test]
+fn a_ledger_the_live_legs_cannot_reproduce_makes_funding_unavailable_with_the_reason() {
+    let (sim, code, _) = run_sim(
+        "fundbad",
+        21,
+        20,
+        Faults::default(),
+        Kind::Hedged,
+        &[(Duration::from_secs(19 * 60), "attribution\tdeck test\t")],
+        false,
+        Some(SimFunding {
+            every: Duration::from_secs(5 * 60),
+            rate: "0.00010000",
+            misbook: 1,
+        }),
+    );
+    assert_eq!(code, ExitCode::SUCCESS);
+    let settled = funding_records("fundbad", 21);
+    assert!(
+        settled.iter().any(|(_, _, verified)| !*verified),
+        "{settled:?}"
+    );
+    let answers = sim.control_answers();
+    let component = funding_component(&answers[0].1);
+    assert!(component.contains("cannot be trusted"), "{component}");
+    assert!(!component.contains(r#""unavailable":null"#), "{component}");
 }

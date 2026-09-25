@@ -435,8 +435,8 @@ section](../README.md#status), which is written to be deliberately unflattering
 chain is now joined: the live process journals its decisions, keeps its books
 with the backtest's kernel, runs a shadow of that kernel beside the venue, and
 ends every run with the gap decomposed. What it has not had is a long run to
-decompose, and funding is not yet read from the venue, so the residual carries
-it.
+decompose. Funding is read from the venue's ledger and checked against the
+model's arithmetic at every settlement.
 
 What each milestone unlocks, what triggers it, and what its exit gate is, is in
 the [roadmap](ROADMAP.md).

@@ -32,7 +32,7 @@
 //! list below cannot silently disagree with a writer generated from a
 //! macro.
 
-use oq_types::{Nanos, PriceTicks, QtyLots, Side};
+use oq_types::{Cash, Nanos, PriceTicks, QtyLots, Side};
 
 /// Frame kinds. Numbered explicitly and never reused: a reader from an
 /// older build must be able to skip what it does not know rather than
@@ -64,6 +64,9 @@ pub mod kind {
     pub const CANCELLED: u16 = 9;
     /// A command an operator gave through the control port.
     pub const OPERATOR: u16 = 10;
+    /// A funding settlement: what the venue charged and what the model
+    /// was charged for the same instant.
+    pub const FUNDING: u16 = 11;
 }
 
 /// How a submitted order turned out.
@@ -221,6 +224,22 @@ pub enum Record {
         origin: String,
         outcome: String,
     },
+    /// A funding settlement, once the venue's figures were in.
+    ///
+    /// `venue` is its ledger, booked to the live books as it stands;
+    /// `model` is the shadow's positions charged at the same rate and
+    /// mark. `verified` says whether the live positions, charged the
+    /// same way, came to exactly the venue's figure — the check that
+    /// makes `model` worth comparing with.
+    Funding {
+        at: Nanos,
+        settled_ms: i64,
+        rate: String,
+        mark: String,
+        venue: Cash,
+        model: Cash,
+        verified: bool,
+    },
 }
 
 impl Record {
@@ -238,6 +257,7 @@ impl Record {
             Self::Reconciled { .. } => kind::RECONCILED,
             Self::Waiting { .. } => kind::WAITING,
             Self::Operator { .. } => kind::OPERATOR,
+            Self::Funding { .. } => kind::FUNDING,
         }
     }
 
@@ -358,6 +378,23 @@ impl Record {
                 put_str(&mut out, origin);
                 put_str(&mut out, outcome);
             }
+            Self::Funding {
+                at,
+                settled_ms,
+                rate,
+                mark,
+                venue,
+                model,
+                verified,
+            } => {
+                put_i64(&mut out, at.0);
+                put_i64(&mut out, *settled_ms);
+                put_str(&mut out, rate);
+                put_str(&mut out, mark);
+                put_i64(&mut out, venue.0);
+                put_i64(&mut out, model.0);
+                out.push(u8::from(*verified));
+            }
             Self::Reconciled { at, legs } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(legs.len()).unwrap_or(0));
@@ -451,6 +488,15 @@ impl Record {
                 reason: take_str(&mut p)?,
                 origin: take_str(&mut p)?,
                 outcome: take_str(&mut p)?,
+            },
+            kind::FUNDING => Self::Funding {
+                at: Nanos(take_i64(&mut p)?),
+                settled_ms: take_i64(&mut p)?,
+                rate: take_str(&mut p)?,
+                mark: take_str(&mut p)?,
+                venue: Cash(take_i64(&mut p)?),
+                model: Cash(take_i64(&mut p)?),
+                verified: take_u8(&mut p)? != 0,
             },
             kind::RECONCILED => {
                 let at = Nanos(take_i64(&mut p)?);
@@ -565,6 +611,15 @@ mod tests {
         roundtrip(&Record::Refused {
             at: Nanos(10),
             breach: "Halted".into(),
+        });
+        roundtrip(&Record::Funding {
+            at: Nanos(1_790_323_201_000_000_000),
+            settled_ms: 1_790_323_200_000,
+            rate: "0.00010000".into(),
+            mark: "83994.60000000".into(),
+            venue: Cash(3_359_784),
+            model: Cash(-3_359_784),
+            verified: true,
         });
         roundtrip(&Record::Operator {
             at: Nanos(9),

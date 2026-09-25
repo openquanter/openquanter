@@ -70,6 +70,23 @@ pub struct SimConfig {
     /// Control-port request lines, each delivered once the run has been
     /// going this long: an operator, scripted.
     pub control: Vec<(Duration, String)>,
+    /// Funding settlements, when the venue charges them.
+    pub funding: Option<SimFunding>,
+}
+
+/// How the simulated venue charges funding.
+///
+/// Settled the way the real venue's ledger shows it: one line per leg,
+/// at a mark with more places than the price grid, truncated at eight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimFunding {
+    /// Time between settlements, from the start of the run.
+    pub every: Duration,
+    /// The rate every settlement charges, as the venue writes it.
+    pub rate: &'static str,
+    /// Added to the first ledger line of every settlement, in cash's
+    /// smallest unit: a venue whose books do not agree with its own rate.
+    pub misbook: i64,
 }
 
 /// Failures the simulated venue injects, each in parts per million of
@@ -158,6 +175,10 @@ struct Core {
     control_answers: Rc<RefCell<Vec<(String, String)>>>,
     /// When the silent fill happened, if it has.
     silent_at: Option<Duration>,
+    /// When the next funding settlement is, by the venue's clock.
+    next_funding_ms: i64,
+    funding_rates: Vec<oq_gateway::account::SettledRate>,
+    funding_lines: Vec<oq_gateway::account::FundingCharge>,
 }
 
 impl Core {
@@ -187,7 +208,65 @@ impl Core {
             withdrawn: Vec::new(),
             control_answers: Rc::new(RefCell::new(Vec::new())),
             silent_at: None,
+            next_funding_ms: wall.0 / 1_000_000
+                + cfg.funding.map_or(i64::MAX / 2, |f| {
+                    i64::try_from(f.every.as_millis()).unwrap_or(i64::MAX / 2)
+                }),
+            funding_rates: Vec::new(),
+            funding_lines: Vec::new(),
             cfg,
+        }
+    }
+
+    /// Charge every settlement due by now, one ledger line per leg held.
+    fn settle_funding(&mut self) {
+        let Some(f) = self.cfg.funding else { return };
+        while self.next_funding_ms <= self.now_ms() {
+            let at = self.next_funding_ms;
+            // Finer than the grid, as the venue's mark is.
+            let mark = format!("{}3456", self.px(self.price));
+            self.funding_rates.push(oq_gateway::account::SettledRate {
+                time_ms: at,
+                rate: f.rate.to_string(),
+                mark: mark.clone(),
+            });
+            let mut first = true;
+            let legs: Vec<i64> = self
+                .legs
+                .values()
+                .map(|(q, _)| *q)
+                .filter(|q| *q != 0)
+                .collect();
+            for lots in legs {
+                let Some(mut amount) = crate::funding::charge(
+                    &self.instrument,
+                    oq_types::QtyLots(lots),
+                    f.rate,
+                    &mark,
+                ) else {
+                    continue;
+                };
+                if first {
+                    amount = oq_types::Cash(amount.0 + f.misbook);
+                    first = false;
+                }
+                let id = i64::try_from(self.funding_lines.len()).unwrap_or(0) + 1;
+                self.funding_lines.push(oq_gateway::account::FundingCharge {
+                    time_ms: at,
+                    amount,
+                    id,
+                });
+                // Into the wallet, in the units `realized` counts.
+                let per_unit = 10f64.powi(
+                    i32::from(self.instrument.price_scale) + i32::from(self.instrument.qty_scale)
+                        - 8,
+                );
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    self.realized += amount.0 as f64 * per_unit;
+                }
+            }
+            self.next_funding_ms += i64::try_from(f.every.as_millis()).unwrap_or(i64::MAX / 2);
         }
     }
 
@@ -205,6 +284,7 @@ impl Core {
 
     /// Publish every market event due by now.
     fn advance(&mut self) {
+        self.settle_funding();
         let now = self.clock.elapsed();
         while self.next_market <= now {
             let at = self.next_market;
@@ -952,6 +1032,47 @@ impl Account for SimAccount {
                 status: "NEW".into(),
             })
             .collect())
+    }
+
+    fn funding_charged(
+        &self,
+        _symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<oq_gateway::account::FundingCharge>>, VenueError> {
+        let core = self.0.0.borrow();
+        if core.cfg.funding.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(
+            core.funding_lines
+                .iter()
+                .filter(|l| l.time_ms >= since_ms)
+                .copied()
+                .collect(),
+        ))
+    }
+
+    fn funding_rates(
+        &self,
+        _symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<oq_gateway::account::SettledRate>>, VenueError> {
+        let core = self.0.0.borrow();
+        if core.cfg.funding.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(
+            core.funding_rates
+                .iter()
+                .filter(|r| r.time_ms >= since_ms)
+                .cloned()
+                .collect(),
+        ))
+    }
+
+    fn next_funding_ms(&self, _symbol: &str) -> Result<Option<i64>, VenueError> {
+        let core = self.0.0.borrow();
+        Ok(core.cfg.funding.map(|_| core.next_funding_ms))
     }
 
     fn trade_history(&self, _symbol: &str) -> Result<Option<Vec<AccountTrade>>, VenueError> {

@@ -449,6 +449,20 @@ impl<E: Execution> Session<E> {
         self.write(&Record::Waiting { at, entries });
     }
 
+    /// A funding settlement, once the venue's figures were in: what it
+    /// charged the account, and what the model's positions came to.
+    pub fn record_funding(&mut self, at: oq_types::Nanos, s: &crate::funding::Settled) {
+        self.write(&Record::Funding {
+            at,
+            settled_ms: s.at_ms,
+            rate: s.rate.clone(),
+            mark: s.mark.clone(),
+            venue: s.venue,
+            model: s.model,
+            verified: s.verified,
+        });
+    }
+
     /// A fill the venue reported and this process booked.
     ///
     /// Written after the books accept it, so the journal contains what

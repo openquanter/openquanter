@@ -193,6 +193,12 @@ pub struct Evidence {
     /// Funding as it moved the account: the venue's, then the model's.
     /// Positive when received, negative when paid.
     pub funding: Option<(Cash, Cash)>,
+    /// Why `funding` is `None`, when the caller knows: waiting for the
+    /// venue to publish a settlement, a check that failed, an adapter
+    /// that does not read it. Rendered in place of the general sentence,
+    /// because "nobody recorded it" and "it did not add up" send the
+    /// reader to different places.
+    pub funding_unavailable: Option<String>,
     /// Fees as they moved the account: the venue's, then the model's.
     /// **Negative when charged** — every component here is an effect on
     /// profit, and a fee is a cost. A caller holding fees as "amount
@@ -351,8 +357,12 @@ pub fn attribute(
                 .iter()
                 .map(|c| {
                     let value = match c {
-                        Component::Funding => cash_difference(evidence.funding, "funding"),
-                        Component::FeeTier => cash_difference(evidence.fees, "fees"),
+                        Component::Funding => cash_difference(
+                            evidence.funding,
+                            "funding",
+                            evidence.funding_unavailable.as_deref(),
+                        ),
+                        Component::FeeTier => cash_difference(evidence.fees, "fees", None),
                         _ => Attributed::Unavailable(why.to_string()),
                     };
                     (*c, value)
@@ -427,9 +437,16 @@ pub fn attribute(
         (Component::Latency, latency),
         (
             Component::Funding,
-            cash_difference(evidence.funding, "funding"),
+            cash_difference(
+                evidence.funding,
+                "funding",
+                evidence.funding_unavailable.as_deref(),
+            ),
         ),
-        (Component::FeeTier, cash_difference(evidence.fees, "fees")),
+        (
+            Component::FeeTier,
+            cash_difference(evidence.fees, "fees", None),
+        ),
     ];
 
     let complete = components
@@ -455,10 +472,13 @@ pub fn attribute(
 }
 
 /// A venue-versus-model pair, or the reason there is none.
-fn cash_difference(pair: Option<(Cash, Cash)>, what: &str) -> Attributed {
-    match pair {
-        Some((venue, model)) => Attributed::Explained(Cash(venue.0 - model.0)),
-        None => Attributed::Unavailable(format!(
+fn cash_difference(pair: Option<(Cash, Cash)>, what: &str, why: Option<&str>) -> Attributed {
+    match (pair, why) {
+        (Some((venue, model)), _) => Attributed::Explained(Cash(venue.0 - model.0)),
+        (None, Some(why)) => Attributed::Unavailable(format!(
+            "{why}; a difference of zero would claim the two sides agreed"
+        )),
+        (None, None) => Attributed::Unavailable(format!(
             "no {what} was recorded for either side; a difference of zero would \
              claim they agreed"
         )),

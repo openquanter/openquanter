@@ -418,9 +418,13 @@ rewritten every fifteen minutes and at exit, so `oq-parity` can compare
 the two and `oq-parity markout` can price them afterwards.
 
 So "every cent accounted for" is now a report each run prints rather
-than an intention. Two things keep it short of the aim: funding is not
-yet read from the venue, so it is reported unavailable and the residual
-carries it; and no long run has been decomposed.
+than an intention. Funding is measured on both sides: the venue's own
+ledger for the account, and the model's positions charged at the rate and
+mark the venue settled at — a computation checked against the ledger at
+every settlement, which reports funding unavailable, with the reason,
+the moment it fails to reproduce it. What keeps it short of the aim is
+that no long run has been decomposed. Binance only; other venues report
+funding unavailable.
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, and the L2 fidelity

@@ -63,6 +63,7 @@ fn evidence(with_funding: bool) -> Evidence {
         ],
         // The venue charged 96 more than the model expected.
         funding: with_funding.then_some((Cash(-9_600_000_000), Cash(0))),
+        funding_unavailable: None,
         // And 22 more in fees.
         fees: Some((Cash(-2_200_000_000), Cash(0))),
     }
