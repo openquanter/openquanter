@@ -1395,6 +1395,7 @@ where
                             metrics: &metrics,
                             last_reconcile,
                             now,
+                            started_ms,
                         })
                     }
                     crate::control::Command::Orders => orders_reply(&trader),
@@ -3720,6 +3721,7 @@ struct StatusView<'a, S: Strategy> {
     metrics: &'a crate::metrics::Snapshot,
     last_reconcile: Option<(Nanos, bool)>,
     now: Nanos,
+    started_ms: i64,
 }
 
 fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
@@ -3790,6 +3792,31 @@ fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
         j.int(k, val);
     }
     j.end_object();
+    // What this run has made, and the limits it trades under: the two
+    // things an operator asks first and could not see from here.
+    #[allow(clippy::cast_precision_loss)]
+    let money = |c: Cash| format!("{}", c.0 as f64 / oq_types::CASH_SCALE as f64);
+    let (realized, fees, funding) = v.books.realized_parts();
+    j.field("pnl")
+        .begin_object()
+        .int("since_ms", v.started_ms)
+        .str("realized", &money(realized))
+        .str("fees", &money(fees))
+        .str("funding", &money(funding))
+        .str("net", &money(v.books.realized_net()))
+        .str("equity", &money(v.books.equity()))
+        .end_object();
+    let limits = session.gate().limits();
+    j.field("limits")
+        .begin_object()
+        .int("max_order_qty", limits.max_order_qty.0)
+        .int("max_position_qty", limits.max_position_qty.0)
+        .str("max_order_notional", &money(limits.max_order_notional))
+        .int("price_band_ppb", limits.price_band.0)
+        .uint("max_working", u64::from(limits.max_working))
+        .uint("max_rate", u64::from(limits.max_rate))
+        .int("rate_window_ns", limits.rate_window.0)
+        .end_object();
     j.field("counters")
         .begin_object()
         .uint("sent", v.metrics.sent)
