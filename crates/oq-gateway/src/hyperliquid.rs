@@ -736,24 +736,49 @@ fn truncate(body: &str) -> String {
 /// bearing and a reordering on the venue's side silently repoints every
 /// symbol. It is read fresh at startup rather than cached to disk for
 /// that reason.
-#[must_use]
-pub fn parse_universe(body: &str) -> Vec<String> {
-    parse_universe_meta(body)
+///
+/// # Errors
+/// No universe, or an entry in it that cannot be read — see
+/// [`parse_universe_meta`], because an entry fewer repoints every
+/// symbol after it.
+pub fn parse_universe(body: &str) -> Result<Vec<String>, VenueError> {
+    Ok(parse_universe_meta(body)?
         .into_iter()
         .map(|asset| asset.name)
-        .collect()
+        .collect())
 }
 
-fn parse_universe_meta(body: &str) -> Vec<AssetMeta> {
+/// The `universe`, with each asset's precision.
+///
+/// An entry that cannot be read fails the whole read rather than being
+/// dropped, which is the rule `json` states for every other list here
+/// and the one this list needs most: an order references an asset by its
+/// **index** in `universe`, so one entry fewer shifts every asset after
+/// it — and an order meant for SOL is signed for whatever moved into its
+/// place. The venue's own metadata is not a list to be lenient with.
+///
+/// # Errors
+/// No universe, or an entry in it with no readable name or precision.
+fn parse_universe_meta(body: &str) -> Result<Vec<AssetMeta>, VenueError> {
     let Some(list) = crate::json::array_field(body, "universe") else {
-        return Vec::new();
+        return Err(VenueError::Malformed {
+            what: "the asset universe",
+            body: body.chars().take(200).collect(),
+        });
     };
     crate::json::objects(&list)
         .iter()
-        .filter_map(|o| {
-            Some(AssetMeta {
-                name: crate::json::field_str(o, "name")?,
-                sz_decimals: crate::json::raw_field(o, "szDecimals")?.parse().ok()?,
+        .enumerate()
+        .map(|(i, o)| {
+            let read = || {
+                Some(AssetMeta {
+                    name: crate::json::field_str(o, "name")?,
+                    sz_decimals: crate::json::raw_field(o, "szDecimals")?.parse().ok()?,
+                })
+            };
+            read().ok_or_else(|| VenueError::Malformed {
+                what: "an entry in the asset universe",
+                body: format!("entry {i} has no readable name or szDecimals"),
             })
         })
         .collect()
@@ -832,7 +857,7 @@ impl Hyperliquid {
                 body: reason,
             })?;
         let body = self.info(r#"{"type":"meta"}"#)?;
-        let assets = parse_universe_meta(&body);
+        let assets = parse_universe_meta(&body)?;
         if assets.is_empty() {
             return Err(VenueError::Malformed {
                 what: "the asset universe",
@@ -944,7 +969,7 @@ pub fn parse_clearinghouse(
         });
     }
     // Summed from the legs: the summary carries no unrealized total.
-    let unrealized: f64 = parse_asset_positions(body)
+    let unrealized: f64 = parse_asset_positions(body)?
         .iter()
         .map(|p| p.unrealized)
         .sum();
@@ -961,12 +986,22 @@ pub fn parse_clearinghouse(
 /// `szi` is signed and there is no leg name — `type` is `oneWay` —
 /// so the sign comes from the number, as it does on Backpack and for
 /// the same reason.
-#[must_use]
-pub fn parse_asset_positions(body: &str) -> Vec<crate::binance::PositionSnapshot> {
+///
+/// # Errors
+/// No `assetPositions` at all, which is not the same fact as an account
+/// holding nothing: a read that did not happen must not be reported as a
+/// flat account, or the reconciliation is told the venue agrees with a
+/// position it never answered about.
+pub fn parse_asset_positions(
+    body: &str,
+) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
     let Some(list) = crate::json::array_field(body, "assetPositions") else {
-        return Vec::new();
+        return Err(VenueError::Malformed {
+            what: "assetPositions",
+            body: body.chars().take(200).collect(),
+        });
     };
-    crate::json::objects(&list)
+    Ok(crate::json::objects(&list)
         .iter()
         .filter_map(|entry| {
             let coin = crate::json::field_str(entry, "coin")?;
@@ -984,7 +1019,7 @@ pub fn parse_asset_positions(body: &str) -> Vec<crate::binance::PositionSnapshot
                     .unwrap_or_default(),
             })
         })
-        .collect()
+        .collect())
 }
 
 impl Hyperliquid {
@@ -1005,7 +1040,7 @@ impl Hyperliquid {
     /// Whatever the transport reports.
     pub fn positions(&self) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
         let body = self.clearinghouse_state()?;
-        Ok(parse_asset_positions(&body))
+        parse_asset_positions(&body)
     }
 
     /// The account's state, named by address.
@@ -1257,7 +1292,7 @@ mod account_reads {
     #[test]
     fn a_position_takes_its_sign_from_the_number() {
         // `type` is `oneWay` and there is no leg name, as on Backpack.
-        let legs = parse_asset_positions(STATE);
+        let legs = parse_asset_positions(STATE).expect("reads");
         assert_eq!(legs.len(), 1);
         assert_eq!(legs[0].symbol, "ETH");
         assert_eq!(legs[0].amount_text, "0.0335");
@@ -1266,12 +1301,25 @@ mod account_reads {
         assert!((legs[0].unrealized - -0.0134).abs() < 1e-9);
     }
 
+    /// A read that did not happen is not a flat account. Reported as
+    /// one, the reconciliation is told the venue agrees with a position
+    /// it never answered about.
+    #[test]
+    fn a_response_with_no_position_list_is_not_a_flat_account() {
+        let body = r#"{"marginSummary":{"accountValue":"100.0"}}"#;
+        assert!(parse_asset_positions(body).is_err(), "no list at all");
+        assert!(
+            parse_clearinghouse(body, 1).is_err(),
+            "and the account read refuses with it"
+        );
+    }
+
     #[test]
     fn an_account_holding_nothing_reads_as_flat() {
         let body = r#"{"assetPositions":[],"marginSummary":{"accountValue":"100.0",
             "totalMarginUsed":"0.0","totalNtlPos":"0.0","totalRawUsd":"100.0"},
             "withdrawable":"100.0","time":1}"#;
-        assert!(parse_asset_positions(body).is_empty());
+        assert!(parse_asset_positions(body).expect("reads").is_empty());
         let snap = parse_clearinghouse(body, 1).expect("a flat account is readable");
         assert!((snap.unrealized).abs() < 1e-12);
         assert!((snap.wallet_balance - 100.0).abs() < 1e-9);
@@ -1299,11 +1347,35 @@ mod tests {
         let body = r#"{"universe":[{"name":"BTC","szDecimals":5,"maxLeverage":50},
             {"name":"ETH","szDecimals":4,"maxLeverage":50},
             {"name":"SOL","szDecimals":2,"maxLeverage":20}]}"#;
-        let names = parse_universe(body);
+        let names = parse_universe(body).expect("reads");
         assert_eq!(names, vec!["BTC", "ETH", "SOL"]);
         assert_eq!(names.iter().position(|n| n == "ETH"), Some(1));
-        let assets = parse_universe_meta(body);
+        let assets = parse_universe_meta(body).expect("reads");
         assert_eq!(assets[1].sz_decimals, 4);
+    }
+
+    /// One entry fewer shifts every asset after it, and orders reference
+    /// an asset by its index — so an entry that cannot be read has to
+    /// fail the read rather than shorten the list. A dropped index is an
+    /// order for one coin signed for another.
+    #[test]
+    fn an_unreadable_universe_entry_fails_the_read() {
+        let body = r#"{"universe":[{"name":"BTC","szDecimals":5},
+            {"name":"ETH"},
+            {"name":"SOL","szDecimals":2}]}"#;
+        assert!(
+            parse_universe_meta(body).is_err(),
+            "entry 1 has no precision"
+        );
+        assert!(parse_universe(body).is_err());
+
+        let renamed = r#"{"universe":[{"name":"BTC","szDecimals":5},
+            {"szDecimals":4},
+            {"name":"SOL","szDecimals":2}]}"#;
+        assert!(parse_universe_meta(renamed).is_err(), "entry 1 has no name");
+
+        // And no universe at all is not an empty one.
+        assert!(parse_universe_meta(r#"{"marginTables":[]}"#).is_err());
     }
 
     #[test]
