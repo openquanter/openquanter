@@ -87,10 +87,21 @@ pub trait Environment {
 
     /// Open the journal at `path` for appending.
     ///
+    /// `EveryRecord`, which is the policy the record-before-send
+    /// ordering needs: what is written here is decisions — a placement,
+    /// a withdrawal, a fill — not market data, so the cost is a device
+    /// round trip per order rather than per tick. `EveryRecordNoFsync`
+    /// survives a process crash and not a machine one, and the failure
+    /// the ordering exists to rule out is a live order this journal has
+    /// never heard of: a power loss between the write and the venue's
+    /// answer loses exactly the record that would have let a restart ask
+    /// about it. The simulator keeps the cheaper policy, because its
+    /// inputs exist elsewhere and its journal is for replay.
+    ///
     /// # Errors
     /// Whatever opening it reports.
     fn open_journal(&self, path: &std::path::Path) -> oq_journal::Result<oq_journal::Writer> {
-        oq_journal::Writer::open(path, oq_journal::SyncPolicy::EveryRecordNoFsync)
+        oq_journal::Writer::open(path, oq_journal::SyncPolicy::EveryRecord)
     }
 
     /// Whether an operator has asked the process to stop.

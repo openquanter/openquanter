@@ -499,6 +499,15 @@ where
             }
         };
     let id_rules = venue.id_rules();
+    if !oq_gateway::broker::IdRules::prefix_is_unambiguous(&id_prefix, id_rules.separator()) {
+        eprintln!(
+            "order ids        REFUSED: this venue puts nothing between the prefix and the \
+             sequence, so a prefix containing a digit is ambiguous with a longer one — a \
+             process trading as `{id_prefix}2` would write ids this one reads as its own, \
+             count against its limits and withdraw on shutdown. Use letters only."
+        );
+        return ExitCode::FAILURE;
+    }
     if !id_rules.accepts(&format!(
         "{id_prefix}{}{}",
         id_rules.separator(),

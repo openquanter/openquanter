@@ -106,6 +106,24 @@ impl IdRules {
     /// not. OKX takes letters and digits only, and a hyphen there was
     /// refused at startup for "insufficient room" — a message about
     /// length for a problem with one character.
+    ///
+    /// Whether a prefix can be told apart from every longer one is
+    /// [`Self::prefix_is_unambiguous`].
+    ///
+    /// Where the venue puts nothing between the prefix and the sequence,
+    /// `prefix + digits` is ambiguous with a longer prefix followed by
+    /// fewer digits: a process trading as `oq2` sends `oq2175…`, and the
+    /// process trading as `oq` reads that as its own — counts it against
+    /// its limits and withdraws it when it shuts down. A prefix with no
+    /// digit in it cannot nest that way, because the remainder would
+    /// still carry a letter and would not read as a sequence.
+    ///
+    /// Where the venue does put one, the hyphen already separates them.
+    #[must_use]
+    pub fn prefix_is_unambiguous(prefix: &str, separator: &str) -> bool {
+        !separator.is_empty() || !prefix.bytes().any(|b| b.is_ascii_digit())
+    }
+
     #[must_use]
     pub const fn separator(&self) -> &'static str {
         match *self {
@@ -356,6 +374,21 @@ impl IdScheme {
 
 #[cfg(test)]
 mod tests {
+    /// Where the venue puts nothing between the prefix and the sequence,
+    /// `oq2` and `oq` both claim `oq2175432109876543210` — so a process
+    /// trading as `oq` counts the other's orders against its limits and
+    /// withdraws them when it shuts down. A prefix with no digit in it
+    /// cannot nest that way.
+    #[test]
+    fn a_prefix_without_digits_cannot_nest() {
+        // OKX writes no separator.
+        assert!(IdRules::prefix_is_unambiguous("oq", ""));
+        assert!(!IdRules::prefix_is_unambiguous("oq2", ""));
+        // And the venues that put a hyphen in already separate them.
+        assert!(IdRules::prefix_is_unambiguous("oq2", "-"));
+        assert!(IdRules::prefix_is_unambiguous("oq1", "-"));
+    }
+
     use super::*;
 
     /// The requirement's own words: an integrator adds a code **without
