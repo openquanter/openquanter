@@ -75,6 +75,14 @@ pub struct Belief {
     pub adopted: bool,
     /// Adopted legs pointed in both directions.
     pub hedged: bool,
+    /// When this run adopted the venue's position, in nanoseconds.
+    ///
+    /// The first moment this journal describes the venue, and so the
+    /// earliest reading of the account that can be compared with it: a
+    /// reading taken before this is a reading of the run *before* this
+    /// one, and every order the two have apart would be reported as a
+    /// difference in both directions.
+    pub adopted_at: Option<i64>,
     /// Each position leg as `(name, signed lots, entry ticks)`: `LONG`
     /// and `SHORT` on a hedged account, one net leg named by its sign on
     /// a one-way one. What [`Belief::to_record`] reports, because a
@@ -121,7 +129,7 @@ impl Belief {
                     b.price_scale = price_scale;
                     b.qty_scale = qty_scale;
                 }
-                Some(Record::Reconciled { legs: adopted, .. }) => {
+                Some(Record::Reconciled { at, legs: adopted }) => {
                     // The venue's whole position at a process's start, and
                     // it already contains every fill before it. So it
                     // replaces what the journal had built, rather than
@@ -130,6 +138,7 @@ impl Belief {
                     // earlier is resting either — a process starts only
                     // with no order on the venue.
                     b.adopted = true;
+                    b.adopted_at = Some(at.0);
                     b.position_lots = 0;
                     b.entry_ticks = 0;
                     b.hedged = false;
