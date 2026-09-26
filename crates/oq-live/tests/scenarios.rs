@@ -28,6 +28,7 @@ fn fill(client_id: &str, trade_id: i64) -> OrderUpdate {
         trade_id: Some(trade_id),
         event_ms: trade_id,
         initiator: oq_gateway::Initiator::Account,
+        fee: oq_types::Fee::Unsaid,
     }
 }
 

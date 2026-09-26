@@ -95,6 +95,25 @@ pub enum Offset {
     Close,
 }
 
+/// What a fill paid, and who said so.
+///
+/// Three states rather than an `Option`, because "the venue did not say"
+/// and "the venue said something that cannot be added up" are different
+/// facts, and an `Option` lets the second fall back to a fee schedule —
+/// which on a live account is zero, the one answer certainly wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fee {
+    /// The venue reported a fee, in the settlement currency.
+    Reported(Cash),
+    /// The venue reported one in an asset this account's cash cannot be
+    /// added to: a fee paid in BNB on an account settled in USDT.
+    Unreadable,
+    /// Nobody said. The engine matched this fill itself, so its fee is
+    /// whatever the configured schedule makes it.
+    #[default]
+    Unsaid,
+}
+
 /// One execution: the atom of everything downstream.
 ///
 /// Fills are what parity compares, what the ledger applies, and what

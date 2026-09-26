@@ -1328,6 +1328,7 @@ pub fn recovered_reports(order: &str, trades: &str) -> Result<Vec<OrderUpdate>, 
             trade_id: Some(need_i64(t, "id")?).filter(|id| *id > 0),
             event_ms: field_i64(t, "time").unwrap_or_default(),
             initiator,
+            fee: oq_types::Fee::Unsaid,
         });
     }
     if !decimal_eq(&cumulative, &executed) {
@@ -1348,6 +1349,7 @@ pub fn recovered_reports(order: &str, trades: &str) -> Result<Vec<OrderUpdate>, 
             trade_id: None,
             event_ms: field_i64(order, "updateTime").unwrap_or_default(),
             initiator,
+            fee: oq_types::Fee::Unsaid,
         });
     }
     Ok(out)
@@ -2050,6 +2052,39 @@ pub fn initiator_of(client_id: &str) -> Initiator {
     }
 }
 
+/// What the venue said one fill paid.
+///
+/// `n` is the commission and `N` the asset it was paid in — the same
+/// pair, meaning the same thing, as the `commission` and
+/// `commissionAsset` of a `userTrades` row, which is why the rule about
+/// the asset is the one [`settlement_commission`] already applies.
+///
+/// Absent is not zero. An update that does not say what it cost is a fee
+/// this run cannot add up, and reading it as nothing charged is how a
+/// live run came to report fees of zero while the venue was charging
+/// 0.67 on the same account.
+fn fee_of(inner: &str, symbol: &str) -> oq_types::Fee {
+    let Some(amount) = field_str(inner, "n") else {
+        return oq_types::Fee::Unreadable;
+    };
+    let Some(cash) = cash_of(&amount) else {
+        return oq_types::Fee::Unreadable;
+    };
+    if cash.0 == 0 {
+        // Nothing was charged, and the venue leaves the asset empty when
+        // that is the case: an asset check here would refuse an honest
+        // zero.
+        return oq_types::Fee::Reported(cash);
+    }
+    let asset = field_str(inner, "N").unwrap_or_default();
+    if asset.is_empty() || !symbol.ends_with(asset.as_str()) {
+        // A fee in another asset is not that many units of this one, and
+        // adding it as though it were is the mistake this refuses.
+        return oq_types::Fee::Unreadable;
+    }
+    oq_types::Fee::Reported(cash)
+}
+
 /// Read one message from the user data stream.
 ///
 /// Pure, so every event this build claims to understand is checked
@@ -2064,8 +2099,9 @@ pub fn parse_user_event(payload: &str) -> Option<UserEvent> {
             // The order sits under "o"; every field below is inside it,
             // and the outer object carries only the type and the times.
             let inner = payload.split_once(r#""o":{"#).map(|(_, rest)| rest)?;
-            Some(UserEvent::Order(OrderUpdate {
-                symbol: field_str(inner, "s")?,
+            let symbol = field_str(inner, "s")?;
+            Some(UserEvent::Order(Box::new(OrderUpdate {
+                symbol: symbol.clone(),
                 client_id: field_str(inner, "c")?,
                 venue_id: field_i64(inner, "i")?.to_string(),
                 status: field_str(inner, "X")?,
@@ -2088,7 +2124,8 @@ pub fn parse_user_event(payload: &str) -> Option<UserEvent> {
                 trade_id: field_i64(inner, "t").filter(|id| *id > 0),
                 event_ms: field_i64(payload, "E").unwrap_or_default(),
                 initiator: field_str(inner, "c").map_or(Initiator::Account, |c| initiator_of(&c)),
-            }))
+                fee: fee_of(inner, &symbol),
+            })))
         }
         "listenKeyExpired" => Some(UserEvent::Expired),
         other => Some(UserEvent::Other {
@@ -2125,6 +2162,44 @@ mod user_stream {
         }
         match parse_user_event(FILL) {
             Some(UserEvent::Order(u)) => assert_eq!(u.initiator, Initiator::Account),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The order update states the commission and the asset it was paid
+    /// in, so a live run needs no second read to know what a fill cost.
+    #[test]
+    fn a_fill_carries_what_the_venue_said_it_paid() {
+        match parse_user_event(FILL) {
+            Some(UserEvent::Order(u)) => assert_eq!(
+                u.fee,
+                oq_types::Fee::Reported(oq_types::Cash(479_999)),
+                "0.00479999 USDT, to the last place"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        // A fee in another asset is not that many of this one, and
+        // reading it as nothing charged is how a live run came to
+        // report fees of zero while the venue was charging.
+        let bnb = FILL.replace(r#""N":"USDT""#, r#""N":"BNB""#);
+        match parse_user_event(&bnb) {
+            Some(UserEvent::Order(u)) => assert_eq!(u.fee, oq_types::Fee::Unreadable),
+            other => panic!("{other:?}"),
+        }
+
+        // An update that does not say is not an update that says zero.
+        let silent = FILL.replace(r#""n":"0.00479999""#, r#""nn":"0.00479999""#);
+        match parse_user_event(&silent) {
+            Some(UserEvent::Order(u)) => assert_eq!(u.fee, oq_types::Fee::Unreadable),
+            other => panic!("{other:?}"),
+        }
+
+        // And a commission that is not a decimal amount is refused
+        // rather than saturated into a zero.
+        let nan = FILL.replace(r#""n":"0.00479999""#, r#""n":"NaN""#);
+        match parse_user_event(&nan) {
+            Some(UserEvent::Order(u)) => assert_eq!(u.fee, oq_types::Fee::Unreadable),
             other => panic!("{other:?}"),
         }
     }

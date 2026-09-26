@@ -544,6 +544,7 @@ fn filled(
         trade_id: Some(trade_id),
         event_ms: 0,
         initiator: oq_gateway::Initiator::Account,
+        fee: oq_types::Fee::Unsaid,
     }
 }
 

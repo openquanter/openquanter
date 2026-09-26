@@ -1130,7 +1130,7 @@ where
 
         // The account's own stream, after anything recovered for it.
         let next = match recovered.pop_front() {
-            Some(u) => StreamOutcome::Event(UserEvent::Order(u)),
+            Some(u) => StreamOutcome::Event(UserEvent::Order(Box::new(u))),
             None => reader.next(),
         };
         match next {
@@ -1180,7 +1180,7 @@ where
                         fill.qty,
                         fill.stamp.exch,
                     );
-                    match books.on_venue_fill(&fill) {
+                    match books.on_venue_fill(&fill, u.fee) {
                         crate::books::Booked::Applied(outputs) => {
                             if overclose {
                                 trader.halt("venue fill closes more than the held hedge leg; books cannot represent the excess; reconcile before recovery");
@@ -2939,6 +2939,7 @@ mod unreadable_reports {
             initiator: oq_gateway::Initiator::Account,
             symbol: "BTCUSDT".into(),
             venue_id: "0".to_string(),
+            fee: oq_types::Fee::Unsaid,
         }
     }
 
@@ -3422,6 +3423,7 @@ mod recovery {
             trade_id,
             event_ms: 0,
             initiator: oq_gateway::Initiator::Account,
+            fee: oq_types::Fee::Unsaid,
         }
     }
 
@@ -3502,6 +3504,7 @@ mod symbol_filter {
             trade_id: Some(9),
             event_ms: 0,
             initiator: oq_gateway::Initiator::Account,
+            fee: oq_types::Fee::Unsaid,
         }
     }
 
@@ -3607,7 +3610,7 @@ mod working_count {
             qty: QtyLots(4),
             liquidity: Liquidity::Maker,
         };
-        let _ = books.on_venue_fill(&piece);
+        let _ = books.on_venue_fill(&piece, oq_types::Fee::Unsaid);
         let tick = oq_engine::Tick::default();
         assert_eq!(
             books.context(tick).working,
@@ -3722,6 +3725,7 @@ mod venue_closes {
             trade_id: Some(7),
             event_ms: 1,
             initiator,
+            fee: oq_types::Fee::Unsaid,
         }
     }
 
@@ -3866,7 +3870,7 @@ fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
     // zero here is not "unknown" but "wrong". Until the venue's own
     // commission is booked, the fee and everything net of it are given
     // as unavailable.
-    let fees = v.books.fees_configured().then_some(fees);
+    let fees = v.books.fees_known().then_some(fees);
     j.field("pnl")
         .begin_object()
         .int("since_ms", v.started_ms)

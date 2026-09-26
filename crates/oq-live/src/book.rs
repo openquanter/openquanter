@@ -317,6 +317,7 @@ mod tests {
             trade_id,
             event_ms: 0,
             initiator: oq_gateway::Initiator::Account,
+            fee: oq_types::Fee::Unsaid,
         }
     }
 
@@ -423,6 +424,7 @@ mod ownership {
             trade_id,
             event_ms: 0,
             initiator: oq_gateway::Initiator::Account,
+            fee: oq_types::Fee::Unsaid,
         }
     }
 
@@ -516,6 +518,7 @@ mod fills {
             trade_id: Some(trade_id),
             event_ms: 0,
             initiator: oq_gateway::Initiator::Account,
+            fee: oq_types::Fee::Unsaid,
         }
     }
 
@@ -552,6 +555,7 @@ mod stp {
             trade_id: None,
             event_ms: 0,
             initiator: oq_gateway::Initiator::Account,
+            fee: oq_types::Fee::Unsaid,
         };
         b.apply(&u);
         assert_eq!(b.working(), 1);

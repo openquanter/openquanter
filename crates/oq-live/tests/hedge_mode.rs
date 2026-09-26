@@ -57,7 +57,7 @@ fn an_excess_close_is_detected_on_either_leg_before_the_kernel_clamps_it() {
         assert!(b.close_exceeds_position(&fill));
         fill.qty = QtyLots(10);
         assert!(!b.close_exceeds_position(&fill));
-        b.on_venue_fill(&fill);
+        b.on_venue_fill(&fill, oq_types::Fee::Unsaid);
         assert!(
             !b.close_exceeds_position(&fill),
             "a duplicate fill is not a new over-close"
