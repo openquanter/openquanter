@@ -222,6 +222,13 @@ writing it down and better than leaving it out.
   frame-by-frame by an earlier build rather than misread, which is what
   the explicit kind numbering is for.
 
+
+- **`Event::VenueFill` carries the fee the venue stated.** *Appended to
+  the record's payload, not inserted into it:* a journal written before
+  this is 55 bytes and still decodes, with `Fee::Unsaid` — which is the
+  truth about a record that never carried one. The variant is no longer
+  a tuple, so a matcher over it changes shape.
+
 ### Documentation
 
 - The `sweep_100` benchmark ran on `MarketShape::trending(600_000)`,
@@ -426,6 +433,48 @@ backtest result changes: a simulated matcher answers every submission.
 the backtest loop and the live host. A strategy that treats *I asked*
 as *it is resting* believes it holds exposure it does not have.
 
+
+- **A live run books the commission the venue charged.** The books
+  charge from a fee schedule and a live run is built without one, so
+  `fees` was zero for every live run — a number reported beside realized
+  and funding as though it had been measured. The user data stream
+  states the commission and the asset on every fill; `fill_of` books it,
+  and a fee in another asset — or one that is not a decimal amount — is
+  `Fee::Unreadable`, which marks the run's total incomplete rather than
+  falling through to a schedule of zero.
+- **The fee a run reports is checked against the venue's ledger.** The
+  books' total and a final read of the venue's own trade records are
+  compared where both are final — at the end of the run — and a
+  disagreement leaves the attribution's fee component unavailable
+  rather than publishing either number. Funding has been checked this
+  way at every settlement since it was added.
+- **The journal is durable.** `EveryRecordNoFsync` survives a process
+  crash and not a machine one, and the failure the record-before-send
+  ordering exists to rule out is a live order the journal has never
+  heard of.
+- **A book update's sequence number is placed or refused.** OKX's
+  `prevSeqId` reached `p + 1` unchecked, and this workspace turns
+  overflow checks on in release: a message could stop the process, and
+  the shutdown that withdraws resting orders is a call after the loop,
+  not a `Drop`. A `seqId` that is not a number the venue could have sent
+  is refused rather than clamped to zero, which read as the chain
+  starting over.
+- **A venue figure of `NaN` is not agreement.** `NaN` compares false
+  against everything, so every check in `reconcile` passed it.
+- **A fill's side is buy or sell, or it is unbookable.** The order
+  stream's side field is optional upstream, and the mapping read
+  anything else as a sell — a short on a flat account, caught by the
+  next reconcile and wrong until then.
+- **A prefix cannot swallow another process's orders.** Where the venue
+  puts nothing between the prefix and the sequence, `oq` and `oq2` are
+  different interlock locks and the same ownership check: the `oq`
+  process counted the other's orders against its limits and withdrew
+  them on shutdown. Refused at startup now.
+- **The belief knows when the run began.** A reader comparing a journal
+  against a venue reading has to know which run the reading is of;
+  `to_record` stamps a time on the journal's final state rather than
+  rewinding to one.
+
 ### Fees
 
 Maker/taker trading fees are charged in the kernel. A maker rate may be
@@ -433,6 +482,12 @@ negative, because rebates exist and a model that floors at zero cannot
 represent the strategies that live on them. **Fees default to zero and
 must be set deliberately** — the examples do not set them, so every
 number the documentation quotes is gross of costs.
+
+
+**The venue's own commission is what a live run charges.** The live path
+is built without a schedule, so the kernel's figure was zero for all of
+them; the commission on each fill is read to the last place — `Cash`,
+not a float rounded through `as i64` — and summed as integers.
 
 ### Capture
 
@@ -479,6 +534,12 @@ number the documentation quotes is gross of costs.
   healthy overlap or stays quiet through real loss. Leaves
   `.last-success` / `.last-failure` in the archive root, because silence
   is the failure mode and a log nobody reads is silence.
+
+
+- **An hour of an archive is read once.** A capture written before the
+  archive step has both `<name>.oqcap` and its `.zst`, and the original
+  is not always removed: `load_hour` read both and counted every record
+  twice, which reads as a market that got busier.
 
 ### Examples and performance
 
