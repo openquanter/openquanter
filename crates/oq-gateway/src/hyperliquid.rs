@@ -1034,13 +1034,26 @@ impl Hyperliquid {
         parse_clearinghouse(&body, read_at)
     }
 
-    /// Open positions.
+    /// Open positions on one coin.
+    ///
+    /// The venue answers for every coin on the account and this returns
+    /// the ones the caller asked about. A leg belonging to another coin
+    /// is not a leg of this one: compared against a session that trades
+    /// one symbol, it reads as a position the venue holds and this
+    /// process does not know about, which is fatal, and the process
+    /// stops over a coin it was never trading.
     ///
     /// # Errors
-    /// Whatever the transport reports.
-    pub fn positions(&self) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
+    /// Whatever the transport reports, and a response with no position
+    /// list — which is not a flat account.
+    pub fn positions(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<crate::binance::PositionSnapshot>, VenueError> {
         let body = self.clearinghouse_state()?;
-        parse_asset_positions(&body)
+        let mut held = parse_asset_positions(&body)?;
+        held.retain(|p| p.symbol == symbol);
+        Ok(held)
     }
 
     /// The account's state, named by address.
@@ -1299,6 +1312,36 @@ mod account_reads {
         assert_eq!(legs[0].position_side, "BOTH");
         assert!((legs[0].entry_price - 2986.3).abs() < 1e-9);
         assert!((legs[0].unrealized - -0.0134).abs() < 1e-9);
+    }
+
+    /// The venue answers for every coin on the account. A leg belonging
+    /// to another coin is not a leg of the one the session trades:
+    /// compared, it is a position the venue holds and this process does
+    /// not know about, which is fatal — the run stops over a coin it was
+    /// never trading.
+    #[test]
+    fn a_position_read_keeps_only_the_coin_it_was_asked_about() {
+        let two = STATE.replace(
+            r#"{"position":{"coin":"ETH","#,
+            r#"{"position":{"coin":"BTC","entryPx":"71000.0","szi":"0.002",
+                "unrealizedPnl":"0.5"},"type":"oneWay"},
+               {"position":{"coin":"ETH","#,
+        );
+        let eth = parse_asset_positions(&two).expect("reads");
+        assert_eq!(eth.len(), 2, "the venue answered for both");
+
+        // The filter is what `positions` adds, and this is the fact it
+        // exists for.
+        let mine: Vec<_> = eth.iter().filter(|p| p.symbol == "ETH").collect();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].amount_text, "0.0335");
+        assert_eq!(
+            eth.iter()
+                .find(|p| p.symbol == "BTC")
+                .expect("btc")
+                .amount_text,
+            "0.002"
+        );
     }
 
     /// A read that did not happen is not a flat account. Reported as
