@@ -715,7 +715,10 @@ impl L1Engine {
         match self.prev_volume {
             // Cumulative volume that went backwards is not cumulative,
             // and a negative traded volume would refund a queue.
-            Some(prev) => (tick.volume.0 - prev.0).max(0),
+            // Saturating: the venue's cumulative volume is a number it
+            // chose, and a subtraction that panics takes the engine down
+            // over a figure that only decides how much impact to charge.
+            Some(prev) => tick.volume.0.saturating_sub(prev.0).max(0),
             None => 0,
         }
     }

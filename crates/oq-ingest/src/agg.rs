@@ -151,7 +151,9 @@ impl Aggregator {
             self.high_water = at;
             at
         };
-        let start = at - at.rem_euclid(self.window_ns);
+        // Saturating: `at` is read from the record's own timestamp, and
+        // a bucket start is a number to group by, not one to fail on.
+        let start = at.saturating_sub(at.rem_euclid(self.window_ns));
         let closed = match &mut self.open {
             Some(w) if w.start == start => None,
             Some(w) => {

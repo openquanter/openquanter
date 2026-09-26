@@ -140,12 +140,16 @@ impl Belief {
                     let mut longs = false;
                     let mut shorts = false;
                     for (_symbol, side, lots, entry) in adopted {
+                        // `saturating_abs`: a lot count of `i64::MIN`
+                        // is not a position, and `abs` on it panics
+                        // where a report is what is wanted.
+                        let size = lots.saturating_abs();
                         let (name, signed) = if side.eq_ignore_ascii_case("SHORT") {
                             shorts = true;
-                            ("SHORT", -lots.abs())
+                            ("SHORT", -size)
                         } else {
                             longs = true;
-                            ("LONG", lots.abs())
+                            ("LONG", size)
                         };
                         b.apply(signed, entry);
                         fold(legs.entry(name.to_string()).or_default(), signed, entry);
@@ -311,7 +315,7 @@ fn fold(pos: &mut (i64, i64), signed_lots: i64, entry_ticks: i64) {
         return;
     }
     let (before, entry) = *pos;
-    let after = before + signed_lots;
+    let after = before.saturating_add(signed_lots);
     let entry = if before == 0 || (before > 0) == (signed_lots > 0) {
         // Opening or adding.
         let total = i128::from(before.abs()) + i128::from(signed_lots.abs());

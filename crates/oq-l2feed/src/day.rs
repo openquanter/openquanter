@@ -25,7 +25,9 @@ impl UtcDay {
     /// First nanosecond of this day.
     #[must_use]
     pub fn start_nanos(self) -> i64 {
-        self.0 * NS_PER_DAY
+        // Saturating: a day computed from a corrupted timestamp is a day
+        // to refuse by other means, not one to panic on.
+        self.0.saturating_mul(NS_PER_DAY)
     }
 
     /// Calendar date as `(year, month, day)`.
