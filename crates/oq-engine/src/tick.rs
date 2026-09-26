@@ -130,7 +130,7 @@ impl Tick {
     /// counting traded volume wants.
     #[must_use]
     pub const fn volume_since(&self, previous: &Self) -> QtyLots {
-        let delta = self.volume.0 - previous.volume.0;
+        let delta = self.volume.0.saturating_sub(previous.volume.0);
         if delta < 0 {
             QtyLots::ZERO
         } else {

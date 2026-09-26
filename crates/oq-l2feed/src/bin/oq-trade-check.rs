@@ -87,13 +87,23 @@ fn main() -> ExitCode {
     ids.sort_unstable();
 
     let dupes = ids.windows(2).filter(|w| w[0] == w[1]).count();
+    // Saturating throughout: these are counts in a report about a
+    // capture, and a trade id at the top of `u64` is a number to report,
+    // not one to panic on.
     let gaps: Vec<(u64, u64)> = ids
         .windows(2)
-        .filter(|w| w[1] > w[0] + 1)
+        .filter(|w| w[1] > w[0].saturating_add(1))
         .map(|w| (w[0], w[1]))
         .collect();
-    let missing: u64 = gaps.iter().map(|(a, b)| b - a - 1).sum();
-    let span = ids.last().unwrap_or(&0) - ids.first().unwrap_or(&0) + 1;
+    let missing: u64 = gaps
+        .iter()
+        .map(|(a, b)| b.saturating_sub(*a).saturating_sub(1))
+        .sum();
+    let span = ids
+        .last()
+        .unwrap_or(&0)
+        .saturating_sub(*ids.first().unwrap_or(&0))
+        .saturating_add(1);
 
     println!("records         {}  (torn {torn})", records.len());
     println!("with a trade id {total}");
