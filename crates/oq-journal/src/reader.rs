@@ -132,7 +132,22 @@ impl Reader {
                     frames.push(frame);
                     offset += used;
                 }
-                Err(FrameError::Incomplete { .. }) => {
+                Err(cause @ FrameError::Incomplete { .. }) => {
+                    // A length damaged in the middle of the file looks
+                    // exactly like a writer that died mid-record: the
+                    // declared record does not fit in what is left. The
+                    // difference is that the records after it are still
+                    // there, and the magic leads each one so that a
+                    // reader can tell — which is what it is for. Taken
+                    // for a tear, the writer truncates the journal to
+                    // the damaged length on its next open, and every
+                    // record past it is gone without a word.
+                    if frame_follows(&self.bytes, offset + 1) {
+                        return Err(JournalError::Corrupt {
+                            at_offset: offset as u64,
+                            cause,
+                        });
+                    }
                     // The only benign stop: the tail of the file is a
                     // record the writer never finished.
                     let discarded = (self.bytes.len() - offset) as u64;
@@ -160,6 +175,31 @@ impl Reader {
 /// Find the next sequence number and the offset of the last whole
 /// record, without materializing the records.
 ///
+/// Whether a whole, verified frame begins at or after `from`.
+///
+/// The magic leads every record so that a reader scanning a damaged file
+/// has an anchor to resynchronize on, and this is that scan: a frame
+/// this reader cannot finish, with a frame it *can* finish behind it, is
+/// a damaged length rather than the end of the file.
+fn frame_follows(bytes: &[u8], from: usize) -> bool {
+    let anchor = crate::frame::MAGIC.to_le_bytes();
+    let mut search = from;
+    while search + anchor.len() <= bytes.len() {
+        let Some(hit) = bytes[search..]
+            .windows(anchor.len())
+            .position(|w| w == anchor)
+        else {
+            return false;
+        };
+        let at = search + hit;
+        if Frame::decode(&bytes[at..]).is_ok() {
+            return true;
+        }
+        search = at + 1;
+    }
+    false
+}
+
 /// Used by [`crate::Writer::open`] to resume at a clean boundary.
 ///
 /// # Errors
@@ -206,6 +246,66 @@ mod tests {
             .replay()
             .expect_err("refused");
         assert!(matches!(err, JournalError::SequenceExhausted), "{err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A length damaged in the middle is not a torn tail, and the
+    /// difference matters: read as a tear, the writer truncates the
+    /// journal to the damaged length on its next open and every record
+    /// past it is gone with nothing said.
+    #[test]
+    fn a_damaged_length_in_the_middle_is_corruption_not_a_torn_tail() {
+        let path = temp_path("bad-length");
+        let mut bytes = Vec::new();
+        for seq in 0..4u64 {
+            Frame::new(seq, 1, format!("record {seq}").into_bytes()).encode_into(&mut bytes);
+        }
+        // The second record's length field, set past the end of the file
+        // but inside `MAX_PAYLOAD`, so it reads as a record that does not
+        // fit rather than as one out of range.
+        let anchor = crate::frame::MAGIC.to_le_bytes();
+        let second = bytes[1..]
+            .windows(4)
+            .position(|w| w == anchor)
+            .expect("second")
+            + 1;
+        bytes[second + 16..second + 20].copy_from_slice(&1_000_000u32.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("write");
+
+        let err = Reader::open(&path)
+            .expect("open")
+            .replay()
+            .expect_err("the records after it are still there");
+        assert!(matches!(err, JournalError::Corrupt { .. }), "{err}");
+
+        // And the writer refuses rather than truncating it away.
+        assert!(
+            Writer::open(&path, SyncPolicy::EveryRecord).is_err(),
+            "opening for append must not discard the records past the damage"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").len(),
+            bytes.len() as u64,
+            "and must not have touched the file"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The other side of it: a record the writer really did not finish
+    /// is still the benign stop it always was.
+    #[test]
+    fn a_final_record_the_writer_did_not_finish_is_still_a_torn_tail() {
+        let path = temp_path("torn");
+        let mut bytes = Vec::new();
+        for seq in 0..3u64 {
+            Frame::new(seq, 1, format!("record {seq}").into_bytes()).encode_into(&mut bytes);
+        }
+        bytes.truncate(bytes.len() - 3);
+        std::fs::write(&path, &bytes).expect("write");
+
+        let replay = Reader::open(&path).expect("open").replay().expect("reads");
+        assert_eq!(replay.frames.len(), 2, "the finished records are read");
+        assert!(matches!(replay.stop, ReplayStop::TornTail { .. }));
         std::fs::remove_file(&path).ok();
     }
 
