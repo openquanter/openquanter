@@ -18,6 +18,24 @@
 //!   aggregation read the journal. Nothing has to be threaded back
 //!   through the core to be watched, so watching cannot perturb it.
 //!
+//! ## What the checksum is, and is not
+//!
+//! Every record carries a CRC-32 over itself. It is there to catch
+//! damage — a bit flipped in transit, a sector gone bad, a length field
+//! that no longer matches what follows it.
+//!
+//! It is not a MAC. There is no key, so it does not make the journal
+//! tamper-*evident*: whoever can write the file can rewrite a record and
+//! its checksum, and can delete records from the end and leave a shorter
+//! journal that verifies — the check walks the records that are there,
+//! and there is nothing after the last one to disagree with. Reordering,
+//! editing and deleting in the middle are caught, by the chain of
+//! sequence numbers and by the `prev` each record's payload is free to
+//! carry.
+//!
+//! Catching a shortened journal needs a copy its writer does not
+//! control. That is what the operator's off-host trail is for.
+//!
 //! ## Torn tails are normal
 //!
 //! A process that dies mid-write leaves a partial record. This is
