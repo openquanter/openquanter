@@ -58,6 +58,11 @@ fn an_adopted_position_is_reconstructed() {
     );
     let b = Belief::from_journal(&p).expect("readable");
     assert!(b.adopted, "the adoption record was not seen");
+    // And when. A reader comparing this journal against a reading of the
+    // account needs to know which run that reading was of: one taken
+    // before this moment describes the run before this one, and every
+    // order the two have apart is reported as a difference twice over.
+    assert_eq!(b.adopted_at, Some(1), "the adoption's own timestamp");
     assert_eq!(b.position_lots, 256);
     assert_eq!(b.entry_ticks, 7_144_487);
     let r = b.to_record(0);
@@ -81,6 +86,10 @@ fn a_journal_without_an_adoption_record_does_not_claim_flat() {
     let b = Belief::from_journal(&p).expect("readable");
     assert_eq!(b.position_lots, 0);
     assert!(!b.adopted, "there was no Reconciled record to see");
+    assert_eq!(
+        b.adopted_at, None,
+        "and no moment to compare a reading against"
+    );
 }
 
 /// Fills move the position in the direction of the submission that
