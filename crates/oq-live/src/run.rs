@@ -1785,6 +1785,41 @@ where
             None
         }
     };
+    // Two readings of one fact, taken where both are final: the venue's
+    // own trade records, and the commission it stated on each fill as
+    // that fill arrived. Funding is checked the same way at every
+    // settlement, and for the same reason — a component the ledger does
+    // not confirm is a number nobody can check, and saying so beats
+    // publishing it.
+    //
+    // The books' own total is the venue's here because a live run is
+    // built without a fee schedule: every unit in it came from a fill.
+    let venue_fees = match venue_fees {
+        Some(rest) if !books.fees_known() => {
+            eprintln!(
+                "fees             the venue's records say {} but this run could not read the fee \
+                 on every fill; the component is unreadable rather than a difference with a hole \
+                 in it",
+                rest.as_f64()
+            );
+            None
+        }
+        Some(rest) => {
+            let stated = books.realized_parts().1;
+            if stated == rest {
+                Some(rest)
+            } else {
+                eprintln!(
+                    "fees             the venue's records say {} and the fills it sent said {}; \
+                     the component is unreadable rather than either",
+                    rest.as_f64(),
+                    stated.as_f64()
+                );
+                None
+            }
+        }
+        None => None,
+    };
     shadow.finish(clock.wall());
     println!();
     let divergences = shadow.divergences();
