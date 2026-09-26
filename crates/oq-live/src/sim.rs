@@ -446,9 +446,10 @@ impl Core {
                 trade_id: Some(self.trade_id),
                 event_ms: self.now_ms(),
                 initiator: Initiator::Account,
+                fee: oq_types::Fee::Unsaid,
             };
             reports.push(update.clone());
-            self.send(UserEvent::Order(update));
+            self.send(UserEvent::Order(Box::new(update)));
         }
         self.finished.insert(
             client_id.to_string(),
@@ -469,7 +470,7 @@ impl Core {
         side: Side,
         status: &str,
     ) -> UserEvent {
-        UserEvent::Order(OrderUpdate {
+        UserEvent::Order(Box::new(OrderUpdate {
             symbol: self.cfg.symbol.clone(),
             client_id: client_id.to_string(),
             venue_id: venue_id.to_string(),
@@ -483,7 +484,8 @@ impl Core {
             trade_id: None,
             event_ms: self.now_ms(),
             initiator: Initiator::Account,
-        })
+            fee: oq_types::Fee::Unsaid,
+        }))
     }
 }
 
@@ -844,7 +846,7 @@ impl Execution for SimAccount {
                         venue_id: o.venue_id,
                         status: "CANCELED",
                         filled: 0,
-                        reports: vec![report.clone()],
+                        reports: vec![(*report).clone()],
                     },
                 );
                 core.send(UserEvent::Order(report));

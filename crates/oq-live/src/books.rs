@@ -163,20 +163,27 @@ impl Books {
         if qty.0 <= 0 {
             return;
         }
-        self.kernel.apply(&Event::VenueFill(Fill {
-            stamp: oq_types::Stamp::new(at.0, at.0),
-            instrument: self.instrument,
-            // Zero: this fill answers to no order this process sent, and
-            // an id borrowed from one would attach it to an order that
-            // is not this.
-            order: OrderId(0),
-            trade: oq_types::TradeId(0),
-            side,
-            offset: Offset::Open,
-            price: entry,
-            qty,
-            liquidity: oq_types::Liquidity::Taker,
-        }));
+        self.kernel.apply(&Event::VenueFill {
+            // The venue reported no commission for a position installed
+            // this way — it was not a fill in this run — so nothing here
+            // can say what it cost, and the run's total is left saying
+            // the same.
+            fee: oq_types::Fee::Unreadable,
+            fill: Fill {
+                stamp: oq_types::Stamp::new(at.0, at.0),
+                instrument: self.instrument,
+                // Zero: this fill answers to no order this process sent, and
+                // an id borrowed from one would attach it to an order that
+                // is not this.
+                order: OrderId(0),
+                trade: oq_types::TradeId(0),
+                side,
+                offset: Offset::Open,
+                price: entry,
+                qty,
+                liquidity: oq_types::Liquidity::Taker,
+            },
+        });
     }
 
     /// Fold an observation into the books.
@@ -220,7 +227,11 @@ impl Books {
     /// changes the books. A redelivered fill is routine after a
     /// reconnect, and applying one would double a position in a way
     /// indistinguishable from a bug.
-    pub fn on_venue_fill(&mut self, fill: &Fill) -> Booked {
+    ///
+    /// `fee` is what the venue said this execution cost, and it travels
+    /// with the fill rather than being looked up: the venue is the fact
+    /// about its own commission and a schedule is only a model of it.
+    pub fn on_venue_fill(&mut self, fill: &Fill, fee: oq_types::Fee) -> Booked {
         if fill.trade.0 == 0 {
             // Not deduplicable, so accepting it means accepting an
             // unbounded number of copies of one trade.
@@ -230,7 +241,11 @@ impl Books {
             return Booked::Duplicate;
         }
         self.working = self.working.saturating_sub(1);
-        Booked::Applied(self.kernel.apply(&Event::VenueFill(*fill)).to_vec())
+        Booked::Applied(
+            self.kernel
+                .apply(&Event::VenueFill { fill: *fill, fee })
+                .to_vec(),
+        )
     }
 
     /// A hedge close beyond the held leg cannot be represented by the
@@ -337,8 +352,8 @@ impl Books {
     /// The live path is not: its fees are zero because nothing was ever
     /// added to them, not because the venue charged nothing.
     #[must_use]
-    pub const fn fees_configured(&self) -> bool {
-        self.kernel.state().fees_configured
+    pub const fn fees_known(&self) -> bool {
+        self.kernel.state().fees_known()
     }
 
     /// Realized P&L, fees and funding since this run started, apart.
@@ -444,7 +459,10 @@ mod tests {
         b.on_tick(&tick(SEC, 6_000_000));
         assert_eq!(b.context(tick(SEC, 6_000_000)).position, QtyLots(0));
 
-        b.on_venue_fill(&fill(2 * SEC, 1, Side::Buy, 6_000_000, 4, Offset::Open));
+        b.on_venue_fill(
+            &fill(2 * SEC, 1, Side::Buy, 6_000_000, 4, Offset::Open),
+            oq_types::Fee::Unsaid,
+        );
         let ctx = b.context(tick(3 * SEC, 6_010_000));
 
         assert_eq!(
@@ -463,7 +481,10 @@ mod tests {
     fn equity_moves_with_the_market() {
         let mut b = books();
         b.on_tick(&tick(SEC, 6_000_000));
-        b.on_venue_fill(&fill(SEC, 1, Side::Buy, 6_000_000, 10, Offset::Open));
+        b.on_venue_fill(
+            &fill(SEC, 1, Side::Buy, 6_000_000, 10, Offset::Open),
+            oq_types::Fee::Unsaid,
+        );
         let flat = b.equity();
 
         b.on_tick(&tick(2 * SEC, 6_100_000));
@@ -488,7 +509,10 @@ mod tests {
 
         let mut filled = books();
         filled.on_tick(&tick(SEC, 6_000_000));
-        filled.on_venue_fill(&fill(SEC, 0, Side::Buy, 5_950_000, 7, Offset::Open));
+        filled.on_venue_fill(
+            &fill(SEC, 0, Side::Buy, 5_950_000, 7, Offset::Open),
+            oq_types::Fee::Unsaid,
+        );
         filled.on_tick(&tick(2 * SEC, 6_000_000));
 
         let a = adopted.context(tick(2 * SEC, 6_000_000));
@@ -505,8 +529,14 @@ mod tests {
     fn a_close_reduces_the_position() {
         let mut b = books();
         b.on_tick(&tick(SEC, 6_000_000));
-        b.on_venue_fill(&fill(SEC, 1, Side::Buy, 6_000_000, 5, Offset::Open));
-        b.on_venue_fill(&fill(2 * SEC, 2, Side::Sell, 6_010_000, 5, Offset::Close));
+        b.on_venue_fill(
+            &fill(SEC, 1, Side::Buy, 6_000_000, 5, Offset::Open),
+            oq_types::Fee::Unsaid,
+        );
+        b.on_venue_fill(
+            &fill(2 * SEC, 2, Side::Sell, 6_010_000, 5, Offset::Close),
+            oq_types::Fee::Unsaid,
+        );
         assert_eq!(b.net_position(), QtyLots(0), "flat again");
     }
 
@@ -522,7 +552,10 @@ mod tests {
         b.on_submit(OrderId(2), Side::Buy, QtyLots(1), Offset::Open, Nanos(SEC));
         assert_eq!(b.context(tick(SEC, 6_000_000)).working, 2);
 
-        b.on_venue_fill(&fill(2 * SEC, 1, Side::Buy, 6_000_000, 1, Offset::Open));
+        b.on_venue_fill(
+            &fill(2 * SEC, 1, Side::Buy, 6_000_000, 1, Offset::Open),
+            oq_types::Fee::Unsaid,
+        );
         b.on_closed();
         assert_eq!(b.context(tick(2 * SEC, 6_000_000)).working, 0);
     }
@@ -545,7 +578,10 @@ mod tests {
     fn a_disagreement_with_the_venue_is_reported_and_not_corrected() {
         let mut b = books();
         b.on_tick(&tick(SEC, 6_000_000));
-        b.on_venue_fill(&fill(SEC, 1, Side::Buy, 6_000_000, 3, Offset::Open));
+        b.on_venue_fill(
+            &fill(SEC, 1, Side::Buy, 6_000_000, 3, Offset::Open),
+            oq_types::Fee::Unsaid,
+        );
 
         assert_eq!(
             b.reconcile(QtyLots(3), Nanos(2 * SEC)),
@@ -588,9 +624,9 @@ mod tests {
         let mut b = books();
         b.on_tick(&tick(SEC, 6_000_000));
         let f = fill(2 * SEC, 1, Side::Buy, 6_000_000, 4, Offset::Open);
-        b.on_venue_fill(&f);
+        b.on_venue_fill(&f, oq_types::Fee::Unsaid);
         let after_first = b.net_position();
-        b.on_venue_fill(&f);
+        b.on_venue_fill(&f, oq_types::Fee::Unsaid);
         assert_eq!(
             b.net_position(),
             after_first,
@@ -630,15 +666,15 @@ mod two_systems {
             oq_core::PositionMode::OneWay,
         );
         assert!(matches!(
-            b.on_venue_fill(&fill(Side::Buy, Offset::Open)),
+            b.on_venue_fill(&fill(Side::Buy, Offset::Open), oq_types::Fee::Unsaid),
             Booked::Applied(_)
         ));
         assert!(matches!(
-            b.on_venue_fill(&fill(Side::Sell, Offset::Open)),
+            b.on_venue_fill(&fill(Side::Sell, Offset::Open), oq_types::Fee::Unsaid),
             Booked::Applied(_)
         ));
         assert!(matches!(
-            b.on_venue_fill(&fill(Side::Buy, Offset::Open)),
+            b.on_venue_fill(&fill(Side::Buy, Offset::Open), oq_types::Fee::Unsaid),
             Booked::Duplicate
         ));
         assert!(b.has_booked(7, Side::Buy) && b.has_booked(7, Side::Sell));

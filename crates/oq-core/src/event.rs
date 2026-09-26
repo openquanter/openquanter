@@ -172,7 +172,15 @@ pub enum Event {
     /// Only meaningful under [`crate::kernel::Matching::Venue`]; a
     /// simulated run produces its own fills and one arriving from
     /// outside would be a second matcher.
-    VenueFill(oq_types::Fill),
+    VenueFill {
+        fill: oq_types::Fill,
+        /// What the venue said the fill paid.
+        ///
+        /// It travels with the fill because it is a property of that
+        /// execution and of nothing else, and because a schedule cannot
+        /// recover it: the venue is the fact and the schedule is a model.
+        fee: oq_types::Fee,
+    },
     /// A depth update from the venue.
     ///
     /// Read by [`Matcher::L2`](crate::matcher::Matcher::L2) and by no
@@ -213,7 +221,7 @@ impl Event {
             Self::FundingCharged { .. } => kind::FUNDING_CHARGED,
             Self::Time(_) => kind::TIME,
             Self::MarginDeposit { .. } => kind::MARGIN_DEPOSIT,
-            Self::VenueFill(_) => kind::VENUE_FILL,
+            Self::VenueFill { .. } => kind::VENUE_FILL,
             Self::Depth(_) => kind::DEPTH,
         }
     }
@@ -231,7 +239,7 @@ impl Event {
             // The venue's clock, not this process's. A fill is ordered
             // by when it happened, and the local receive time is a
             // property of the link rather than of the trade.
-            Self::VenueFill(f) => f.stamp.exch,
+            Self::VenueFill { fill, .. } => fill.stamp.exch,
             // The venue's event time, in the unit everything else here
             // uses. A depth update carries milliseconds because that is
             // what the venue sends; ordering against ticks needs
@@ -361,7 +369,7 @@ impl Event {
                 }
             }
             Self::Time(at) => put_i64(&mut out, at.0),
-            Self::VenueFill(f) => {
+            Self::VenueFill { fill: f, fee } => {
                 put_i64(&mut out, f.stamp.exch.0);
                 put_i64(&mut out, f.stamp.local.0);
                 out.extend_from_slice(&f.instrument.0.to_le_bytes());
@@ -381,6 +389,18 @@ impl Event {
                     oq_types::Liquidity::Maker => 0,
                     oq_types::Liquidity::Taker => 1,
                 });
+                // Appended rather than inserted: a journal written
+                // before the venue's commission was carried is 55 bytes
+                // and stays readable, and the layouts here are
+                // append-only so that it can.
+                match fee {
+                    oq_types::Fee::Unsaid => out.push(0),
+                    oq_types::Fee::Reported(cash) => {
+                        out.push(1);
+                        put_i64(&mut out, cash.0);
+                    }
+                    oq_types::Fee::Unreadable => out.push(2),
+                }
             }
             Self::MarginDeposit { amount, at } => {
                 put_i64(&mut out, amount);
@@ -612,10 +632,26 @@ impl Event {
                 // Exact length, like every other kind: a truncated
                 // record must not read as a valid shorter one.
                 // 8+8 stamp, 4 instrument, 8 order, 8 trade, 8 price,
-                // 8 qty, and three one-byte enums.
-                if payload.len() != 55 {
-                    return None;
-                }
+                // 8 qty, and three one-byte enums — 55. The fee was
+                // appended after, so both lengths are real: 55 is a run
+                // journalled before the venue's commission was carried,
+                // and a replay of it can honestly say only that nobody
+                // recorded one.
+                let fee = match payload.len() {
+                    55 => oq_types::Fee::Unsaid,
+                    56 => match payload[55] {
+                        0 => oq_types::Fee::Unsaid,
+                        2 => oq_types::Fee::Unreadable,
+                        _ => return None,
+                    },
+                    64 => match payload[55] {
+                        // The seventh word: `i64_at` counts words of
+                        // eight bytes, not bytes.
+                        1 => oq_types::Fee::Reported(oq_types::Cash(i64_at(payload, 7)?)),
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
                 let u32_at = |i: usize| -> Option<u32> {
                     payload
                         .get(i..i + 4)
@@ -626,31 +662,36 @@ impl Event {
                         .get(i..i + 8)
                         .map(|s| u64::from_le_bytes(s.try_into().expect("8")))
                 };
-                Some(Self::VenueFill(oq_types::Fill {
-                    stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
-                    instrument: oq_types::InstrumentId(u32_at(16)?),
-                    order: OrderId(u64_at(20)?),
-                    trade: oq_types::TradeId(u64_at(28)?),
-                    price: PriceTicks(i64::from_le_bytes(payload.get(36..44)?.try_into().ok()?)),
-                    qty: oq_types::QtyLots(i64::from_le_bytes(
-                        payload.get(44..52)?.try_into().ok()?,
-                    )),
-                    side: match payload.get(52)? {
-                        0 => Side::Buy,
-                        1 => Side::Sell,
-                        _ => return None,
+                Some(Self::VenueFill {
+                    fee,
+                    fill: oq_types::Fill {
+                        stamp: Stamp::new(i64_at(payload, 0)?, i64_at(payload, 1)?),
+                        instrument: oq_types::InstrumentId(u32_at(16)?),
+                        order: OrderId(u64_at(20)?),
+                        trade: oq_types::TradeId(u64_at(28)?),
+                        price: PriceTicks(i64::from_le_bytes(
+                            payload.get(36..44)?.try_into().ok()?,
+                        )),
+                        qty: oq_types::QtyLots(i64::from_le_bytes(
+                            payload.get(44..52)?.try_into().ok()?,
+                        )),
+                        side: match payload.get(52)? {
+                            0 => Side::Buy,
+                            1 => Side::Sell,
+                            _ => return None,
+                        },
+                        offset: match payload.get(53)? {
+                            0 => oq_types::Offset::Open,
+                            1 => oq_types::Offset::Close,
+                            _ => return None,
+                        },
+                        liquidity: match payload.get(54)? {
+                            0 => oq_types::Liquidity::Maker,
+                            1 => oq_types::Liquidity::Taker,
+                            _ => return None,
+                        },
                     },
-                    offset: match payload.get(53)? {
-                        0 => oq_types::Offset::Open,
-                        1 => oq_types::Offset::Close,
-                        _ => return None,
-                    },
-                    liquidity: match payload.get(54)? {
-                        0 => oq_types::Liquidity::Maker,
-                        1 => oq_types::Liquidity::Taker,
-                        _ => return None,
-                    },
-                }))
+                })
             }
             _ => None,
         }

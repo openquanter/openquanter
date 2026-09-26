@@ -198,7 +198,14 @@ pub struct State {
     /// and different facts: the first says nothing is charged, the second
     /// says nobody has told these books what is charged. A run's fees are
     /// a measurement only in the first case.
-    pub fees_configured: bool,
+    pub fees_covered: bool,
+    /// A fill arrived whose fee could not be read.
+    ///
+    /// Latched, never cleared: a total that missed one fee is not
+    /// repaired by reading the next one, and a run that reports a fee
+    /// having silently dropped one paid in another asset is worse than
+    /// one that says it does not know.
+    pub fees_missing: bool,
     pub now: Nanos,
     pub enforce_liquidation: bool,
     pub matching: Matching,
@@ -310,7 +317,8 @@ impl State {
             now: Nanos::ZERO,
             fees: Cash::ZERO,
             fee_schedule: Fees::none(),
-            fees_configured: false,
+            fees_covered: false,
+            fees_missing: false,
             enforce_liquidation: true,
             matching: Matching::Simulated,
         }
@@ -321,12 +329,22 @@ impl State {
     /// Fees default to zero and must be set deliberately. That is the
     /// safer default only because the alternative — a plausible-looking
     /// rate nobody chose — produces a result that is wrong in a way no
+    /// Whether the fee total covers every fill this run has booked.
+    ///
+    /// False when no source has priced every fill, or when one arrived
+    /// whose fee could not be read. A caller that reports a figure
+    /// without asking is reporting a number it does not have.
+    #[must_use]
+    pub const fn fees_known(&self) -> bool {
+        self.fees_covered && !self.fees_missing
+    }
+
     /// reader can see. A run with no fees is at least obviously a run
     /// with no fees.
     #[must_use]
     pub const fn with_fees(mut self, fees: Fees) -> Self {
         self.fee_schedule = fees;
-        self.fees_configured = true;
+        self.fees_covered = true;
         self
     }
 
@@ -1077,7 +1095,7 @@ impl Kernel {
                 self.state.now = at;
                 self.state.credit(Cash(amount));
             }
-            Event::VenueFill(fill) => self.on_venue_fill(&fill),
+            Event::VenueFill { fill, fee } => self.on_venue_fill(&fill, fee),
             Event::Depth(_) => unreachable!("handled before the match"),
         }
         &self.outputs
@@ -1085,10 +1103,15 @@ impl Kernel {
 
     /// Book a fill the venue decided.
     ///
-    /// The accounting is the matcher's, to the letter — the same fee
-    /// charge, the same position update, the same `Output::Filled`. That
-    /// is the point: a live run and a backtest keep their books with one
+    /// The accounting is the matcher's, to the letter — the same
+    /// position update, the same `Output::Filled`. That is the point: a
+    /// live run and a backtest keep their books with one
     /// implementation, and only the source of fills differs.
+    ///
+    /// The fee is the exception, and only because the venue states it:
+    /// where a fill arrives with the commission the venue charged, that
+    /// figure is booked instead of the schedule's. The venue is what the
+    /// fee cost and a schedule is a model of what it should have cost.
     ///
     /// Two things happen here that the matched path does not need.
     ///
@@ -1104,7 +1127,7 @@ impl Kernel {
     /// from outside is a second matcher, and taking it would silently
     /// double a position in the one mode where nobody is looking for
     /// that.
-    fn on_venue_fill(&mut self, fill: &Fill) {
+    fn on_venue_fill(&mut self, fill: &Fill, reported: oq_types::Fee) {
         if self.state.matching != Matching::Venue {
             self.outputs.push(Output::Rejected {
                 id: fill.order,
@@ -1127,7 +1150,23 @@ impl Kernel {
             .state
             .holding_of(fill.instrument)
             .map_or(self.state.holding().contract, |h| h.contract);
-        let fee = self.state.fee_schedule.charge(contract, fill);
+        // The venue's own figure where it gave one: a schedule is a
+        // model of what a fee costs, and the venue's is what it cost. A
+        // fill whose fee could not be read is booked at nothing and
+        // marks the run's total incomplete, rather than falling through
+        // to a schedule — which on a live account is zero, the one
+        // answer certainly wrong.
+        let fee = match reported {
+            oq_types::Fee::Reported(cash) => {
+                self.state.fees_covered = true;
+                cash
+            }
+            oq_types::Fee::Unreadable => {
+                self.state.fees_missing = true;
+                Cash::ZERO
+            }
+            oq_types::Fee::Unsaid => self.state.fee_schedule.charge(contract, fill),
+        };
         self.state.fees = self.state.fees.add(fee);
         self.state.credit(fee.neg());
         self.state.apply_fill(fill);
@@ -1368,7 +1407,7 @@ impl Kernel {
             realized: self.state.realized,
             funding: self.state.funding,
             fees: self.state.fees,
-            fees_configured: self.state.fees_configured,
+            fees_known: self.state.fees_known(),
             equity: self.state.equity(),
             mark: self.state.holding().mark,
             now: self.state.now,
@@ -1422,8 +1461,8 @@ pub struct Summary {
     pub short_qty: QtyLots,
     pub short_entry: PriceTicks,
     pub balance: Cash,
-    /// Whether a fee schedule was configured; see `State::fees_configured`.
-    pub fees_configured: bool,
+    /// Whether the fee total covers every fill; see `State::fees_known`.
+    pub fees_known: bool,
     pub realized: Cash,
     pub funding: Cash,
     pub fees: Cash,
@@ -1533,6 +1572,76 @@ mod tests {
         assert!(fees.charge(BTC, &fill).0 < 0, "a rebate must stay negative");
     }
 
+    /// One fill of ten lots at a million ticks, as a venue would report
+    /// it: no order of ours, and a trade id that makes it deduplicable.
+    fn venue_fill(price: i64, qty: i64) -> Fill {
+        Fill {
+            stamp: Stamp::synthetic(1),
+            instrument: InstrumentId::new(1),
+            order: OrderId(1),
+            trade: oq_types::TradeId(1),
+            side: Side::Buy,
+            offset: oq_types::Offset::Open,
+            price: PriceTicks(price),
+            qty: QtyLots(qty),
+            liquidity: oq_types::Liquidity::Taker,
+        }
+    }
+
+    fn venue_kernel(balance_units: i64) -> Kernel {
+        let mut state = State::new(
+            InstrumentId::new(1),
+            BTC,
+            table(),
+            Cash::from_units(balance_units),
+        );
+        state.matching = Matching::Venue;
+        Kernel::new(state)
+    }
+
+    /// The venue's own figure is what a fill cost. A schedule is a model
+    /// of it, and a run that reports a model where it has the fact is
+    /// reporting the wrong number with a straight face.
+    #[test]
+    fn a_venue_fills_fee_is_the_venues_own_figure() {
+        let mut k = venue_kernel(10_000);
+        k.apply(&tick(1, 1_000_000));
+        k.apply(&Event::VenueFill {
+            fill: venue_fill(1_000_000, 10),
+            fee: oq_types::Fee::Reported(Cash(123)),
+        });
+        assert_eq!(k.summary().fees, Cash(123), "the venue charged 123");
+        assert!(k.summary().fees_known, "so the total is a measurement");
+    }
+
+    /// And one it could not read leaves the total unknown rather than
+    /// falling through to a schedule of zero, which on a live account is
+    /// the one answer certainly wrong.
+    #[test]
+    fn a_fee_that_could_not_be_read_leaves_the_total_unknown() {
+        let mut k = venue_kernel(10_000);
+        k.apply(&tick(1, 1_000_000));
+        k.apply(&Event::VenueFill {
+            fill: venue_fill(1_000_000, 10),
+            fee: oq_types::Fee::Unreadable,
+        });
+        assert_eq!(k.summary().fees, Cash::ZERO);
+        assert!(!k.summary().fees_known, "nothing said what it cost");
+
+        // Sticky: a readable fee afterwards does not repair a total that
+        // already missed one.
+        k.apply(&tick(2, 1_000_000));
+        k.apply(&Event::VenueFill {
+            fill: venue_fill(1_000_000, 10),
+            fee: oq_types::Fee::Reported(Cash(7)),
+        });
+        assert_eq!(k.summary().fees, Cash(7));
+        assert!(
+            !k.summary().fees_known,
+            "one unreadable fee is not undone by the next one being read"
+        );
+    }
+
     /// Zero fees from a schedule of zero rates and zero fees from no
     /// schedule are the same number and different facts, and a run that
     /// reports the second as the first claims a measurement it never
@@ -1544,7 +1653,7 @@ mod tests {
         k.apply(&buy(1, 1_000_000, 10, 1));
         k.apply(&tick(2, 1_000_000));
         assert_eq!(k.summary().fees, Cash::ZERO);
-        assert!(!k.summary().fees_configured, "nothing was configured");
+        assert!(!k.summary().fees_known, "nothing was configured");
 
         // And configuring one — even one that charges nothing — is a
         // different answer to "is this a measurement".
@@ -1556,7 +1665,7 @@ mod tests {
         rated.apply(&buy(1, 1_000_000, 10, 1));
         rated.apply(&tick(2, 1_000_000));
         assert_eq!(rated.summary().fees, Cash::ZERO);
-        assert!(rated.summary().fees_configured);
+        assert!(rated.summary().fees_known);
     }
 
     #[test]

@@ -526,7 +526,11 @@ impl core::fmt::Debug for UserStream {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
     /// An order changed state.
-    Order(OrderUpdate),
+    ///
+    /// Boxed because an order update carries a dozen strings and the
+    /// events beside it carry none: an enum is as large as its largest
+    /// variant, and every `Expired` would otherwise pay for it.
+    Order(Box<OrderUpdate>),
     /// The key expired. The stream is closed and whatever happened
     /// after it closed was not seen — a gap, not silence.
     Expired,
@@ -574,6 +578,13 @@ pub struct OrderUpdate {
     /// in the books, which is a position a strategy will keep trying to
     /// close — and did, seven times in forty seconds on a live account.
     pub position_side: String,
+    /// What the venue said this fill paid.
+    ///
+    /// The order status carries the commission and its asset beside the
+    /// quantity and price, so nothing else has to be read to know what a
+    /// fill cost — and the venue is the fact where a schedule is only a
+    /// model of it.
+    pub fee: oq_types::Fee,
     /// Whether this fill made liquidity.
     ///
     /// Decides the fee, which is the difference between a rebate and a

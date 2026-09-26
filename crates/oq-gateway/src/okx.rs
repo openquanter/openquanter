@@ -1746,7 +1746,7 @@ pub fn parse_user_events(message: &str) -> Vec<UserEvent> {
     objects(&data)
         .into_iter()
         .map(|item| match read_order_update(&item) {
-            Some(update) => UserEvent::Order(update),
+            Some(update) => UserEvent::Order(Box::new(update)),
             // Unreadable, not absent. The payload survives so the
             // difference stays visible downstream.
             None => UserEvent::Other {
@@ -1803,6 +1803,14 @@ fn read_order_update(item: &str) -> Option<OrderUpdate> {
         event_ms: field_str(item, "uTime")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or_default(),
+        // OKX reports a `fee` and a `feeCcy` on this message and this
+        // adapter does not read them, so the run's fees are a figure it
+        // cannot add up rather than a zero it can. Reading them is the
+        // follow-up; the sign convention in particular is worth checking
+        // against a recorded message first, since this venue reports a
+        // charge as a negative number and the books record a cost as
+        // positive.
+        fee: oq_types::Fee::Unreadable,
     })
 }
 

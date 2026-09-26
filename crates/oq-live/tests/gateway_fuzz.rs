@@ -90,7 +90,7 @@ fn play(fills: &[Fill]) -> (QtyLots, Cash, usize) {
     let mut b = books();
     b.on_tick(&tick(0, 6_000_000));
     for f in fills {
-        b.on_venue_fill(f);
+        b.on_venue_fill(f, oq_types::Fee::Unsaid);
     }
     // A common mark at the end, so two runs are compared at one price
     // rather than at whatever each happened to stop on.
@@ -183,7 +183,7 @@ fn a_dropped_report_leaves_a_disagreement_the_reconciler_names() {
     let mut b = books();
     b.on_tick(&tick(0, 6_000_000));
     for f in &with_holes {
-        b.on_venue_fill(f);
+        b.on_venue_fill(f, oq_types::Fee::Unsaid);
     }
     b.on_tick(&tick(1_000 * SEC, 6_000_000));
 
@@ -214,7 +214,10 @@ fn a_report_with_no_trade_id_is_refused_however_many_times_it_arrives() {
         ..session(1)[0]
     };
     for _ in 0..50 {
-        assert_eq!(b.on_venue_fill(&anonymous), Booked::Unidentifiable);
+        assert_eq!(
+            b.on_venue_fill(&anonymous, oq_types::Fee::Unsaid),
+            Booked::Unidentifiable
+        );
     }
     assert_eq!(b.net_position(), QtyLots(0));
     assert_eq!(b.booked(), 0);
@@ -236,7 +239,10 @@ fn partial_fills_of_one_order_all_count() {
             qty: QtyLots(2),
             ..base
         };
-        assert!(matches!(b.on_venue_fill(&f), Booked::Applied(_)));
+        assert!(matches!(
+            b.on_venue_fill(&f, oq_types::Fee::Unsaid),
+            Booked::Applied(_)
+        ));
     }
     assert_eq!(b.net_position(), QtyLots(10), "five parts of two lots each");
     assert_eq!(b.booked(), 5);

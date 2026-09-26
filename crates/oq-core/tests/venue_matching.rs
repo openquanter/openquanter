@@ -97,12 +97,10 @@ fn a_matched_fill_and_a_venue_fill_leave_the_same_account() {
         tick: tick(SEC, 6_000_000),
     });
     live.apply(&submit(1, SEC));
-    live.apply(&Event::VenueFill(venue_fill(
-        2 * SEC,
-        1,
-        after_sim.entry.0,
-        after_sim.qty.0,
-    )));
+    live.apply(&Event::VenueFill {
+        fee: oq_types::Fee::Unsaid,
+        fill: venue_fill(2 * SEC, 1, after_sim.entry.0, after_sim.qty.0),
+    });
     live.apply(&Event::Tick {
         instrument: None,
         tick: tick(2 * SEC, 6_000_000),
@@ -149,7 +147,10 @@ fn a_venue_fill_is_refused_by_a_kernel_that_is_matching_for_itself() {
         instrument: None,
         tick: tick(SEC, 6_000_000),
     });
-    let outputs = k.apply(&Event::VenueFill(venue_fill(SEC, 1, 6_000_000, 3)));
+    let outputs = k.apply(&Event::VenueFill {
+        fee: oq_types::Fee::Unsaid,
+        fill: venue_fill(SEC, 1, 6_000_000, 3),
+    });
     assert!(
         outputs.iter().any(|o| matches!(
             o,
@@ -182,7 +183,10 @@ fn a_filled_order_leaves_the_book_so_a_replay_cannot_match_it_again() {
         offset: Offset::Open,
         stamp: stamp(SEC),
     });
-    k.apply(&Event::VenueFill(venue_fill(2 * SEC, 7, 5_900_000, 3)));
+    k.apply(&Event::VenueFill {
+        fee: oq_types::Fee::Unsaid,
+        fill: venue_fill(2 * SEC, 7, 5_900_000, 3),
+    });
     let after = k.summary().qty;
 
     for i in 3..8 {
@@ -209,7 +213,10 @@ fn a_venue_fill_that_breaches_maintenance_is_noticed_at_once() {
     });
 
     let outputs = k
-        .apply(&Event::VenueFill(venue_fill(2 * SEC, 1, 6_000_000, 10_000)))
+        .apply(&Event::VenueFill {
+            fee: oq_types::Fee::Unsaid,
+            fill: venue_fill(2 * SEC, 1, 6_000_000, 10_000),
+        })
         .to_vec();
     assert!(
         outputs
@@ -224,12 +231,15 @@ fn a_venue_fill_that_breaches_maintenance_is_noticed_at_once() {
 /// trade.
 #[test]
 fn a_venue_fill_survives_the_journal() {
-    let original = Event::VenueFill(Fill {
-        liquidity: Liquidity::Maker,
-        offset: Offset::Close,
-        side: Side::Sell,
-        ..venue_fill(1_700_000_000_000_000_000, 42, 6_123_456, 17)
-    });
+    let original = Event::VenueFill {
+        fee: oq_types::Fee::Reported(oq_types::Cash(12_345)),
+        fill: Fill {
+            liquidity: Liquidity::Maker,
+            offset: Offset::Close,
+            side: Side::Sell,
+            ..venue_fill(1_700_000_000_000_000_000, 42, 6_123_456, 17)
+        },
+    };
     let bytes = original.encode();
     let back = Event::decode(original.kind(), &bytes).expect("decodable");
     assert_eq!(back, original);
@@ -242,13 +252,35 @@ fn a_venue_fill_survives_the_journal() {
     assert_eq!(Event::decode(original.kind(), &[]), None);
 }
 
+/// The fee was appended to this record rather than inserted into it, so
+/// a run journalled before it was carried is the same bytes with one
+/// fewer — and a replay of that run still reads. What such a record
+/// cannot say is what its fills cost, which is the truth about it.
+#[test]
+fn a_fill_journalled_before_the_fee_was_carried_still_reads() {
+    let recorded = Event::VenueFill {
+        fee: oq_types::Fee::Unsaid,
+        fill: venue_fill(1_700_000_000_000_000_000, 42, 6_123_456, 17),
+    };
+    let bytes = recorded.encode();
+    assert_eq!(bytes.len(), 56, "a byte saying nobody recorded a fee");
+    assert_eq!(
+        Event::decode(recorded.kind(), &bytes[..55]).expect("an older record still reads"),
+        recorded,
+        "and reads as a run that recorded no fee, which is what it did"
+    );
+}
+
 /// Ordered by when the trade happened, not by when this process heard
 /// about it. The local receive time is a property of the link.
 #[test]
 fn a_venue_fill_is_ordered_by_the_venues_clock() {
-    let e = Event::VenueFill(Fill {
-        stamp: Stamp::new(1_000, 9_999),
-        ..venue_fill(0, 1, 1, 1)
-    });
+    let e = Event::VenueFill {
+        fee: oq_types::Fee::Unsaid,
+        fill: Fill {
+            stamp: Stamp::new(1_000, 9_999),
+            ..venue_fill(0, 1, 1, 1)
+        },
+    };
     assert_eq!(e.at(), Nanos(1_000));
 }
