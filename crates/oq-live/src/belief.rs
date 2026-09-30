@@ -112,10 +112,14 @@ impl Belief {
         let mut filled: HashMap<String, i64> = HashMap::new();
         let mut withdrawn: HashSet<String> = HashSet::new();
         let mut ordered: Vec<i64> = Vec::new();
-        // Leg name -> (signed lots, entry ticks). `NET` is a one-way
-        // account's single position, named by its sign on the way out.
-        let mut legs: std::collections::BTreeMap<String, (i64, i64)> =
-            std::collections::BTreeMap::new();
+        // Leg name -> position. `NET` is a one-way account's single
+        // position, named by its sign on the way out.
+        let mut legs: std::collections::BTreeMap<String, Leg> = std::collections::BTreeMap::new();
+        // The net position, folded alongside the legs and written onto
+        // the belief once the replay is done: an entry is a quotient,
+        // and it is taken once, after the last fill, rather than carried
+        // through the replay as a number every fill divides again.
+        let mut net = Leg::default();
 
         for frame in replay.since(0) {
             match Record::decode(frame.kind, &frame.payload) {
@@ -139,8 +143,7 @@ impl Belief {
                     // with no order on the venue.
                     b.adopted = true;
                     b.adopted_at = Some(at.0);
-                    b.position_lots = 0;
-                    b.entry_ticks = 0;
+                    net = Leg::default();
                     b.hedged = false;
                     legs.clear();
                     accepted.clear();
@@ -160,8 +163,10 @@ impl Belief {
                             longs = true;
                             ("LONG", size)
                         };
-                        b.apply(signed, entry);
-                        fold(legs.entry(name.to_string()).or_default(), signed, entry);
+                        net.fold(signed, entry);
+                        legs.entry(name.to_string())
+                            .or_default()
+                            .fold(signed, entry);
                     }
                     b.hedged = longs && shorts;
                 }
@@ -230,8 +235,8 @@ impl Belief {
                     };
                     *filled.entry(client_id).or_default() += lots;
                     ordered.push(lots);
-                    b.apply(signed, ticks);
-                    fold(legs.entry(key).or_default(), signed, ticks);
+                    net.fold(signed, ticks);
+                    legs.entry(key).or_default().fold(signed, ticks);
                 }
                 Some(_) => {}
                 None => b.undecodable += 1,
@@ -258,31 +263,24 @@ impl Belief {
             .filter(|id| filled.get(id).copied().unwrap_or(0) == 0 && !withdrawn.contains(id))
             .collect();
         b.resting.sort();
+        // Every fill has been folded, so the one division an entry needs
+        // happens here — once, on the finished sum.
+        b.position_lots = net.lots;
+        b.entry_ticks = net.entry_ticks();
         b.legs = legs
             .into_iter()
-            .filter(|(_, (lots, _))| *lots != 0)
-            .map(|(name, (lots, entry))| {
+            .filter(|(_, leg)| leg.lots != 0)
+            .map(|(name, leg)| {
                 let name = if name == "NET" {
-                    if lots > 0 { "LONG" } else { "SHORT" }.to_string()
+                    if leg.lots > 0 { "LONG" } else { "SHORT" }.to_string()
                 } else {
                     name
                 };
-                (name, lots, entry)
+                (name, leg.lots, leg.entry_ticks())
             })
             .collect();
         b.legs.sort_by(|a, c| a.0.cmp(&c.0));
         Ok(b)
-    }
-
-    /// Fold one signed quantity at one price into the position.
-    ///
-    /// Volume-weighted while adding, untouched while reducing, and reset
-    /// when the position crosses through flat — the same convention a
-    /// venue reports, because the number exists to be compared with one.
-    fn apply(&mut self, signed_lots: i64, entry_ticks: i64) {
-        let mut net = (self.position_lots, self.entry_ticks);
-        fold(&mut net, signed_lots, entry_ticks);
-        (self.position_lots, self.entry_ticks) = net;
     }
 
     /// The same shape `oq-recon --record` writes, so the two compare.
@@ -313,34 +311,79 @@ impl Belief {
     }
 }
 
-/// Fold one signed quantity at one price into a `(signed lots, entry)`
-/// position.
+/// One leg of a position: signed lots, and the signed notional behind
+/// them.
 ///
-/// Volume-weighted while adding, untouched while reducing, and reset
-/// when the position crosses through flat — the same convention a venue
-/// reports, because the number exists to be compared with one.
-fn fold(pos: &mut (i64, i64), signed_lots: i64, entry_ticks: i64) {
-    if signed_lots == 0 {
-        return;
+/// An entry price is a quotient, and holding one means dividing on every
+/// fill. A venue splits one order into partial fills at the same price,
+/// so a reconstruction that re-averages meets that division once per
+/// partial fill, and every one of them rounds. The rounded entry is then
+/// the input to the next division, so the error is not just repeated but
+/// fed back — a position built out of two partial fills lands a unit or
+/// two off the entry the venue reports, and the console calls that a
+/// disagreement when nothing disagrees.
+///
+/// What a venue holds is the notional: price times quantity, summed.
+/// Its entry price is that sum divided by the position, once, at the
+/// moment somebody asks. Holding the same sum here has no rounding in it
+/// at all, so a fill split in two lands exactly where one fill would
+/// have — and the one division that remains happens at the very end, in
+/// [`Leg::entry_ticks`], where there is nothing left to feed it into.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Leg {
+    lots: i64,
+    /// Price ticks times lots, in tick-lots — the unit is why this is
+    /// wide. Signed with the position.
+    notional: i128,
+}
+
+impl Leg {
+    /// The volume-weighted entry in ticks, or zero when flat.
+    fn entry_ticks(self) -> i64 {
+        if self.lots == 0 {
+            return 0;
+        }
+        i64::try_from(self.notional.abs() / i128::from(self.lots.saturating_abs()))
+            .unwrap_or(i64::MAX)
     }
-    let (before, entry) = *pos;
-    let after = before.saturating_add(signed_lots);
-    let entry = if before == 0 || (before > 0) == (signed_lots > 0) {
-        // Opening or adding.
-        let total = i128::from(before.abs()) + i128::from(signed_lots.abs());
-        let weighted = i128::from(before.abs()) * i128::from(entry)
-            + i128::from(signed_lots.abs()) * i128::from(entry_ticks);
-        i64::try_from(weighted / total.max(1)).unwrap_or(i64::MAX)
-    } else if (before > 0) != (after > 0) && after != 0 {
-        // Crossed through flat: the remainder is a new position at the
-        // price that reversed it.
-        entry_ticks
-    } else if after == 0 {
-        0
-    } else {
-        entry
-    };
-    *pos = (after, entry);
+
+    /// Fold one signed quantity at one price into the leg.
+    ///
+    /// Volume-weighted while adding, untouched while reducing, and reset
+    /// when the position crosses through flat — the same convention a
+    /// venue reports, because the number exists to be compared with one.
+    fn fold(&mut self, signed_lots: i64, price_ticks: i64) {
+        if signed_lots == 0 {
+            return;
+        }
+        let before = self.lots;
+        let after = before.saturating_add(signed_lots);
+        if before == 0 || (before > 0) == (signed_lots > 0) {
+            // Opening or adding. Exact: summed, never re-averaged.
+            self.notional = self
+                .notional
+                .saturating_add(i128::from(signed_lots).saturating_mul(i128::from(price_ticks)));
+        } else if (before > 0) != (after > 0) && after != 0 {
+            // Crossed through flat: the remainder is a new position at
+            // the price that reversed it.
+            self.notional = i128::from(after).saturating_mul(i128::from(price_ticks));
+        } else if after == 0 {
+            self.notional = 0;
+        } else {
+            // Reducing: the entry does not move, so the notional shrinks
+            // in proportion. The truncation cannot move the entry —
+            // what it drops is less than one lot's worth of it, and
+            // dividing what is left by a smaller position gives back the
+            // same quotient.
+            let shrunk = self
+                .notional
+                .abs()
+                .saturating_mul(i128::from(after.saturating_abs()))
+                / i128::from(before.saturating_abs());
+            self.notional = if self.notional < 0 { -shrunk } else { shrunk };
+        }
+        self.lots = after;
+    }
 }
 
 /// The key a one-way fill goes to: the account's single position.
@@ -348,14 +391,14 @@ fn fold(pos: &mut (i64, i64), signed_lots: i64, entry_ticks: i64) {
 /// A leg adopted under its direction's name becomes that position, since
 /// on a one-way account it is the only one. An account holding both legs
 /// has no single position, and `None` says so.
-fn net_leg(legs: &mut std::collections::BTreeMap<String, (i64, i64)>) -> Option<String> {
+fn net_leg(legs: &mut std::collections::BTreeMap<String, Leg>) -> Option<String> {
     if legs.contains_key("NET") {
         return Some("NET".into());
     }
     let named: Vec<String> = legs.keys().filter(|k| *k != "NET").cloned().collect();
     match named.as_slice() {
         [] => {
-            legs.insert("NET".into(), (0, 0));
+            legs.insert("NET".into(), Leg::default());
             Some("NET".into())
         }
         [one] => {
@@ -431,33 +474,91 @@ mod tests {
 
     #[test]
     fn adding_averages_the_entry_and_reducing_leaves_it() {
-        let mut b = Belief::default();
-        b.apply(2, 100);
-        b.apply(2, 200);
-        assert_eq!(b.position_lots, 4);
-        assert_eq!(b.entry_ticks, 150);
-        b.apply(-2, 999);
-        assert_eq!(b.position_lots, 2);
-        assert_eq!(b.entry_ticks, 150, "a reduction must not move the entry");
+        let mut leg = Leg::default();
+        leg.fold(2, 100);
+        leg.fold(2, 200);
+        assert_eq!(leg.lots, 4);
+        assert_eq!(leg.entry_ticks(), 150);
+        leg.fold(-2, 999);
+        assert_eq!(leg.lots, 2);
+        assert_eq!(
+            leg.entry_ticks(),
+            150,
+            "a reduction must not move the entry"
+        );
     }
 
     /// Crossing through flat starts a new position at the reversing
     /// price rather than carrying the old average into the other side.
     #[test]
     fn crossing_through_flat_resets_the_entry() {
-        let mut b = Belief::default();
-        b.apply(2, 100);
-        b.apply(-5, 300);
-        assert_eq!(b.position_lots, -3);
-        assert_eq!(b.entry_ticks, 300);
+        let mut leg = Leg::default();
+        leg.fold(2, 100);
+        leg.fold(-5, 300);
+        assert_eq!(leg.lots, -3);
+        assert_eq!(leg.entry_ticks(), 300);
     }
 
     #[test]
     fn closing_exactly_leaves_no_entry() {
-        let mut b = Belief::default();
-        b.apply(3, 100);
-        b.apply(-3, 400);
-        assert_eq!(b.position_lots, 0);
-        assert_eq!(b.entry_ticks, 0);
+        let mut leg = Leg::default();
+        leg.fold(3, 100);
+        leg.fold(-3, 400);
+        assert_eq!(leg.lots, 0);
+        assert_eq!(leg.entry_ticks(), 0);
+    }
+
+    /// Reducing lands on the same entry it started from, whatever the
+    /// position and whatever is left of it.
+    ///
+    /// The notional shrinks by integer division, so this is the claim
+    /// that the truncation cannot feed back into the quotient.
+    #[test]
+    fn reducing_never_moves_the_entry() {
+        for before in [3_i64, 7, 40, 256, 999] {
+            for price in [8_317_320_i64, 100, 8_367_321] {
+                let mut leg = Leg::default();
+                leg.fold(before, price);
+                let entry = leg.entry_ticks();
+                for left in 1..before {
+                    let mut reduced = leg;
+                    reduced.fold(-(before - left), 0);
+                    assert_eq!(reduced.lots, left);
+                    assert_eq!(
+                        reduced.entry_ticks(),
+                        entry,
+                        "reducing {before} to {left} at {price} moved the entry"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An order the venue split into partial fills lands where the same
+    /// trade taken whole would have.
+    ///
+    /// This is the shape of the defect the notional exists to prevent.
+    /// The entry used to be re-averaged and truncated once per fill, so
+    /// two partial fills at one price came out a unit below the same
+    /// quantity filled at once — and the console read that unit as the
+    /// account disagreeing with the venue, which is the one thing it
+    /// exists to report.
+    #[test]
+    fn a_split_fill_lands_where_a_whole_one_would() {
+        let whole = {
+            let mut leg = Leg::default();
+            leg.fold(20, 8_367_320);
+            leg.fold(20, 8_317_320);
+            leg.entry_ticks()
+        };
+        let split = {
+            let mut leg = Leg::default();
+            leg.fold(20, 8_367_320);
+            leg.fold(16, 8_317_320);
+            leg.fold(4, 8_317_320);
+            leg.entry_ticks()
+        };
+        assert_eq!(whole, 8_342_320);
+        assert_eq!(split, whole, "the partial fills drifted off the entry");
     }
 }
