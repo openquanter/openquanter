@@ -19,7 +19,8 @@ wanting a large indicator library, dozens of broker integrations, or hosting —
 each of those conflicts directly with auditability. The reasoning and the
 trade-offs are in [Why OpenQuanter exists](docs/WHY.md).
 
-[English](README.md) · [中文](README.zh-CN.md)
+[English](README.md) · [中文](README.zh-CN.md) · Website: [openquanter.com](https://openquanter.com) ·
+Console: [Quanterdeck](https://github.com/openquanter/quanterdeck)
 
 > ⚠️ Early development. APIs are unstable until the API-stability milestone. Not financial advice; use at your own risk.
 
@@ -455,6 +456,13 @@ Wheels for Linux (x86-64 and aarch64), macOS (Apple silicon) and Windows
 forward, and no Rust toolchain is needed to install one. What that gets you
 is [documented on the package itself](https://pypi.org/project/openquanter/):
 the overfitting statistics, and a Python strategy run by the Rust engine.
+
+Each [GitHub Release](https://github.com/openquanter/openquanter/releases)
+also carries the command-line tools — `oq-trade`, `oq-recon`, `oq-capture`,
+`oq-parity` and the rest — built for Linux x86-64 and aarch64, with a
+SHA-256 for each archive. To watch and operate a running trader from a
+browser, [Quanterdeck](https://github.com/openquanter/quanterdeck) is the
+self-hosted console for it.
 
 The Rust crates are not published. They will be when the API stops moving;
 until then `cargo add` would pin people to a version that is about to change

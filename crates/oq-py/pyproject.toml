@@ -23,8 +23,10 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-Homepage = "https://github.com/openquanter/openquanter"
+Homepage = "https://openquanter.com"
 Repository = "https://github.com/openquanter/openquanter"
+Documentation = "https://github.com/openquanter/openquanter/blob/main/docs/QUICKSTART.md"
+Changelog = "https://github.com/openquanter/openquanter/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 module-name = "openquanter"

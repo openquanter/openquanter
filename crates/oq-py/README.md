@@ -1,6 +1,6 @@
 # openquanter
 
-Python bindings for [OpenQuanter](https://github.com/openquanter/openquanter),
+Python bindings for [OpenQuanter](https://openquanter.com) ([source](https://github.com/openquanter/openquanter)),
 a Rust quantitative trading framework whose defining choice is that a
 backtest models the thing that ends accounts: **the venue closing your
 position.**
@@ -17,7 +17,7 @@ result was bought by the searching:
 import openquanter as oq
 
 oq.sharpe_ratio(returns)
-oq.deflated_sharpe_ratio(sharpes, best_sharpe, n_observations, skew, kurtosis)
+oq.deflated_sharpe_ratio(sharpes, n_observations, skew, kurtosis)
 oq.probability_of_backtest_overfitting(columns, n_blocks=16)
 ```
 
