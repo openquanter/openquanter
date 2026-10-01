@@ -3,7 +3,7 @@
 [English](CHANGELOG.md) · [中文](CHANGELOG.zh-CN.md)
 
 Referenced by [Versioning](docs/VERSIONING.md), which is where the
-release stages and their promises are defined. This file records what
+release scheme and what a release promises are defined. This file records what
 changed; that one records what a version number means.
 
 Two rules, from [Roadmap](docs/ROADMAP.md#release-cadence) and
@@ -18,15 +18,20 @@ reason this file exists at all:
   recorded in the pull request.** If an entry below changes a number the
   documentation quotes, it says so.
 
-`2.0.0-alpha.N` promises nothing about API stability. Entries are listed
-so a reader can see what moved, not because anything is deprecated
-gracefully — before 2.0 there is no deprecation period.
+No release promises API stability yet. Entries are listed so a reader
+can see what moved, not because anything is deprecated gracefully —
+until the API-stability milestone there is no deprecation period.
 
-## Unreleased — 2.0.0-alpha.1
+Each `## X.Y.Z` section is that release's notes: the release workflow
+publishes it verbatim, and refuses a tag without one.
 
-The first version-stamped state of the workspace. Nothing has been
-tagged or published to crates.io yet, so everything below is "since the
-repository started" rather than since a previous release.
+## Unreleased
+
+## 2.0.0 — 2026-10-01
+
+The first tagged release. Everything below is "since the repository
+started" rather than since a previous release; the PyPI upload `2.0.0a1`
+(2026-08-18) was a hand-built snapshot along the way, never tagged.
 
 ### Semantics and event schema
 

@@ -21,7 +21,7 @@ trade-offs are in [Why OpenQuanter exists](docs/WHY.md).
 
 [English](README.md) · [中文](README.zh-CN.md)
 
-> ⚠️ Early development. APIs are unstable before 2.0. Not financial advice; use at your own risk.
+> ⚠️ Early development. APIs are unstable until the API-stability milestone. Not financial advice; use at your own risk.
 
 ## What is OpenQuanter?
 
@@ -158,7 +158,7 @@ deciding whether to use this now.
 |---|---|
 | [**Why OpenQuanter exists**](docs/WHY.md) | **What it is for, who for, and the wall a predecessor hit after years of live trading** |
 | [Requirements Specification](docs/REQUIREMENTS.md) | What the framework must do, and how acceptance is measured |
-| [Roadmap](docs/ROADMAP.md) | Milestones, entry triggers, exit gates, path to 2.0 |
+| [Roadmap](docs/ROADMAP.md) | Milestones, entry triggers, exit gates, path to API stability |
 | [Implementation Plan](docs/IMPLEMENTATION.md) | Architecture, design decisions, crate map, task plan |
 | [Changelog](CHANGELOG.md) | What changed, and every note a semantics change is required to carry |
 
@@ -166,7 +166,7 @@ Full index: [docs/](docs/README.md).
 
 ## Status
 
-Pre-alpha, and specific about it. **Built and tested today:**
+Early, and specific about it. **Built and tested today:**
 
 - **Deterministic core** — sequenced journal, replay that reproduces outputs
   and state exactly (asserted by test, including a liquidation path),
@@ -440,14 +440,14 @@ same path through `oq_ingest::fold_into_observations` and
 Start with the [Quickstart](docs/QUICKSTART.md) — three examples, no data to
 download, a running backtest in a few minutes. See the
 [Roadmap](docs/ROADMAP.md) for what each milestone unlocks and what triggers
-it, and [Versioning](docs/VERSIONING.md) for what `2.0.0-alpha` promises.
+it, and [Versioning](docs/VERSIONING.md) for what a release promises.
 
 ## Installing
 
-The Python bindings are on PyPI, as an alpha:
+The Python bindings are on PyPI:
 
 ```bash
-pip install --pre openquanter
+pip install openquanter
 ```
 
 Wheels for Linux (x86-64 and aarch64), macOS (Apple silicon) and Windows
@@ -485,4 +485,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). By contributing you agree to the
 project's contribution terms: a DCO sign-off on every commit, and the
-[CLA](CLA.md) for substantial contributions. Support is best-effort; there is no SLA before 2.0.
+[CLA](CLA.md) for substantial contributions. Support is best-effort; there is no SLA before the API-stability milestone.

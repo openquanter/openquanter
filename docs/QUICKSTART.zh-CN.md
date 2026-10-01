@@ -299,7 +299,7 @@ cargo run --release -p oq-live --example grid_live -- \
 | 知道这个框架承诺什么 | [需求规格说明](REQUIREMENTS.zh-CN.md) |
 | 知道每个里程碑解锁什么 | [路线图](ROADMAP.zh-CN.md) |
 | 理解架构 | [实施方案](IMPLEMENTATION.zh-CN.md) |
-| 知道 `2.0.0-alpha` 承诺了什么 | [版本规则](VERSIONING.zh-CN.md) |
+| 知道一次发布承诺了什么 | [版本规则](VERSIONING.zh-CN.md) |
 | 读写归档与 tick 文件 | [采集格式规范](CAPTURE-FORMAT.zh-CN.md) · [Tick 格式规范](TICK-FORMAT.zh-CN.md) |
 | 参与贡献 | [CONTRIBUTING.zh-CN.md](../CONTRIBUTING.zh-CN.md) |
 

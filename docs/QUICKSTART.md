@@ -353,7 +353,7 @@ you can copy.
 | Know what the framework promises | [Requirements](REQUIREMENTS.md) |
 | Know what each milestone unlocks | [Roadmap](ROADMAP.md) |
 | Understand the architecture | [Implementation Plan](IMPLEMENTATION.md) |
-| Know what `2.0.0-alpha` promises | [Versioning](VERSIONING.md) |
+| Know what a release promises | [Versioning](VERSIONING.md) |
 | Read or write archive and tick files | [Capture Format](CAPTURE-FORMAT.md) · [Tick Format](TICK-FORMAT.md) |
 | Contribute | [CONTRIBUTING.md](../CONTRIBUTING.md) |
 

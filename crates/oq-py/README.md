@@ -82,7 +82,7 @@ when that was fewer than all of them.
 ## Status
 
 **Alpha.** The APIs are documented and not yet stable. The Rust core is
-pre-alpha and specific about it — see the
+early and specific about it — see the
 [status section](https://github.com/openquanter/openquanter#status) for
 what is built and what is designed, and
 [docs/WHY.md](https://github.com/openquanter/openquanter/blob/main/docs/WHY.md)

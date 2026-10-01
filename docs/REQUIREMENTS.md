@@ -223,7 +223,7 @@ made it a capability with no gate.
 | NFR-9 **Onboarding** | A new user reaches a running example backtest in ≤ 30 minutes from a clean machine, using shipped sample data. |
 | NFR-10 **Agent-friendly codebase** | Each crate carries a short `AGENTS.md` (<200 lines) stating local commands and invariants. Verification is layered: unit → property → golden → parity. Golden baselines change only with explicit human confirmation. |
 | NFR-11 **Bus-factor resistance** | Design rationale lives in the repository, not in anyone's head. Behavioral knowledge is encoded in deterministic tests, not tribal memory. |
-| NFR-12 **Versioning** | One version across the workspace, currently `2.0.0-alpha.N`. Before `2.0.0` APIs may break in any release, with changes listed in the [changelog](../CHANGELOG.md); from `2.0.0` semantic versioning is enforced for public crate APIs and the Python binding surface. See [Versioning](VERSIONING.md). |
+| NFR-12 **Versioning** | One version across the workspace, released in plain sequence (`2.0.0`, `2.0.1`, …) by tag. Until the API-stability milestone APIs may break in any release, with changes listed in the [changelog](../CHANGELOG.md); from that milestone semantic versioning is enforced for public crate APIs and the Python binding surface. See [Versioning](VERSIONING.md). |
 
 ---
 
@@ -297,7 +297,7 @@ Fidelity is two independent axes: **execution realism** (the ladder) and
 - **Not doing:** generative simulators as a P&L judgment source.
 - **Not doing:** hosted execution of user strategies with custody of user API
   keys. Custodial key handling is a liability class this project will not take on.
-- **Not promising:** API stability before 2.0, or a support SLA. Community
+- **Not promising:** API stability before the API-stability milestone, or a support SLA. Community
   support is best-effort.
 - **Not shipping:** trading strategies with production parameters, proprietary
   datasets, or anything resembling investment advice.

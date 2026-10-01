@@ -14,6 +14,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # The release workflow builds the wheels it publishes with this file,
+  # so what is uploaded is exactly what this matrix tested.
+  workflow_call:
 
 jobs:
   wheels:

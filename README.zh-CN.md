@@ -18,7 +18,7 @@
 
 [English](README.md) · [中文](README.zh-CN.md)
 
-> ⚠️ 早期开发阶段。2.0 之前 API 不保证稳定。本项目不构成投资建议，使用风险自负。
+> ⚠️ 早期开发阶段。到达 API 稳定里程碑之前 API 不保证稳定。本项目不构成投资建议，使用风险自负。
 
 ## OpenQuanter 是什么？
 
@@ -123,7 +123,7 @@ OpenQuanter 1.x 是一个**闭源的交易平台，已经实盘运行数年**。
 |---|---|
 | [**为什么有 OpenQuanter**](docs/WHY.zh-CN.md) | **定位、目标人群，以及前身实盘多年撞到的那堵墙** |
 | [需求规格说明](docs/REQUIREMENTS.zh-CN.md) | 框架必须做到什么，以及如何验收 |
-| [路线图](docs/ROADMAP.zh-CN.md) | 里程碑、启动触发条件、验收门、通往 2.0 的路径 |
+| [路线图](docs/ROADMAP.zh-CN.md) | 里程碑、启动触发条件、验收门、通往 API 稳定的路径 |
 | [实施方案](docs/IMPLEMENTATION.zh-CN.md) | 架构、设计决策、crate 划分、任务计划 |
 | [变更日志](CHANGELOG.zh-CN.md) | 变了什么，以及语义改动必须附带的每一条说明 |
 
@@ -131,7 +131,7 @@ OpenQuanter 1.x 是一个**闭源的交易平台，已经实盘运行数年**。
 
 ## 当前状态
 
-Pre-alpha，并且把话说清楚。**今天已建成并有测试覆盖的**：
+早期阶段，并且把话说清楚。**今天已建成并有测试覆盖的**：
 
 - **确定性内核** —— 定序 journal、逐位精确的重放（有测试断言，含一条强平路径）、
   撕裂尾恢复、"先落盘再 apply"由故障注入测试强制。
@@ -322,14 +322,14 @@ Binance;其他交易所的资金费报告为不可得。
 
 从[快速上手](docs/QUICKSTART.zh-CN.md)开始——三个示例、无需下载数据、几分钟内
 就能跑起一次回测。各里程碑解锁什么能力、由什么触发，见[路线图](docs/ROADMAP.zh-CN.md)；
-`2.0.0-alpha` 承诺了什么，见[版本规则](docs/VERSIONING.zh-CN.md)。
+一次发布承诺了什么，见[版本规则](docs/VERSIONING.zh-CN.md)。
 
 ## 安装
 
-Python 绑定已发布到 PyPI，alpha 版：
+Python 绑定已发布到 PyPI：
 
 ```bash
-pip install --pre openquanter
+pip install openquanter
 ```
 
 提供 Linux（x86-64 与 aarch64）、macOS（Apple 芯片）、Windows（x86-64）的
@@ -364,4 +364,4 @@ Apache-2.0，见 [LICENSE](LICENSE)。
 见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。提交贡献即表示你接受项目的贡献
 条款：每个 commit 需要 DCO sign-off，实质性贡献需同意
 [CLA](CLA.zh-CN.md)。社区支持为 best-effort，
-2.0 之前不承诺 SLA。
+到达 API 稳定里程碑之前不承诺 SLA。
