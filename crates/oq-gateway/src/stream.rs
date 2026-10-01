@@ -830,6 +830,40 @@ mod health {
 /// hours with an ESTABLISHED socket and an empty file.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The largest message a user stream will assemble, in bytes. The same
+/// limits as `oq_l2feed::ws`, for the same reason they are duplicated.
+///
+/// `tungstenite` defaults to 64 MiB. What arrives here is an account's
+/// own events — an order update is about a kilobyte, an account update
+/// grows with the number of positions it lists, and OKX's `orders`
+/// channel batches a few of them into one `data` array. No snapshot is
+/// pushed on these sockets; state is read over REST. A message the size
+/// of the default would be several thousand times anything a venue
+/// sends.
+///
+/// Past the limit the read fails, and [`UserStreamReader::next`] reports
+/// it as [`StreamOutcome::Disconnected`] like any other read error:
+/// reconnect, then reconcile. That is the right reading of a message no
+/// venue sends — whatever is on the other end is not behaving like the
+/// venue, and holding the account's state hostage to it is worse than a
+/// reconnect.
+pub const MAX_MESSAGE_SIZE: usize = 8 << 20;
+
+/// The largest single frame, in bytes.
+///
+/// These venues send each message as one frame, so this is the bound
+/// that applies in practice — still three orders of magnitude above an
+/// order update. The message bound is four times larger, the library's
+/// own ratio, so a venue that starts fragmenting is not cut off by it.
+pub const MAX_FRAME_SIZE: usize = 2 << 20;
+
+/// The limits every connection opened here reads under.
+fn ws_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_FRAME_SIZE))
+}
+
 /// Open a WebSocket with every step bounded by `timeout`.
 ///
 /// The TCP connect uses `connect_timeout` per resolved address, and the
@@ -895,7 +929,7 @@ pub fn connect_bounded(
     stream.set_write_timeout(Some(timeout))?;
     let _ = stream.set_nodelay(true);
 
-    match tungstenite::client_tls(request, stream) {
+    match tungstenite::client_tls_with_config(request, stream, Some(ws_config()), None) {
         Ok((socket, _response)) => Ok(socket),
         Err(tungstenite::HandshakeError::Failure(e)) => Err(e),
         // A blocking socket interrupts the handshake only when a read or
@@ -906,5 +940,63 @@ pub fn connect_bounded(
                 format!("the WebSocket handshake did not complete within {timeout:?}"),
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod message_limits {
+    use super::{MAX_FRAME_SIZE, StreamOutcome, UserStreamReader};
+    use crate::exec::UserStream;
+    use core::time::Duration;
+    use std::net::TcpListener;
+
+    /// A peer that completes the WebSocket handshake, sends one text
+    /// message of `len` bytes as a single frame, and waits to be hung up
+    /// on.
+    fn peer_sending(len: usize) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let served = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().expect("accept");
+            let mut ws = tungstenite::accept(conn).expect("handshake");
+            // A send to a client that has already hung up is not this
+            // test's concern; the client's reading of it is.
+            let _ = ws.send(tungstenite::Message::Text("x".repeat(len).into()));
+            while ws.read().is_ok() {}
+        });
+        (format!("ws://127.0.0.1:{port}/ws/key"), served)
+    }
+
+    fn first_outcome(url: String) -> StreamOutcome {
+        let stream = UserStream::new(
+            url,
+            "key".into(),
+            std::sync::Arc::new(crate::binance::Events),
+        );
+        let mut reader =
+            UserStreamReader::connect(&stream, Duration::from_secs(5)).expect("connected");
+        reader.next()
+    }
+
+    /// A message past anything a venue sends is a lost connection, with
+    /// the reason attached — the outcome that makes the caller reconnect
+    /// and reconcile.
+    #[test]
+    fn an_oversized_message_is_a_disconnect() {
+        let (url, served) = peer_sending(MAX_FRAME_SIZE + 1);
+        match first_outcome(url) {
+            StreamOutcome::Disconnected(why) => assert!(why.contains("too long"), "{why}"),
+            other => panic!("expected a disconnect, got {other:?}"),
+        }
+        served.join().expect("peer");
+    }
+
+    /// The limit leaves room: a message hundreds of times an order
+    /// update still arrives, and is handed to the venue's reader.
+    #[test]
+    fn a_large_but_plausible_message_is_read() {
+        let (url, served) = peer_sending(512 << 10);
+        assert_eq!(first_outcome(url), StreamOutcome::Ignored);
+        served.join().expect("peer");
     }
 }
