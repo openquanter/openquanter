@@ -32,8 +32,16 @@
 //! restarts, and a timestamp repeats. Events that are not fills carry
 //! no trade id and are not deduplicated, because they change no
 //! quantity.
+//!
+//! The record of trades seen is bounded: per symbol, ids far below the
+//! newest are forgotten, and a fill below that floor is refused as
+//! stale rather than booked — once forgotten, a redelivery cannot be
+//! told from a first delivery. The reasoning and the width are in this
+//! crate's `dedup` module.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+
+use crate::dedup::{Seen, TradeWindow};
 
 use oq_gateway::OrderUpdate;
 use oq_types::QtyLots;
@@ -59,9 +67,17 @@ pub struct Book {
     /// trade against each other, both sides of the match carry the same
     /// trade id, and keying on it alone would discard the second side as
     /// a redelivery of the first.
-    seen_trades: HashSet<(i64, String)>,
+    ///
+    /// One window per symbol, because venues number trades per symbol:
+    /// a window shared across symbols would put a quiet symbol's ids
+    /// below a busy one's floor and refuse every fill it had.
+    seen_trades: HashMap<String, TradeWindow<String>>,
     /// Fills that arrived twice and were discarded.
     duplicates: u64,
+    /// Fills discarded because their trade id was below the window's
+    /// floor, where a redelivery can no longer be told from a first
+    /// delivery.
+    stale: u64,
     /// Client id prefix this process issues. Events naming an order that
     /// does not start with it belong to something else.
     prefix: String,
@@ -141,11 +157,35 @@ impl Book {
             // redelivery of it was then discarded as a duplicate. The
             // runner counts the unparseable report as unbookable.
             if let Ok(qty) = u.last_qty.parse::<f64>() {
-                if !self.seen_trades.insert((trade_id, u.client_id.clone())) {
-                    if ours {
-                        self.duplicates += 1;
+                let window = self.seen_trades.entry(u.symbol.clone()).or_default();
+                // `unsigned_abs` as the runner converts it for the books:
+                // gateways only report positive ids, so this never folds.
+                match window.insert(trade_id.unsigned_abs(), u.client_id.clone()) {
+                    Seen::New => {}
+                    Seen::Duplicate => {
+                        if ours {
+                            self.duplicates += 1;
+                        }
+                        return false;
                     }
-                    return false;
+                    // Counted whoever placed the order: it is a fill the
+                    // position did not take, and that is worth seeing
+                    // even when the order was another system's.
+                    //
+                    // The quantity is refused, the ending is not: an order
+                    // the venue calls filled is not resting, whichever
+                    // delivery this is. Removing it is idempotent, and
+                    // leaving it would hold a working slot for the rest
+                    // of the run.
+                    Seen::Stale => {
+                        self.stale += 1;
+                        if !ours || u.status != "FILLED" {
+                            return false;
+                        }
+                        let before = self.working.len();
+                        self.working.retain(|w| w != &u.client_id);
+                        return before != self.working.len();
+                    }
                 }
                 // Every fill moves the position, whoever placed the order.
                 // The position is the account's, and it is what the risk
@@ -254,6 +294,14 @@ impl Book {
     #[must_use]
     pub const fn duplicates(&self) -> u64 {
         self.duplicates
+    }
+
+    /// Fills discarded because their trade id had fallen out of the
+    /// deduplication window. Expected to stay zero: the window is weeks
+    /// of the busiest symbol, and a stream redelivers within hours.
+    #[must_use]
+    pub const fn stale(&self) -> u64 {
+        self.stale
     }
 
     /// Net signed quantity in the contract's own lots.
@@ -587,5 +635,121 @@ mod stp {
         u.status = "EXPIRED_IN_MATCH".into();
         assert!(b.apply(&u));
         assert_eq!(b.working(), 0);
+    }
+}
+
+#[cfg(test)]
+mod window {
+    use super::*;
+    use crate::dedup::WINDOW;
+
+    fn fill(symbol: &str, client_id: &str, trade_id: i64, side: &str) -> OrderUpdate {
+        OrderUpdate {
+            symbol: symbol.into(),
+            client_id: client_id.into(),
+            venue_id: "1".to_string(),
+            status: "PARTIALLY_FILLED".into(),
+            last_qty: "0.001".into(),
+            cumulative_qty: "0.001".into(),
+            last_price: "60000".into(),
+            side: side.into(),
+            position_side: "BOTH".into(),
+            maker: true,
+            trade_id: Some(trade_id),
+            event_ms: 0,
+            initiator: oq_gateway::Initiator::Account,
+            fee: oq_types::Fee::Unsaid,
+        }
+    }
+
+    fn held(b: &Book) -> usize {
+        b.seen_trades.values().map(TradeWindow::len).sum()
+    }
+
+    /// Bounding the set must not cost the composite key: after the set
+    /// has been pruned, both sides of a match between two systems are
+    /// still remembered, and a redelivery of either is still refused.
+    #[test]
+    fn both_sides_of_a_match_survive_pruning() {
+        let mut b = Book::owning("oq123");
+        let base = 9_000_000_000;
+        assert!(b.apply(&fill("BTCUSDT", "oq123-1", base, "BUY")));
+        assert!(b.apply(&fill("BTCUSDT", "other-1", base, "SELL")));
+        for i in 1..=10_000 {
+            b.apply(&fill("BTCUSDT", "oq123-2", base + i, "BUY"));
+        }
+        let before = b.net_lots("BTCUSDT", 3);
+        assert!(!b.apply(&fill("BTCUSDT", "oq123-1", base, "BUY")));
+        assert!(!b.apply(&fill("BTCUSDT", "other-1", base, "SELL")));
+        assert_eq!(
+            b.net_lots("BTCUSDT", 3),
+            before,
+            "neither side booked twice"
+        );
+        assert_eq!(b.duplicates(), 1, "ours counted, the other system's not");
+        assert_eq!(b.stale(), 0);
+    }
+
+    /// Below the floor nothing can be judged, so nothing is booked.
+    #[test]
+    fn a_fill_below_the_floor_is_not_booked() {
+        let mut b = Book::owning("oq123");
+        let newest = 3 * i64::try_from(WINDOW).unwrap();
+        assert!(b.apply(&fill("BTCUSDT", "oq123-1", newest, "BUY")));
+        let before = b.net_lots("BTCUSDT", 3);
+        // Never seen here, and still refused: its trade id is below
+        // anything these books can vouch for.
+        assert!(!b.apply(&fill("BTCUSDT", "oq123-2", newest / 3 - 1, "BUY")));
+        assert_eq!(b.net_lots("BTCUSDT", 3), before);
+        assert_eq!(b.stale(), 1);
+        assert_eq!(b.duplicates(), 0, "stale is not called a duplicate");
+    }
+
+    /// A stale report still ends the order it names: the quantity cannot
+    /// be trusted to be new, but "filled" is true either way.
+    #[test]
+    fn a_stale_final_fill_still_ends_the_order() {
+        let mut b = Book::owning("oq123");
+        let newest = 3 * i64::try_from(WINDOW).unwrap();
+        b.apply(&fill("BTCUSDT", "oq123-1", newest, "BUY"));
+        b.on_sent("oq123-2");
+        assert_eq!(b.working(), 1);
+        let mut last = fill("BTCUSDT", "oq123-2", 5, "BUY");
+        last.status = "FILLED".into();
+        assert!(b.apply(&last), "the working count changed");
+        assert_eq!(b.working(), 0);
+        assert_eq!(b.stale(), 1);
+        assert!(!b.apply(&last), "and a repeat changes nothing");
+    }
+
+    /// Trade ids are per symbol. One window over the account would put a
+    /// quiet symbol's ids under a busy one's floor and refuse them all.
+    #[test]
+    fn each_symbol_has_its_own_floor() {
+        let mut b = Book::owning("oq123");
+        assert!(b.apply(&fill("BTCUSDT", "oq123-1", 9_000_000_000, "BUY")));
+        assert!(b.apply(&fill("ETHUSDT", "oq123-2", 1_000, "BUY")));
+        assert_eq!(b.net_lots("ETHUSDT", 3), QtyLots(1));
+        assert_eq!(b.stale(), 0);
+    }
+
+    /// The defect: the set held every fill of the run. Two hundred
+    /// thousand fills, one per thousand of the symbol's trades, span four
+    /// windows; the set holds about one window's worth.
+    #[test]
+    fn the_set_is_bounded_over_a_long_run() {
+        let mut b = Book::owning("oq123");
+        let step = 1_000;
+        let per_window = usize::try_from(WINDOW / step).unwrap();
+        let mut largest = 0;
+        for i in 1..=200_000_i64 {
+            assert!(b.apply(&fill("BTCUSDT", "oq123-1", i * 1_000, "BUY")));
+            largest = largest.max(held(&b));
+        }
+        assert!(
+            largest <= 2 * per_window + 4_097,
+            "held {largest} entries for a window of {per_window}"
+        );
+        assert_eq!(b.duplicates() + b.stale(), 0, "every fill was booked");
     }
 }
