@@ -1191,6 +1191,11 @@ where
                     );
                     match books.on_venue_fill(&fill, u.fee) {
                         crate::books::Booked::Applied(outputs) => {
+                            // Counted here, where a fill is known to be
+                            // new. The other arms used to take one back
+                            // from a count nothing ever added to, so
+                            // `oq_fills_total` read zero on every run.
+                            metrics.fills += 1;
                             if overclose {
                                 trader.halt("venue fill closes more than the held hedge leg; books cannot represent the excess; reconcile before recovery");
                             }
@@ -1260,7 +1265,6 @@ where
                         // link, and silence would hide how often.
                         crate::books::Booked::Duplicate => {
                             metrics.duplicate_fills += 1;
-                            metrics.fills = metrics.fills.saturating_sub(1);
                             println!("books            trade {} already booked", fill.trade.0);
                         }
                         // Older than the books remember. Refused because
@@ -1271,7 +1275,6 @@ where
                         // reconciliation will say so.
                         crate::books::Booked::Stale => {
                             metrics.stale_fills += 1;
-                            metrics.fills = metrics.fills.saturating_sub(1);
                             println!(
                                 "books            trade {} is below the deduplication window; \
                                  not booked, because it cannot be told from a redelivery",
@@ -1280,7 +1283,6 @@ where
                         }
                         crate::books::Booked::Unidentifiable => {
                             metrics.unidentifiable_fills += 1;
-                            metrics.fills = metrics.fills.saturating_sub(1);
                             println!(
                                 "books            {} reported a fill with no trade id; \
                                  not booked, because it cannot be deduplicated",
