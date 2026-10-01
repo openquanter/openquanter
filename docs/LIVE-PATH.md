@@ -287,6 +287,11 @@ and a half years and three attempts to arrive at. Adopted directly.
 "What the strategy is told" and "what the system stops watching" are
 different questions and must not share an answer.
 
+*Status: adopted, not built.* No quarantine exists in the code. The
+`unanswered` queue in `oq-live` is a different thing — it follows an
+order whose submission got no answer — and does not keep watching an
+order once tracking stops.
+
 ### L10 — Fills are absolute, not accumulated
 
 Where the venue reports cumulative filled quantity, that is the number
@@ -323,6 +328,10 @@ its only disconnect hook is a no-op by default.
 treated as the incident it is: Binance escalates repeat offenders to IP
 bans of *"2 minutes to 3 days"*. Hummingbot's throttler ignores all three
 headers; the other two projects have no rate limiting at all.
+
+*Status: partly built.* 429 is honoured with `Retry-After` and 418 with a
+backoff. `X-MBX-USED-WEIGHT` is not read yet, so the remaining weight is
+not visible.
 
 ### L13 — The clock is asymmetric, so run slow
 
