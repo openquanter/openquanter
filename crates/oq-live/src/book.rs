@@ -134,20 +134,28 @@ impl Book {
                 }
                 return false;
             };
-            if !self.seen_trades.insert((trade_id, u.client_id.clone())) {
-                if ours {
-                    self.duplicates += 1;
+            // Parsed before the trade is marked seen (LIVE-PATH L10b: the
+            // mark is committed only once the fill is booked). Marked
+            // first, a quantity that did not parse left the trade
+            // recorded as booked when nothing was, and a well-formed
+            // redelivery of it was then discarded as a duplicate. The
+            // runner counts the unparseable report as unbookable.
+            if let Ok(qty) = u.last_qty.parse::<f64>() {
+                if !self.seen_trades.insert((trade_id, u.client_id.clone())) {
+                    if ours {
+                        self.duplicates += 1;
+                    }
+                    return false;
                 }
-                return false;
+                // Every fill moves the position, whoever placed the order.
+                // The position is the account's, and it is what the risk
+                // gate caps: until this line it moved only when the venue's
+                // own number was adopted — at startup and after a lost
+                // stream — so a ladder filling rung by rung on a healthy link
+                // was checked against the position it started with, and the
+                // cap could not fire.
+                self.book_fill(u, qty);
             }
-            // Every fill moves the position, whoever placed the order.
-            // The position is the account's, and it is what the risk
-            // gate caps: until this line it moved only when the venue's
-            // own number was adopted — at startup and after a lost
-            // stream — so a ladder filling rung by rung on a healthy link
-            // was checked against the position it started with, and the
-            // cap could not fire.
-            self.book_fill(u);
         }
         if !ours {
             self.foreign += 1;
@@ -180,10 +188,7 @@ impl Book {
     }
 
     /// Move the leg a fill names by the quantity it traded.
-    fn book_fill(&mut self, u: &OrderUpdate) {
-        let Ok(qty) = u.last_qty.parse::<f64>() else {
-            return;
-        };
+    fn book_fill(&mut self, u: &OrderUpdate, qty: f64) {
         let signed = if u.side.eq_ignore_ascii_case("BUY") {
             qty
         } else {
@@ -530,6 +535,26 @@ mod fills {
         b.apply(&fill("oq123-1", 7, "BUY"));
         b.apply(&fill("other-1", 7, "SELL"));
         assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(0));
+        assert_eq!(b.duplicates(), 0);
+    }
+
+    /// A report whose quantity does not parse books nothing, so it must
+    /// not mark the trade as booked: the well-formed redelivery of the
+    /// same trade is the only way that fill can still reach the books.
+    #[test]
+    fn an_unparseable_fill_does_not_shadow_its_redelivery() {
+        let mut b = Book::owning("oq123");
+        let mut bad = fill("oq123-1", 7, "BUY");
+        bad.last_qty = "not a number".into();
+        b.apply(&bad);
+        assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(0), "nothing booked");
+
+        b.apply(&fill("oq123-1", 7, "BUY"));
+        assert_eq!(
+            b.net_lots("BTCUSDT", 3),
+            QtyLots(4),
+            "the redelivery is booked, not discarded as a duplicate"
+        );
         assert_eq!(b.duplicates(), 0);
     }
 }
