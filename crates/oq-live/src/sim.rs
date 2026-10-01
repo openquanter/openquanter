@@ -737,6 +737,10 @@ impl Environment for SimEnv {
         Ok(w)
     }
 
+    fn journal_syncs_decisions(&self) -> bool {
+        false
+    }
+
     fn market_data(
         &self,
         _venue: &str,

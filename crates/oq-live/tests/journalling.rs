@@ -129,6 +129,45 @@ fn the_order_is_on_disk_before_the_venue_is_called() {
     );
 }
 
+/// The production path fsyncs each decision rather than relying on the
+/// writer's policy; the ordering has to hold on that path too.
+#[test]
+fn a_session_that_syncs_decisions_still_records_before_sending() {
+    let path = temp("before-synced.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let mut s = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "ETHUSDT".into(),
+            instrument: Instrument::linear(2, 3),
+            position_side: PositionSide::OneWay,
+            id_prefix: "oq".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("starts")
+    .journalling_with(
+        Writer::open(&path, SyncPolicy::EveryRecordNoFsync).expect("writer"),
+        true,
+    );
+
+    s.submit(buy(), PriceTicks(6_000_000), Nanos(7));
+
+    let seen = s.venue().seen_at_place.borrow().clone();
+    assert!(
+        seen.contains(&kind::SUBMITTED),
+        "the submission must be durable before the venue is called; saw {seen:?}"
+    );
+    assert!(s.journal_lost().is_none());
+}
+
 #[test]
 fn a_run_writes_its_identity_the_order_and_the_outcome_in_that_order() {
     let path = temp("sequence.oqj");

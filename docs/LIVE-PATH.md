@@ -208,6 +208,12 @@ record, permanently. That is opportunistic snapshotting; this is a
 write-ahead log, and the difference is which side of the network call the
 write happens on.
 
+Durable here means fsynced. Every decision — a placement, a withdrawal, a
+fill, a reconciliation — is on the device before the session acts on it.
+Observations (one tick per aggregation window, the waiting heartbeat)
+reach the OS at once and the device with the next decision's fsync: a
+power cut can cost a replay its last few ticks, never an order.
+
 ### L6 — Terminality requires both channels to agree
 
 REST and the user stream both report that an order is finished, with no

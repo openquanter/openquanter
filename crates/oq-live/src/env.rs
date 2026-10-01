@@ -87,22 +87,34 @@ pub trait Environment {
 
     /// Open the journal at `path` for appending.
     ///
-    /// `EveryRecord`, which is the policy the record-before-send
-    /// ordering needs. It applies to every record, and the session also
-    /// writes one `Tick` per aggregation window, so the cost is a device
-    /// round trip per decision — a placement, a withdrawal, a fill — and
-    /// one per window as well, not per order alone. `EveryRecordNoFsync`
-    /// survives a process crash and not a machine one, and the failure
-    /// the ordering exists to rule out is a live order this journal has
-    /// never heard of: a power loss between the write and the venue's
-    /// answer loses exactly the record that would have let a restart ask
-    /// about it. The simulator keeps the cheaper policy, because its
-    /// inputs exist elsewhere and its journal is for replay.
+    /// `EveryRecordNoFsync`, with the fsync the record-before-send
+    /// ordering needs done by the session after each decision — see
+    /// [`Environment::journal_syncs_decisions`]. Every record reaches the
+    /// OS before the call returns, so a process crash loses nothing.
     ///
     /// # Errors
     /// Whatever opening it reports.
     fn open_journal(&self, path: &std::path::Path) -> oq_journal::Result<oq_journal::Writer> {
-        oq_journal::Writer::open(path, oq_journal::SyncPolicy::EveryRecord)
+        oq_journal::Writer::open(path, oq_journal::SyncPolicy::EveryRecordNoFsync)
+    }
+
+    /// Whether the session fsyncs the journal after each decision.
+    ///
+    /// Yes in production. The failure the record-before-send ordering
+    /// exists to rule out is a live order this journal has never heard
+    /// of, and a power loss between the write and the venue's answer
+    /// loses exactly the record that would have let a restart ask about
+    /// it — so a placement, a withdrawal, a fill is on the device before
+    /// anything acts on it. Observations are not: a `Tick` per window
+    /// used to cost a device round trip as well, under a policy that
+    /// synced every record, and a lost tick costs a gap in a replay
+    /// rather than an order nobody can ask about. The next decision's
+    /// fsync carries every observation written before it.
+    ///
+    /// The simulator says no, because its inputs exist elsewhere and its
+    /// journal is for replay.
+    fn journal_syncs_decisions(&self) -> bool {
+        true
     }
 
     /// Whether an operator has asked the process to stop.
