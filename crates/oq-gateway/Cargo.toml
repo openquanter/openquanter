@@ -25,6 +25,10 @@ ed25519-dalek = { version = "2.2", default-features = false, features = ["std", 
 # curve arithmetic under it is not something to hand-write.
 k256 = { version = "0.13", default-features = false, features = ["std", "ecdsa"] }
 sha3 = { version = "0.10", default-features = false, features = ["std"] }
+# Wipes the API secret and passphrase when they are dropped. Already in
+# this crate's tree through ed25519-dalek and k256, so naming it directly
+# adds nothing to the budget in scripts/check-composability.sh.
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true
