@@ -110,9 +110,6 @@ pub struct Books {
     /// a redelivery, leaving the books one fill away from the account.
     /// A redelivery repeats the side; the other side of a match does not.
     seen: std::collections::HashSet<(u64, Side)>,
-    /// Orders submitted and not yet resolved, so `Context::working` is
-    /// the process's own count rather than a guess.
-    working: usize,
 }
 
 impl Books {
@@ -147,7 +144,6 @@ impl Books {
             kernel: Kernel::new(state),
             instrument,
             seen: std::collections::HashSet::new(),
-            working: 0,
         }
     }
 
@@ -201,7 +197,6 @@ impl Books {
 
     /// Record that an order was sent.
     pub fn on_submit(&mut self, id: OrderId, side: Side, qty: QtyLots, offset: Offset, at: Nanos) {
-        self.working += 1;
         self.kernel.apply(&Event::Submit {
             instrument: None,
             id,
@@ -213,11 +208,6 @@ impl Books {
             offset,
             stamp: oq_types::Stamp::new(at.0, at.0),
         });
-    }
-
-    /// Record that an order ended without filling.
-    pub fn on_closed(&mut self) {
-        self.working = self.working.saturating_sub(1);
     }
 
     /// Book a fill the venue reported.
@@ -240,7 +230,6 @@ impl Books {
         if !self.seen.insert((fill.trade.0, fill.side)) {
             return Booked::Duplicate;
         }
-        self.working = self.working.saturating_sub(1);
         Booked::Applied(
             self.kernel
                 .apply(&Event::VenueFill { fill: *fill, fee })
@@ -289,8 +278,15 @@ impl Books {
     /// The whole reason this module exists: every field here was a
     /// literal zero, and a strategy reading `ctx.position` to decide
     /// whether to open or close was reading a constant.
+    ///
+    /// `working` comes from the caller because these books cannot know
+    /// it: they see every fill on the account, including another
+    /// system's and the venue's own liquidations, and an order filling
+    /// in pieces is still working until its last piece. The session's
+    /// book counts this process's orders by client id, and that is the
+    /// number a strategy sizing against `working` means.
     #[must_use]
-    pub fn context(&self, tick: Tick) -> Context {
+    pub fn context(&self, tick: Tick, working: usize) -> Context {
         let s = self.kernel.summary();
         Context {
             instrument: self.kernel.state().holding().instrument,
@@ -300,7 +296,7 @@ impl Books {
             short_position: s.short_qty,
             short_entry: s.short_entry,
             equity: s.equity,
-            working: self.working,
+            working,
         }
     }
 
@@ -457,13 +453,13 @@ mod tests {
     fn the_context_reflects_the_position_rather_than_a_constant() {
         let mut b = books();
         b.on_tick(&tick(SEC, 6_000_000));
-        assert_eq!(b.context(tick(SEC, 6_000_000)).position, QtyLots(0));
+        assert_eq!(b.context(tick(SEC, 6_000_000), 0).position, QtyLots(0));
 
         b.on_venue_fill(
             &fill(2 * SEC, 1, Side::Buy, 6_000_000, 4, Offset::Open),
             oq_types::Fee::Unsaid,
         );
-        let ctx = b.context(tick(3 * SEC, 6_010_000));
+        let ctx = b.context(tick(3 * SEC, 6_010_000), 0);
 
         assert_eq!(
             ctx.position,
@@ -515,8 +511,8 @@ mod tests {
         );
         filled.on_tick(&tick(2 * SEC, 6_000_000));
 
-        let a = adopted.context(tick(2 * SEC, 6_000_000));
-        let f = filled.context(tick(2 * SEC, 6_000_000));
+        let a = adopted.context(tick(2 * SEC, 6_000_000), 0);
+        let f = filled.context(tick(2 * SEC, 6_000_000), 0);
         assert_eq!(a.position, f.position);
         assert_eq!(a.entry, f.entry);
         assert_eq!(a.equity, f.equity, "including the fee it paid");
@@ -538,37 +534,6 @@ mod tests {
             oq_types::Fee::Unsaid,
         );
         assert_eq!(b.net_position(), QtyLots(0), "flat again");
-    }
-
-    /// The working count is the process's own, and a strategy sizing
-    /// against a stale one would place orders it thought it had not.
-    #[test]
-    fn the_working_count_follows_what_this_process_sent() {
-        let mut b = books();
-        b.on_tick(&tick(SEC, 6_000_000));
-        assert_eq!(b.context(tick(SEC, 6_000_000)).working, 0);
-
-        b.on_submit(OrderId(1), Side::Buy, QtyLots(1), Offset::Open, Nanos(SEC));
-        b.on_submit(OrderId(2), Side::Buy, QtyLots(1), Offset::Open, Nanos(SEC));
-        assert_eq!(b.context(tick(SEC, 6_000_000)).working, 2);
-
-        b.on_venue_fill(
-            &fill(2 * SEC, 1, Side::Buy, 6_000_000, 1, Offset::Open),
-            oq_types::Fee::Unsaid,
-        );
-        b.on_closed();
-        assert_eq!(b.context(tick(2 * SEC, 6_000_000)).working, 0);
-    }
-
-    /// A count that has already reached zero must not go negative when
-    /// a duplicate report arrives — a redelivered cancel is routine, and
-    /// an underflowed counter would report a working set of billions.
-    #[test]
-    fn a_duplicate_ending_does_not_underflow_the_count() {
-        let mut b = books();
-        b.on_closed();
-        b.on_closed();
-        assert_eq!(b.context(tick(SEC, 6_000_000)).working, 0);
     }
 
     /// FR-RISK-4 makes unknown state fatal. Books that quietly adopted
