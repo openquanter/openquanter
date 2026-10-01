@@ -294,6 +294,16 @@ pub struct Binance {
     /// Atomic for the same reason the offset is: the refusal arrives on
     /// a path holding `&self`.
     banned_until_ms: core::sync::atomic::AtomicI64,
+    /// The one-minute request weight the venue last reported, or -1
+    /// before any response has carried it.
+    ///
+    /// Atomic for the same reason as the two above: every response is
+    /// read on a path holding `&self`. Kept apart from the moment it was
+    /// read, so the pair can tear by one response; for a figure an
+    /// operator reads, that is not worth a lock on every request.
+    used_weight_1m: core::sync::atomic::AtomicI64,
+    /// Venue time at which `used_weight_1m` was read.
+    used_weight_at_ms: core::sync::atomic::AtomicI64,
 }
 
 impl Binance {
@@ -350,6 +360,8 @@ impl Binance {
             clock_offset_ms: core::sync::atomic::AtomicI64::new(0),
             round_trip_ms: core::sync::atomic::AtomicI64::new(0),
             banned_until_ms: core::sync::atomic::AtomicI64::new(0),
+            used_weight_1m: core::sync::atomic::AtomicI64::new(-1),
+            used_weight_at_ms: core::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -682,6 +694,12 @@ impl Binance {
         match sent {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
+                // Read from every response, refusals included: a 429
+                // carries the count that earned it, and that is the one
+                // an operator most wants to have seen.
+                if let Some(used) = used_weight_1m(resp.headers()) {
+                    self.note_used_weight(used);
+                }
                 // A 429 is the warning before the ban: the venue says to
                 // back off, and a client that keeps sending turns it into
                 // a 418 whose length grows with every repeat. Honoured
@@ -811,6 +829,52 @@ impl Binance {
             .then(|| until.saturating_sub(self.venue_time_ms()))
             .filter(|remaining| *remaining > 0)
     }
+}
+
+impl Binance {
+    fn note_used_weight(&self, used: u64) {
+        use core::sync::atomic::Ordering::Relaxed;
+        let at = self.venue_time_ms();
+        self.used_weight_1m
+            .store(i64::try_from(used).unwrap_or(i64::MAX), Relaxed);
+        self.used_weight_at_ms.store(at, Relaxed);
+    }
+
+    /// The request weight the venue last said this IP had used in the
+    /// current minute, and when. `None` until a response has said so.
+    ///
+    /// Exposed, not enforced: the 429 and the ban are still what stop
+    /// requests. This is the number that shows them coming.
+    #[must_use]
+    pub fn used_weight(&self) -> Option<crate::account::RequestWeight> {
+        use core::sync::atomic::Ordering::Relaxed;
+        let used = u64::try_from(self.used_weight_1m.load(Relaxed)).ok()?;
+        Some(crate::account::RequestWeight {
+            used,
+            window: "1m",
+            read_at_ms: self.used_weight_at_ms.load(Relaxed),
+        })
+    }
+}
+
+/// The one-minute used weight a response reports, if it reports one.
+///
+/// Binance names the header after its window —
+/// `X-MBX-USED-WEIGHT-1M` on USDT-M futures, where one minute is the
+/// only window there is — and Aster, serving the same API, does the
+/// same. Only the one-minute window is read because it is the one the
+/// 429 and the `-1003` quote ("2400 requests per minute"); a count over
+/// some other window has some other limit, and folding it into this one
+/// would put a number beside a limit it was never measured against.
+///
+/// A value that is not a non-negative integer is ignored rather than
+/// read as zero: a garbled header is not the venue saying the budget is
+/// untouched.
+fn used_weight_1m(headers: &ureq::http::HeaderMap) -> Option<u64> {
+    headers
+        .get("x-mbx-used-weight-1m")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
 }
 
 /// When a rate-limit warning's cool-down ends, in venue milliseconds.
@@ -1554,6 +1618,9 @@ impl crate::account::Account for Binance {
 
     fn round_trip_ms(&self) -> i64 {
         Self::round_trip_ms(self)
+    }
+    fn request_weight(&self) -> Option<crate::account::RequestWeight> {
+        self.used_weight()
     }
 
     fn instrument(&self, symbol: &str) -> Result<Instrument, String> {
@@ -2837,6 +2904,160 @@ mod ban_backoff {
         b.banned_until_ms
             .store(now_ms() + b.clock_offset_ms() - 1, Relaxed);
         assert_eq!(b.ban_remaining_ms(), None, "an expired ban is not a ban");
+    }
+}
+
+#[cfg(test)]
+mod used_weight {
+    use super::{Binance, Credentials, Endpoint, used_weight_1m};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> ureq::http::HeaderMap {
+        let mut h = ureq::http::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, ureq::http::HeaderValue::from_static(v));
+        }
+        h
+    }
+
+    /// The header as the venue spells it, read whatever its case.
+    #[test]
+    fn the_one_minute_weight_is_read_from_its_header() {
+        assert_eq!(
+            used_weight_1m(&headers(&[("X-MBX-USED-WEIGHT-1M", "37")])),
+            Some(37)
+        );
+        assert_eq!(
+            used_weight_1m(&headers(&[("x-mbx-used-weight-1m", " 2399 ")])),
+            Some(2399)
+        );
+    }
+
+    /// Absent, garbled, or counted over some other window: none of those
+    /// is the venue saying the minute's budget is untouched.
+    #[test]
+    fn a_weight_that_was_not_reported_is_not_zero() {
+        assert_eq!(used_weight_1m(&headers(&[])), None);
+        assert_eq!(
+            used_weight_1m(&headers(&[("X-MBX-USED-WEIGHT-1M", "lots")])),
+            None
+        );
+        assert_eq!(
+            used_weight_1m(&headers(&[("X-MBX-USED-WEIGHT-1M", "-5")])),
+            None
+        );
+        assert_eq!(
+            used_weight_1m(&headers(&[("X-MBX-USED-WEIGHT-1S", "3")])),
+            None,
+            "a different window has a different limit"
+        );
+        assert_eq!(
+            used_weight_1m(&headers(&[("X-MBX-ORDER-COUNT-1M", "3")])),
+            None,
+            "an order count is not request weight"
+        );
+    }
+
+    /// Answer one request with `status` and a weight header, and hand
+    /// back the request line so the test can see which path was asked.
+    fn one_response(
+        status: &'static str,
+        weight: &'static str,
+    ) -> (u16, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let served = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = conn.read(&mut buf).expect("read");
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&buf[..n]);
+            }
+            let body = r#"{"symbol":"BTCUSDT","price":"1"}"#;
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nX-MBX-USED-WEIGHT-1M: {weight}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            conn.write_all(reply.as_bytes()).expect("write");
+            String::from_utf8_lossy(&seen)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+        (port, served)
+    }
+
+    /// A client whose transport may speak plain text to a local
+    /// listener. Everything else is the client as built: the response
+    /// is read by the same code every request passes through.
+    fn local(mut b: Binance, port: u16) -> Binance {
+        b.base = format!("http://127.0.0.1:{port}");
+        b.agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build()
+            .into();
+        b
+    }
+
+    /// Both venues served from the one table, through a real response.
+    #[test]
+    fn every_response_updates_the_weight_on_both_venues() {
+        for (client, path) in [
+            (
+                Binance::at(Endpoint::Testnet, Credentials::new("k", "s")),
+                "/fapi/v1/ticker/price",
+            ),
+            (
+                Binance::aster(Endpoint::Testnet, Credentials::new("k", "s")),
+                "/fapi/v3/ticker/price",
+            ),
+        ] {
+            let (port, served) = one_response("200 OK", "41");
+            let b = local(client, port);
+            assert_eq!(b.used_weight(), None, "nothing read yet");
+
+            b.ticker_price("BTCUSDT").expect("answered");
+            let request = served.join().expect("server");
+            assert!(request.contains(path), "{request}");
+
+            let w = b.used_weight().expect("read from the response");
+            assert_eq!((w.used, w.window), (41, "1m"));
+            assert!(w.read_at_ms > 0, "stamped with when it was read");
+            assert_eq!(
+                crate::account::Account::request_weight(&b),
+                Some(w),
+                "the runner sees the same figure through the trait"
+            );
+        }
+    }
+
+    /// The refusal is the response whose count matters most, and it is
+    /// read before the refusal is returned. Reading it does not change
+    /// what a 429 does: the cool-down still stands.
+    #[test]
+    fn a_rate_limit_refusal_still_reports_its_weight() {
+        let (port, served) = one_response("429 Too Many Requests", "2400");
+        let b = local(
+            Binance::at(Endpoint::Testnet, Credentials::new("k", "s")),
+            port,
+        );
+        let e = b.ticker_price("BTCUSDT").expect_err("refused");
+        served.join().expect("server");
+        assert!(
+            matches!(e, super::VenueError::Venue { status: 429, .. }),
+            "{e:?}"
+        );
+        assert_eq!(b.used_weight().map(|w| w.used), Some(2400));
+        assert!(b.ban_remaining_ms().is_some(), "the cool-down is unchanged");
     }
 }
 

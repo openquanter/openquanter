@@ -60,6 +60,7 @@
 //! `FR-RISK-4` makes unknown state fatal and a set of books that quietly
 //! corrected itself would have destroyed the evidence.
 
+use crate::dedup::{Seen, TradeWindow};
 use oq_core::kernel::Matching;
 use oq_core::{Event, Kernel, Output, State};
 use oq_engine::Tick;
@@ -96,6 +97,12 @@ pub enum Booked {
     /// The report carries no trade id, so it cannot be deduplicated and
     /// was not applied.
     Unidentifiable,
+    /// The trade id is further below the newest one booked than these
+    /// books remember, so whether it was booked can no longer be told.
+    /// Not applied: a stale redelivery booked as new doubles a position,
+    /// and that is the failure deduplication exists to prevent. The
+    /// window and its width are in this crate's `dedup` module.
+    Stale,
 }
 
 /// The live account, kept by the kernel.
@@ -109,7 +116,15 @@ pub struct Books {
     /// set of trade ids booked the first side and discarded the second as
     /// a redelivery, leaving the books one fill away from the account.
     /// A redelivery repeats the side; the other side of a match does not.
-    seen: std::collections::HashSet<(u64, Side)>,
+    ///
+    /// Bounded by trade id rather than kept forever; the key is still the
+    /// pair. One window, because these books are one instrument's and
+    /// the venue numbers trades per symbol.
+    seen: TradeWindow<Side>,
+    /// Distinct trades booked over the run. Kept apart from `seen`,
+    /// whose size falls whenever old entries are pruned: a count of
+    /// booked trades that went down would read as trades unbooked.
+    booked: u64,
 }
 
 impl Books {
@@ -143,7 +158,8 @@ impl Books {
         Self {
             kernel: Kernel::new(state),
             instrument,
-            seen: std::collections::HashSet::new(),
+            seen: TradeWindow::default(),
+            booked: 0,
         }
     }
 
@@ -227,8 +243,10 @@ impl Books {
             // unbounded number of copies of one trade.
             return Booked::Unidentifiable;
         }
-        if !self.seen.insert((fill.trade.0, fill.side)) {
-            return Booked::Duplicate;
+        match self.seen.insert(fill.trade.0, fill.side) {
+            Seen::New => self.booked += 1,
+            Seen::Duplicate => return Booked::Duplicate,
+            Seen::Stale => return Booked::Stale,
         }
         Booked::Applied(
             self.kernel
@@ -244,7 +262,7 @@ impl Books {
     pub fn close_exceeds_position(&self, fill: &Fill) -> bool {
         if self.kernel.state().mode != oq_core::PositionMode::Hedge
             || fill.offset != Offset::Close
-            || self.seen.contains(&(fill.trade.0, fill.side))
+            || self.seen.contains(fill.trade.0, fill.side)
         {
             return false;
         }
@@ -256,10 +274,14 @@ impl Books {
         fill.qty.0 > available
     }
 
-    /// Distinct trades booked.
+    /// Distinct trades booked over the run.
+    ///
+    /// A counter, not the size of the deduplication set: that set
+    /// forgets trades far below the newest, and this number must not
+    /// fall when it does.
     #[must_use]
     pub fn booked(&self) -> usize {
-        self.seen.len()
+        usize::try_from(self.booked).unwrap_or(usize::MAX)
     }
 
     /// Whether this trade is already in the books.
@@ -268,9 +290,15 @@ impl Books {
     /// did not, before either is handed back to the loop — applying both
     /// is harmless, but counting the first as a discovery would call a
     /// difference explained when nothing had explained it.
+    ///
+    /// A trade older than the window answers `true`. It would be refused
+    /// as [`Booked::Stale`] if handed back, so calling it a discovery
+    /// would explain a difference with a report that cannot move the
+    /// books — and the next check would recover it again, and again,
+    /// and never judge the difference at all.
     #[must_use]
     pub fn has_booked(&self, trade: u64, side: Side) -> bool {
-        self.seen.contains(&(trade, side))
+        self.seen.contains(trade, side)
     }
 
     /// The strategy's view, for this observation.
@@ -646,5 +674,102 @@ mod two_systems {
         // The account bought and sold the same five: it is flat, as the
         // venue says, rather than long five.
         assert_eq!(b.net_position(), oq_types::QtyLots(0));
+    }
+}
+
+#[cfg(test)]
+mod window {
+    use super::*;
+    use crate::dedup::WINDOW;
+    use oq_types::{Liquidity, Stamp, TradeId};
+
+    fn books(mode: oq_core::PositionMode) -> Books {
+        Books::new(
+            InstrumentId::new(1),
+            Contract::new(10_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(100_000),
+            mode,
+        )
+    }
+
+    fn fill(trade: u64, side: Side, offset: Offset) -> Fill {
+        Fill {
+            stamp: Stamp::new(1, 1),
+            instrument: InstrumentId::new(1),
+            order: OrderId(1),
+            trade: TradeId(trade),
+            side,
+            offset,
+            price: PriceTicks(6_000_000),
+            qty: QtyLots(1),
+            liquidity: Liquidity::Maker,
+        }
+    }
+
+    /// A fill below the window's floor is refused, and the questions the
+    /// runner asks about it agree with that refusal.
+    #[test]
+    fn a_fill_below_the_floor_is_stale_everywhere() {
+        let mut b = books(oq_core::PositionMode::Hedge);
+        let newest = 3 * WINDOW;
+        assert!(matches!(
+            b.on_venue_fill(
+                &fill(newest, Side::Buy, Offset::Open),
+                oq_types::Fee::Unsaid
+            ),
+            Booked::Applied(_)
+        ));
+        let old = fill(WINDOW - 1, Side::Sell, Offset::Close);
+        // Answered as booked, so a recovered copy of it is not counted
+        // as a discovery and fed back to be refused forever.
+        assert!(b.has_booked(old.trade.0, old.side));
+        // And not judged an over-close: it will not be booked.
+        let mut big = old;
+        big.qty = QtyLots(50);
+        assert!(!b.close_exceeds_position(&big));
+        assert_eq!(b.on_venue_fill(&old, oq_types::Fee::Unsaid), Booked::Stale);
+        assert_eq!(b.legs().0, QtyLots(1), "the long leg did not move");
+        assert_eq!(b.booked(), 1);
+    }
+
+    /// `booked` counts trades booked over the run. The set behind the
+    /// deduplication shrinks when it is pruned; this number must not.
+    #[test]
+    fn the_booked_count_does_not_fall_when_the_set_is_pruned() {
+        let mut b = books(oq_core::PositionMode::OneWay);
+        let step = 20_000;
+        let mut last = 0;
+        for i in 1..=6_000_u64 {
+            let side = if i % 2 == 0 { Side::Sell } else { Side::Buy };
+            assert!(matches!(
+                b.on_venue_fill(&fill(i * step, side, Offset::Open), oq_types::Fee::Unsaid),
+                Booked::Applied(_)
+            ));
+            assert!(b.booked() > last, "the count fell or stalled at fill {i}");
+            last = b.booked();
+        }
+        assert!(b.seen.len() < 6_000, "the set was pruned");
+        assert_eq!(b.booked(), 6_000);
+    }
+
+    /// Both sides of a match, still inside the window after pruning, are
+    /// both booked, and a redelivery of either is still a duplicate.
+    #[test]
+    fn both_sides_of_a_match_survive_pruning() {
+        let mut b = books(oq_core::PositionMode::OneWay);
+        let base = 9_000_000_000;
+        b.on_venue_fill(&fill(base, Side::Buy, Offset::Open), oq_types::Fee::Unsaid);
+        b.on_venue_fill(&fill(base, Side::Sell, Offset::Open), oq_types::Fee::Unsaid);
+        for i in 1..=6_000_u64 {
+            let side = if i % 2 == 0 { Side::Sell } else { Side::Buy };
+            b.on_venue_fill(&fill(base + i, side, Offset::Open), oq_types::Fee::Unsaid);
+        }
+        assert!(b.has_booked(base, Side::Buy) && b.has_booked(base, Side::Sell));
+        assert_eq!(
+            b.on_venue_fill(&fill(base, Side::Sell, Offset::Open), oq_types::Fee::Unsaid),
+            Booked::Duplicate
+        );
+        assert_eq!(b.net_position(), QtyLots(0));
     }
 }

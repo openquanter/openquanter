@@ -209,6 +209,21 @@ pub trait Account: Execution {
         Ok(None)
     }
 
+    /// How much of its request budget the venue says this client has
+    /// spent, as of the last response that said so.
+    ///
+    /// Read, never acted on: nothing here throttles. It exists so that
+    /// an operator can see the budget filling before the venue's 429
+    /// says it is full — after which the next step is a ban whose length
+    /// grows with every request sent into it.
+    ///
+    /// `None` when the adapter does not report it, or has not yet had a
+    /// response that carried it. Not zero: a venue that was never asked
+    /// has not said the budget is empty.
+    fn request_weight(&self) -> Option<RequestWeight> {
+        None
+    }
+
     fn open_user_stream(&self) -> Result<UserStream, VenueError>;
 
     /// Tell the venue the stream is still wanted.
@@ -226,6 +241,24 @@ pub trait Account: Execution {
     /// # Errors
     /// Whatever the request reports.
     fn close_user_stream(&self) -> Result<(), VenueError>;
+}
+
+/// A venue's own count of the request weight spent in its current
+/// window, and when it was read.
+///
+/// The moment matters as much as the count. The window rolls over by
+/// itself, so a figure read some minutes ago says nothing about now —
+/// and a client that has gone quiet keeps showing the last number it
+/// heard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestWeight {
+    /// Weight used in the window, as the venue counted it.
+    pub used: u64,
+    /// The window it is counted over, in the venue's own notation
+    /// (`1m`).
+    pub window: &'static str,
+    /// When the response carrying it was read, on the venue's clock.
+    pub read_at_ms: i64,
 }
 
 /// One funding settlement on the account, as the venue booked it.
@@ -354,6 +387,9 @@ impl Account for Box<dyn Account> {
     }
     fn next_funding_ms(&self, symbol: &str) -> Result<Option<i64>, VenueError> {
         (**self).next_funding_ms(symbol)
+    }
+    fn request_weight(&self) -> Option<RequestWeight> {
+        (**self).request_weight()
     }
     fn open_user_stream(&self) -> Result<UserStream, VenueError> {
         (**self).open_user_stream()

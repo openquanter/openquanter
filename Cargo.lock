@@ -969,6 +969,7 @@ dependencies = [
  "oq-data",
  "oq-engine",
  "oq-env",
+ "oq-journal",
  "oq-margin",
  "oq-stats",
  "oq-types",
@@ -994,6 +995,7 @@ dependencies = [
  "sha3",
  "tungstenite",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

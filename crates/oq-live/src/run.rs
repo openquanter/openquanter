@@ -1191,6 +1191,11 @@ where
                     );
                     match books.on_venue_fill(&fill, u.fee) {
                         crate::books::Booked::Applied(outputs) => {
+                            // Counted here, where a fill is known to be
+                            // new. The other arms used to take one back
+                            // from a count nothing ever added to, so
+                            // `oq_fills_total` read zero on every run.
+                            metrics.fills += 1;
                             if overclose {
                                 trader.halt("venue fill closes more than the held hedge leg; books cannot represent the excess; reconcile before recovery");
                             }
@@ -1260,12 +1265,24 @@ where
                         // link, and silence would hide how often.
                         crate::books::Booked::Duplicate => {
                             metrics.duplicate_fills += 1;
-                            metrics.fills = metrics.fills.saturating_sub(1);
                             println!("books            trade {} already booked", fill.trade.0);
+                        }
+                        // Older than the books remember. Refused because
+                        // a redelivery this old cannot be told from a
+                        // first delivery; said out loud because if it
+                        // was a first delivery, the position here is now
+                        // smaller than the account's and the next
+                        // reconciliation will say so.
+                        crate::books::Booked::Stale => {
+                            metrics.stale_fills += 1;
+                            println!(
+                                "books            trade {} is below the deduplication window; \
+                                 not booked, because it cannot be told from a redelivery",
+                                fill.trade.0
+                            );
                         }
                         crate::books::Booked::Unidentifiable => {
                             metrics.unidentifiable_fills += 1;
-                            metrics.fills = metrics.fills.saturating_sub(1);
                             println!(
                                 "books            {} reported a fill with no trade id; \
                                  not booked, because it cannot be deduplicated",
@@ -1941,6 +1958,10 @@ where
     println!(
         "duplicates       {} redelivered fills discarded",
         trader.duplicates()
+    );
+    println!(
+        "stale fills      {} below the deduplication window, not booked",
+        metrics.stale_fills
     );
     // Above zero means the account is shared. Worth reading here rather
     // than inferring it later from a limit that filled up while this
@@ -3879,6 +3900,23 @@ fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
         .uint("max_rate", u64::from(limits.max_rate))
         .int("rate_window_ns", limits.rate_window.0)
         .end_object();
+    // The venue's count of its own request budget, beside the limits
+    // this process sets itself. Shown, not acted on: the venue's 429 is
+    // still what stops requests, and this is the number that shows one
+    // coming. Null where the venue does not report it, or has not yet.
+    match v.trader.venue().request_weight() {
+        Some(w) => {
+            j.field("request_weight")
+                .begin_object()
+                .uint("used", w.used)
+                .str("window", w.window)
+                .int("read_at_ms", w.read_at_ms)
+                .end_object();
+        }
+        None => {
+            j.null("request_weight");
+        }
+    }
     j.field("counters")
         .begin_object()
         .uint("sent", v.metrics.sent)

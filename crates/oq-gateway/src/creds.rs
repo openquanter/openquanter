@@ -7,21 +7,31 @@
 //! log line — the derived one would print the secret in full, and the
 //! places that print a whole request on failure are exactly the places
 //! that matter.
+//!
+//! The secret halves are also wiped from memory when dropped
+//! (`Zeroizing`), clones included, so a credential that has gone out of
+//! scope is not left in a freed allocation for a core dump or a swap
+//! file to carry away. That covers what this type owns. It does not
+//! reach a copy somebody else holds — the process environment when the
+//! value came from a variable, or a buffer a signing routine filled —
+//! which is one more reason a deployment uses `$CREDENTIALS_DIRECTORY`.
 
 use core::fmt;
+
+use zeroize::Zeroizing;
 
 /// A key pair for a venue account.
 #[derive(Clone)]
 pub struct Credentials {
     key: String,
-    secret: String,
+    secret: Zeroizing<String>,
     /// A third secret some venues require alongside the pair.
     ///
     /// Optional because most do not have one, and `None` rather than an
     /// empty string because "this venue has no passphrase" and "the
     /// passphrase is blank" are different states — the second is a
     /// misconfiguration and must not be silently signed with.
-    passphrase: Option<String>,
+    passphrase: Option<Zeroizing<String>>,
 }
 
 impl Credentials {
@@ -30,7 +40,7 @@ impl Credentials {
     pub fn new(key: impl Into<String>, secret: impl Into<String>) -> Self {
         Self {
             key: key.into(),
-            secret: secret.into(),
+            secret: Zeroizing::new(secret.into()),
             passphrase: None,
         }
     }
@@ -46,14 +56,14 @@ impl Credentials {
         if p.trim().is_empty() {
             return Err("the passphrase must not be empty".to_string());
         }
-        self.passphrase = Some(p);
+        self.passphrase = Some(Zeroizing::new(p));
         Ok(self)
     }
 
     /// The third secret, when the venue has one.
     #[must_use]
     pub(crate) fn passphrase(&self) -> Option<&str> {
-        self.passphrase.as_deref()
+        self.passphrase.as_deref().map(String::as_str)
     }
 
     /// Read `OQ_VENUE_KEY`, `OQ_VENUE_SECRET` and, if present,
@@ -85,7 +95,7 @@ impl Credentials {
         let read = |name: &str| -> Result<Option<String>, String> {
             if let Some(dir) = dir {
                 let path = dir.join(name);
-                match std::fs::read_to_string(&path) {
+                match std::fs::read_to_string(&path).map(Zeroizing::new) {
                     // A credential file ends with the newline whoever
                     // wrote it left; signing with it fails as a bad
                     // signature, not as a bad file.
@@ -178,7 +188,7 @@ mod tests {
         );
         let c = Credentials::resolve(Some(&dir), |_| Some("envvalue".into())).expect("resolves");
         assert_eq!(c.key(), "filekey");
-        assert_eq!(c.secret, "filesecret");
+        assert_eq!(c.secret.as_str(), "filesecret");
         assert_eq!(
             c.passphrase(),
             Some("envvalue"),

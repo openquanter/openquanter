@@ -46,6 +46,13 @@ pub struct Snapshot {
     /// routine, and the *trend* is what says whether the link is getting
     /// worse.
     pub duplicate_fills: u64,
+    /// Fills whose trade id was below the deduplication window, and so
+    /// were not booked.
+    ///
+    /// Expected to stay zero. The window is weeks of the busiest symbol;
+    /// a fill this late is either a very stale redelivery or a fill the
+    /// books will now be short of, and reconciliation tells which.
+    pub stale_fills: u64,
     /// Reports carrying no trade id, which cannot be deduplicated and
     /// are therefore not booked.
     pub unidentifiable_fills: u64,
@@ -112,6 +119,12 @@ impl Snapshot {
             "fills the venue reported more than once; routine after a reconnect, and \
              the trend says whether the link is getting worse",
             self.duplicate_fills,
+        );
+        counter(
+            "oq_stale_fills_total",
+            "fills whose trade id was below the deduplication window; not booked, \
+             because a redelivery that old cannot be told from a first delivery",
+            self.stale_fills,
         );
         counter(
             "oq_unidentifiable_fills_total",
