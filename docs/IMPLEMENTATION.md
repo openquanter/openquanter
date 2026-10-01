@@ -736,7 +736,7 @@ welcome as issues.
    question.
 3. **Second and third venue priority.** Driven by user demand; the connector
    contract should be validated by at least two structurally different venues
-   before 2.0. Partly answered since this was written: OKX is the second, on
+   before the API-stability milestone. Partly answered since this was written: OKX is the second, on
    both the capture and the order side, and each side has a conformance suite
    both adapters pass. It found what a second venue is for — Binance answers a
    refusal with an HTTP status, OKX answers one inside a 200 — which is the

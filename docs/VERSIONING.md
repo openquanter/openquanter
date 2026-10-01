@@ -13,10 +13,13 @@ Internal dependencies are declared once in `[workspace.dependencies]`,
 so a bump is a single edit and cannot drift between crates.
 
 ```
-2.0.0-alpha.N   now — APIs change without notice
-2.0.0-beta.N    from the beta milestone — APIs documented, still moving
-2.0.0           APIs stable; semantic versioning enforced from here
+2.0.0, 2.0.1, 2.0.2, …   one release after another, each a tag vX.Y.Z
 ```
+
+A release is a number in a sequence and a tag on `main`. The next one
+is the last one plus one in the third place. The number says *which*
+release, and nothing more: there is no alpha, no beta, and no promise
+encoded in the digits.
 
 The crates are one release train. They are separable — using one without
 the others is a supported and tested property (G0) — but they are
@@ -31,34 +34,29 @@ its successor, rewritten from scratch, and calling it 2 is simply
 accurate about that.
 
 The consequence is a gap in the public record: crates.io and this
-repository begin at 2.0.0-alpha, and there is no public 1.x to find.
+repository begin at 2.0, and there is no public 1.x to find.
 That is stated here rather than left as a puzzle, because a missing
 major version otherwise reads as a mistake.
 
-## Why a pre-release tag rather than 0.x
+## What a release promises
 
-Both conventions communicate instability. `0.x` is the usual Rust
-choice; `2.0.0-alpha.N` was chosen here because the alternative would
-have meant two numbering systems at once — a project describing itself
-as "2.x" whose crates say `0.0.1` and whose roadmap points at "1.0". A
-reader had no way to tell which number was the answer.
+That it builds, passes the full gate, and is described. Every release
+is cut from a green `main`; its notes are its section of the
+[changelog](../CHANGELOG.md); and any change to L0 matching semantics,
+margin computation or the event schema is called out there.
 
-Cargo's pre-release semantics are also the behaviour we want.
-`2.0.0-alpha.1 < 2.0.0`, and `cargo add oq-core` will not select a
-pre-release unless asked. Software that changes APIs without notice
-should require an explicit request, and this makes that the default
-rather than a warning in a README.
+It does not promise API stability. Any public API may change from one
+release to the next, without a deprecation period, until the
+[roadmap](ROADMAP.md#api-stability)'s API-stability milestone is
+reached. That commitment is a milestone the documentation will
+announce, not something read off the version number — so a reader does
+not have to decode digits to learn it.
 
-## What each stage promises
-
-| Stage | Promise |
-|---|---|
-| `2.0.0-alpha.N` | Nothing. Any API may change in any release. Changes appear in the [changelog](../CHANGELOG.md); there is no deprecation period |
-| `2.0.0-beta.N` | APIs documented and unlikely to move, but breaking changes are still allowed and will be called out |
-| `2.0.0` | Public crate APIs and the Python binding surface are stable. Breaking changes require a major version |
-
-Reaching `2.0.0` is a commitment, not a feature count. Its conditions
-are in the [roadmap](ROADMAP.md#road-to-20).
+Earlier drafts of this page used `2.0.0-alpha.N` for exactly that
+signal. It was dropped on 2026-10-01 for a plain sequence: one scheme
+the project actually cuts releases under beats a richer one it never
+did. The single pre-release ever published, PyPI `2.0.0a1`
+(2026-08-18), sorts before `2.0.0` and stays where it is.
 
 ## Things that version separately, on purpose
 
@@ -84,7 +82,8 @@ format version says what a file on disk contains.
 
 | Artifact | Registry | State |
 |---|---|---|
-| `openquanter` (Python) | [PyPI](https://pypi.org/project/openquanter/) | Published, `2.0.0a1` |
+| Release notes, Linux binaries | [GitHub Releases](https://github.com/openquanter/openquanter/releases) | One per tag, from `2.0.0` |
+| `openquanter` (Python) | [PyPI](https://pypi.org/project/openquanter/) | Published by the release workflow from `2.0.0`; `2.0.0a1` was uploaded by hand |
 | `oq-*` (Rust) | crates.io | Names reserved, nothing published |
 
 The Python package leads, and the Rust crates trail on purpose. A binding
@@ -96,9 +95,9 @@ about to change under them, and a version yanked from crates.io is still a
 version somebody built against.
 
 **When the crates go up.** Not on a date. The condition is the one this
-section already gives: the workspace's types stop moving. That is what
-2.0 means here — the roadmap puts API stabilisation after M3 and after
-external adoption — so the crates publish when the API they expose is
+section already gives: the workspace's types stop moving. That is the
+roadmap's API-stability milestone — it puts API stabilisation after M3
+and after external adoption — so the crates publish when the API they expose is
 one somebody can build against without being moved off it. Until then
 the install path is `git clone`, and
 [Quickstart](QUICKSTART.md#1-build) says so rather than offering a
@@ -109,10 +108,11 @@ the quickstart listed five `cargo install` lines as the first thing to
 do, and a reader following the quickstart got placeholders and no
 error. Two documents, opposite claims about the same fact.
 
-Note that a PyPI version cannot be re-uploaded either. `2.0.0a1` is
+Note that a PyPI version cannot be re-uploaded either. Every version is
 permanent, which is why the metadata that ships with it — the description,
 the README, the classifiers — is checked before the upload rather than
-corrected after.
+corrected after, and why the release workflow builds and tests the wheels
+before anything is published.
 
 ## Changing the version
 
@@ -120,3 +120,21 @@ Edit `[workspace.package].version` and the versions in
 `[workspace.dependencies]` in the root `Cargo.toml`. Nothing else. If
 you find yourself editing a version in `crates/*/Cargo.toml`, something
 has drifted back and should be pointed at the workspace again.
+
+## Cutting a release
+
+1. In a pull request: set the version as above, and rename the
+   changelog's `Unreleased` heading to `X.Y.Z — <date>` in both languages,
+   opening a new empty `Unreleased` above it.
+2. Merge it, then tag that commit on `main` and push the tag:
+   `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+3. `.github/workflows/release.yml` does the rest, and refuses if any step
+   disagrees: the tag must equal the workspace version, the commit must be
+   on `main`, the full gate must pass, and the changelog must have a
+   section for the version. It then builds the Linux binaries and the
+   wheels, creates the GitHub Release with that section as its notes and
+   the binaries and checksums attached, and publishes the wheels to PyPI
+   by trusted publishing — no token is stored anywhere.
+
+A tag that fails the workflow publishes nothing. Fix it on `main` and cut
+the next number; a version number, once tagged, is not reused.

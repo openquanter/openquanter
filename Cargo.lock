@@ -898,7 +898,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "oq-backtest"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-core",
  "oq-engine",
@@ -910,15 +910,15 @@ dependencies = [
 
 [[package]]
 name = "oq-book"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 
 [[package]]
 name = "oq-cli"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 
 [[package]]
 name = "oq-core"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-engine",
  "oq-journal",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "oq-data"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "oq-engine"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-book",
  "oq-types",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "oq-env"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-backtest",
  "oq-core",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "oq-examples"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "criterion",
  "oq-backtest",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "oq-features"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-engine",
  "oq-strategy",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "oq-gateway"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "ed25519-dalek",
  "k256",
@@ -1000,11 +1000,11 @@ dependencies = [
 
 [[package]]
 name = "oq-hash"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 
 [[package]]
 name = "oq-ingest"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-backtest",
  "oq-data",
@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "oq-journal"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-hash",
  "oq-types",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "oq-l2feed"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "libc",
  "oq-book",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "oq-live"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-core",
  "oq-data",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "oq-margin"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-types",
  "proptest",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "oq-parity"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-data",
  "oq-engine",
@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "oq-py"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-backtest",
  "oq-data",
@@ -1090,22 +1090,22 @@ dependencies = [
 
 [[package]]
 name = "oq-risk"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-types",
 ]
 
 [[package]]
 name = "oq-sim"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 
 [[package]]
 name = "oq-stats"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 
 [[package]]
 name = "oq-strategy"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 dependencies = [
  "oq-engine",
  "oq-types",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "oq-types"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 
 [[package]]
 name = "parquet"

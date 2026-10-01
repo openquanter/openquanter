@@ -1,0 +1,162 @@
+name: Release
+
+# A tag `vX.Y.Z` on `main` becomes a GitHub Release and a PyPI upload.
+#
+# Pushing the tag is the whole of the manual step; see
+# docs/VERSIONING.md#cutting-a-release. Every check below refuses rather
+# than guesses, because both destinations are permanent: a PyPI version
+# cannot be uploaded twice, and a release that went out wrong is still a
+# release somebody downloaded.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: The tag names this commit's version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        name: Tag, workspace version, main and changelog agree
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match the workspace version $version"
+            exit 1
+          fi
+          # Released from main only: a tag on a branch would publish code
+          # that never passed review there.
+          git fetch -q origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$tag is not on main"
+            exit 1
+          fi
+          if ! grep -q "^## ${version} " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## ${version} — <date>' section"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  gate:
+    name: The full gate, on the tagged commit
+    needs: tag
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  wheels:
+    name: Wheels
+    needs: tag
+    uses: ./.github/workflows/wheels.yml
+
+  sdist:
+    name: Source distribution
+    needs: tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --manifest-path crates/oq-py/Cargo.toml --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  binaries:
+    name: Binaries ${{ matrix.target }}
+    needs: tag
+    # 22.04 rather than latest: a binary links against the runner's glibc,
+    # and the older one runs on more hosts than the newer one does.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build every command-line tool
+        run: cargo build --release --locked --workspace --exclude oq-py --bins
+      - name: Package with checksums
+        run: |
+          name="openquanter-v${{ needs.tag.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "$name"
+          find target/release -maxdepth 1 -type f -perm -u+x -name 'oq*' -exec cp {} "$name/" \;
+          cp LICENSE README.md CHANGELOG.md "$name/"
+          ls "$name"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: openquanter-v*.tar.gz*
+
+  github:
+    name: GitHub Release
+    needs: [tag, gate, wheels, sdist, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Notes from the changelog
+        run: |
+          v="${{ needs.tag.outputs.version }}"
+          # The section's body, up to the next release heading.
+          awk -v v="$v" '
+            $0 ~ "^## " v " " { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "::error::empty changelog section for $v"; exit 1; }
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "OpenQuanter $GITHUB_REF_NAME" --notes-file notes.md \
+            artifacts/openquanter-v*.tar.gz artifacts/openquanter-v*.tar.gz.sha256 \
+            artifacts/*.whl artifacts/openquanter-[0-9]*.tar.gz
+
+  pypi:
+    name: PyPI
+    needs: [tag, gate, wheels, sdist, github]
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI accepts this job's short-lived OIDC token
+    # because the project names this repository, this workflow file and
+    # this environment. No PyPI token is stored anywhere.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/openquanter/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheel-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          name: sdist
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

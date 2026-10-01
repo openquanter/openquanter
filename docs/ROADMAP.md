@@ -8,8 +8,8 @@ the live run, accounted for. [Why that is the goal](WHY.md), and what the
 predecessor hit that made it the goal, is a separate document; this one is
 about the order of the work.
 
-This roadmap describes the path from where the project is today to a 2.0
-release, and the research directions beyond it. It is organized by
+This roadmap describes the path from where the project is today to API
+stability, and the research directions beyond it. It is organized by
 **milestone**, not by date. Milestones have **entry triggers** and **exit
 gates**; work does not start because a calendar says so, and does not finish
 because someone says it feels done.
@@ -49,7 +49,7 @@ commitments.
 | **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Mostly built, entry triggers unmet** |
 | **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered, and further along than "a first L1 exists": L1 is built with latency as distributions, L2 measures both the queue and the taker's walk from a reconstructed book, and a backtest reaches it from a captured archive. What is left is calibration against recorded fills, which is blocked on the fills M3's trigger asks for, and the probabilistic queue model that the stated order puts after it. Its depth requirement was a bare "6 months" with no argument behind it; now stated by what the data is for |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
-| **2.0** | API stabilization and semantic versioning | — | After M3 + external adoption |
+| **API stability** | API stabilization and semantic versioning | — | After M3 + external adoption |
 
 "Largely landed" on M0 and M1 means most of the scope is built and tested,
 not that the exit gate has passed. As of the latest revision: the
@@ -132,7 +132,7 @@ input this project cannot reach, the second has not been written.
 | Capture | Archival and verification (`oq-merge`, `oq-resequence`) | Built |
 | Statistics | DSR, PBO/CSCV, trial registry | Built |
 | Simulation | Scenario catalogue (7 entries, with reproductions) | Built |
-| Release | PyPI `openquanter` alpha | Published `2.0.0a1`, four-platform wheels |
+| Release | GitHub Releases and PyPI from a tag | `release.yml`: a `vX.Y.Z` tag on `main` builds Linux binaries and four-platform wheels, publishes the release and the wheels; `2.0.0a1` was the hand-uploaded predecessor |
 
 ### M1 — Deterministic core
 
@@ -319,7 +319,7 @@ depends on the invariants established here.
 - **G2** — parity harness demonstrates trade-by-trade equality with relative
   P&L error ≤ 1e-6 against a reference implementation run.
 - Property test suite green, including margin invariants.
-- **First public preview release** — a `2.0.0-alpha.N` tag, with sample data and one example
+- **First public release** — a `vX.Y.Z` tag, with sample data and one example
   strategy.
 
 ---
@@ -610,9 +610,12 @@ after the model's training cutoff.
 
 ---
 
-## Road to 2.0
+## API stability
 
-2.0 is an **API stability commitment**, not a feature count. It requires:
+API stability is a **commitment**, not a feature count, and not a version
+number: releases are numbered in plain sequence (see
+[Versioning](VERSIONING.md)), and this milestone is announced when it is met.
+It requires:
 
 - M3 complete, with the framework running live somewhere other than the
   maintainers' machines.
@@ -633,7 +636,7 @@ after the model's training cutoff.
 | Track | Cadence | Contents |
 |---|---|---|
 | `main` | Continuous | Always green; property tests and goldens gate every merge |
-| Preview `2.0.0-alpha.N` / `-beta.N` | Per milestone | Tagged at each milestone exit gate |
+| Release `vX.Y.Z` | When `main` has something worth shipping | A tag on a green `main`; notes are the changelog section |
 | Patch | As needed | Correctness fixes; never silently changes engine semantics |
 
 Any change to L0 matching semantics, margin computation, or the event schema
@@ -687,4 +690,4 @@ contributions right now are, in order:
 4. Documentation and translation.
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md). Support is best-effort; there is no
-SLA before 2.0.
+SLA before the API-stability milestone.

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs this same gate on the tagged commit.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
