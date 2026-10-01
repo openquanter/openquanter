@@ -108,7 +108,10 @@ impl Belief {
         // in the right direction. A fill record names a client id and a
         // quantity; the direction lives in the submission it answers.
         let mut submitted: HashMap<String, (Side, bool, String)> = HashMap::new();
-        let mut accepted: Vec<String> = Vec::new();
+        // A set: the order it was accepted in is not kept (resting is
+        // sorted at the end), and membership was a linear scan per
+        // acceptance, which made a long session's replay quadratic.
+        let mut accepted: HashSet<String> = HashSet::new();
         let mut filled: HashMap<String, i64> = HashMap::new();
         let mut withdrawn: HashSet<String> = HashSet::new();
         let mut ordered: Vec<i64> = Vec::new();
@@ -184,9 +187,7 @@ impl Belief {
                 }
                 Some(Record::Outcome { client_id, tag, .. }) => match tag {
                     OutcomeTag::Accepted => {
-                        if !accepted.contains(&client_id) {
-                            accepted.push(client_id);
-                        }
+                        accepted.insert(client_id);
                     }
                     // Rejected: it never existed. Unknown: nobody knows,
                     // and a belief that listed it as resting would be
