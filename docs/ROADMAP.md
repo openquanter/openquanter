@@ -139,7 +139,7 @@ input this project cannot reach, the second has not been written.
 | Theme | Item | Status |
 |---|---|---|
 | Types | `oq-types` fixed point, typestate order and position machines | Built |
-| Journal | mmap append log, snapshots, replay, torn-tail tolerance | Built |
+| Journal | mmap append log, snapshots, replay, torn-tail tolerance | Built — the snapshot store is the primitive; nothing outside `oq-journal` writes one yet, because the kernel does not serialise its state |
 | Core | Sequencer, deterministic kernel, injected clock | Built |
 | Core | **Sharding by instrument** | Built — `oq_core::Shards`. The requirement reads as a performance decision and is also an accounting one: a balance two instruments draw on **is** shared mutable state, so "shares nothing" and "one balance behind several positions" cannot both hold. Venues have both arrangements and so does this: cross margin is one kernel with several holdings and cannot be sharded by construction; isolated margin is one kernel each, which is what FR-CORE-6 describes. Events route by instrument, an unnamed one reaches a lone shard and is refused past that, and an instrument no shard holds is refused rather than dropped. No threads: FR-CORE-1 forbids the core from spawning any and a scheduler-dependent result would not reproduce from `(journal, seed, commit)`. Running shards on threads is the host's decision, safe because they share nothing — and a test asserts interleaving them changes no fingerprint, which is the basis for it |
 | Matching | L0 tick replay, frozen as the regression anchor | Built |
@@ -186,7 +186,7 @@ input this project cannot reach, the second has not been written.
 | Gateway | **Broker/referral prefix scheme** | Built — `broker::IdScheme` composes ids carrying a venue-issued code, kept separate from the ownership prefix because they answer different questions |
 | Risk | RiskGate: pre-trade checks, kill switch, startup reconciliation | Built |
 | Risk | **Limit changes journalled as auditable events** | Built — `VersionedLimits` records which field moved and from what; a no-op does not advance the version |
-| Live | Process assembly, snapshot recovery | Built |
+| Live | Process assembly, snapshot recovery | Built — recovery starts from the venue's account snapshot and asks the venue about every order the journal leaves unresolved; positions are not rebuilt from the journal, by design (`recovery.rs`) |
 | Live | **Books kept by the kernel** (one implementation for live and backtest) | Built |
 | Live | **A strategy learns whether the venue took its order** | Built — `Strategy::on_placed`, called from the backtest loop *and* the live trader, so a strategy written against one runs on the other |
 | Live | **A runnable strategy against a venue** | Built — `oq-live`'s `grid_live` example; `observe` sends nothing and `probe` is a diagnostic, so before it the repository had no way to run a strategy on a venue at all |

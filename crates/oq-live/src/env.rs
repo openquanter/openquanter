@@ -88,9 +88,10 @@ pub trait Environment {
     /// Open the journal at `path` for appending.
     ///
     /// `EveryRecord`, which is the policy the record-before-send
-    /// ordering needs: what is written here is decisions — a placement,
-    /// a withdrawal, a fill — not market data, so the cost is a device
-    /// round trip per order rather than per tick. `EveryRecordNoFsync`
+    /// ordering needs. It applies to every record, and the session also
+    /// writes one `Tick` per aggregation window, so the cost is a device
+    /// round trip per decision — a placement, a withdrawal, a fill — and
+    /// one per window as well, not per order alone. `EveryRecordNoFsync`
     /// survives a process crash and not a machine one, and the failure
     /// the ordering exists to rule out is a live order this journal has
     /// never heard of: a power loss between the write and the venue's
