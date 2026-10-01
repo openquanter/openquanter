@@ -474,6 +474,16 @@ as *it is resting* believes it holds exposure it does not have.
   against a venue reading has to know which run the reading is of;
   `to_record` stamps a time on the journal's final state rather than
   rewinding to one.
+- **Fill deduplication remembers weeks, not the whole run.** *Changes
+  behaviour.* Both sets of books kept every trade id they had booked, so
+  a long-running process grew without end. Each now forgets ids more
+  than fifty million below the newest of their symbol — about two weeks
+  of BTCUSDT — and keeps the pair key (trade id with side or client id),
+  so both sides of a match between two systems on one account are still
+  booked. A fill below that floor is refused as stale rather than
+  booked, because a redelivery that old can no longer be told from a
+  first delivery; it is counted as `oq_stale_fills_total`. `booked()`
+  is a run counter now, not the set's size.
 
 ### Fees
 

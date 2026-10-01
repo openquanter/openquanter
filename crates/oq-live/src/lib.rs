@@ -43,6 +43,7 @@ pub mod book;
 pub mod books;
 pub mod clock;
 pub mod control;
+mod dedup;
 pub mod env;
 pub mod feed;
 pub mod funding;

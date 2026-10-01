@@ -1263,6 +1263,21 @@ where
                             metrics.fills = metrics.fills.saturating_sub(1);
                             println!("books            trade {} already booked", fill.trade.0);
                         }
+                        // Older than the books remember. Refused because
+                        // a redelivery this old cannot be told from a
+                        // first delivery; said out loud because if it
+                        // was a first delivery, the position here is now
+                        // smaller than the account's and the next
+                        // reconciliation will say so.
+                        crate::books::Booked::Stale => {
+                            metrics.stale_fills += 1;
+                            metrics.fills = metrics.fills.saturating_sub(1);
+                            println!(
+                                "books            trade {} is below the deduplication window; \
+                                 not booked, because it cannot be told from a redelivery",
+                                fill.trade.0
+                            );
+                        }
                         crate::books::Booked::Unidentifiable => {
                             metrics.unidentifiable_fills += 1;
                             metrics.fills = metrics.fills.saturating_sub(1);
@@ -1941,6 +1956,10 @@ where
     println!(
         "duplicates       {} redelivered fills discarded",
         trader.duplicates()
+    );
+    println!(
+        "stale fills      {} below the deduplication window, not booked",
+        metrics.stale_fills
     );
     // Above zero means the account is shared. Worth reading here rather
     // than inferring it later from a limit that filled up while this
