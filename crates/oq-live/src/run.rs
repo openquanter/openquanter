@@ -3879,6 +3879,23 @@ fn status_reply<S: Strategy>(v: &StatusView<'_, S>) -> String {
         .uint("max_rate", u64::from(limits.max_rate))
         .int("rate_window_ns", limits.rate_window.0)
         .end_object();
+    // The venue's count of its own request budget, beside the limits
+    // this process sets itself. Shown, not acted on: the venue's 429 is
+    // still what stops requests, and this is the number that shows one
+    // coming. Null where the venue does not report it, or has not yet.
+    match v.trader.venue().request_weight() {
+        Some(w) => {
+            j.field("request_weight")
+                .begin_object()
+                .uint("used", w.used)
+                .str("window", w.window)
+                .int("read_at_ms", w.read_at_ms)
+                .end_object();
+        }
+        None => {
+            j.null("request_weight");
+        }
+    }
     j.field("counters")
         .begin_object()
         .uint("sent", v.metrics.sent)

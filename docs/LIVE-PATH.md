@@ -330,8 +330,11 @@ bans of *"2 minutes to 3 days"*. Hummingbot's throttler ignores all three
 headers; the other two projects have no rate limiting at all.
 
 *Status: partly built.* 429 is honoured with `Retry-After` and 418 with a
-backoff. `X-MBX-USED-WEIGHT` is not read yet, so the remaining weight is
-not visible.
+backoff. `X-MBX-USED-WEIGHT-1M` is read from every response, refusals
+included, and shown in `oq-trade`'s `status` answer as `request_weight`
+— on Binance and Aster alike, since both are served from one table. It
+is not yet used to throttle: the loop is open, and the 429 is still what
+stops requests.
 
 ### L13 — The clock is asymmetric, so run slow
 
