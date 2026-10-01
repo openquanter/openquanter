@@ -21,9 +21,14 @@ oq-types.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+oq-journal.workspace = true
 
 [[bench]]
 name = "backtest"
+harness = false
+
+[[bench]]
+name = "engine"
 harness = false
 
 [lints]

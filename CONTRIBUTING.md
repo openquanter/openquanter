@@ -48,6 +48,20 @@ present.
 Documentation is authored in English and mirrored in Chinese (`*.zh-CN.md`).
 English is the source of truth; update both sides in the same pull request.
 
+A pull request that claims to make something faster shows the before and
+after, measured on one machine:
+
+```bash
+git switch main && scripts/bench-compare.sh save before
+git switch your-branch && scripts/bench-compare.sh compare before
+```
+
+CI's throughput check is a floor, not a regression gate — shared runners
+vary too much for one run to be compared with another — so the
+comparison is yours to run and to paste into the description.
+`crates/oq-examples/benches/engine.rs` measures each layer on its own;
+`backtest.rs` measures the whole loop.
+
 ## Branches and merging
 
 Trunk-based: `main` is always releasable, and branches are short-lived.
