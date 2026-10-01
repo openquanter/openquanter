@@ -562,26 +562,32 @@ impl L1Engine {
         // 2. Queues deplete against the volume that traded at or through
         //    each order's price. A price that gapped clean through
         //    empties the queue outright: everything ahead traded.
+        //    Filtered in place: taking the vector and pushing the
+        //    survivors back left it with no capacity, so a book of
+        //    resting orders paid a fresh run of reallocations on every
+        //    observation -- most of what a deep L1 book cost per tick.
+        //    Order is kept either way, for the survivors and for the
+        //    promoted.
         let mut promoted: Vec<Working> = Vec::new();
-        let queue_snapshot = core::mem::take(&mut self.queued);
-        for mut q in queue_snapshot {
+        self.queued.retain_mut(|q| {
             let Some(price) = q.order.price() else {
                 promoted.push(q.order);
-                continue;
+                return false;
             };
             if gapped_through(tick, q.order.side(), price) {
                 promoted.push(q.order);
-                continue;
+                return false;
             }
             if touched(tick, price) {
                 q.remaining -= traded;
             }
             if q.remaining <= 0 {
                 promoted.push(q.order);
+                false
             } else {
-                self.queued.push(q);
+                true
             }
-        }
+        });
         for order in promoted {
             self.inner.submit(order);
         }
