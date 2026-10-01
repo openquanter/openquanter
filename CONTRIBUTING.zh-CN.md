@@ -41,6 +41,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 文档以英文撰写并提供中文对照（`*.zh-CN.md`）。英文为准，双语在同一个 PR 内同步
 更新。
 
+声称让某处变快的 PR，要附上同一台机器上测得的前后对比：
+
+```bash
+git switch main && scripts/bench-compare.sh save before
+git switch your-branch && scripts/bench-compare.sh compare before
+```
+
+CI 的吞吐检查是一条下限，不是回归门禁——共享 runner 的波动太大，两次运行之间没法
+比较——所以对比要你自己跑，贴进 PR 描述。`crates/oq-examples/benches/engine.rs`
+逐层测量；`backtest.rs` 测整个循环。
+
 ## 分支与合并
 
 主干开发：`main` 始终可发布，分支保持短命。
