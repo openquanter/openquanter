@@ -16,7 +16,8 @@
 券商接入或云托管的用户——那几样和可审计性直接冲突。理由和取舍见
 [为什么有 OpenQuanter](docs/WHY.zh-CN.md)。
 
-[English](README.md) · [中文](README.zh-CN.md)
+[English](README.md) · [中文](README.zh-CN.md) · 官网：[openquanter.com](https://openquanter.com/zh/) ·
+控制台：[Quanterdeck](https://github.com/openquanter/quanterdeck)
 
 > ⚠️ 早期开发阶段。到达 API 稳定里程碑之前 API 不保证稳定。本项目不构成投资建议，使用风险自负。
 
@@ -336,6 +337,11 @@ pip install openquanter
 wheel。它们是 `abi3` 的，因此一个 wheel 覆盖 3.9 及以后的所有解释器，安装时
 不需要 Rust 工具链。它能做什么，[包页面上有说明](https://pypi.org/project/openquanter/)：
 过拟合统计量，以及一个由 Rust 引擎驱动的 Python 策略。
+
+每个 [GitHub Release](https://github.com/openquanter/openquanter/releases) 还附带
+命令行工具——`oq-trade`、`oq-recon`、`oq-capture`、`oq-parity` 等——提供 Linux
+x86-64 与 aarch64 两个版本，每个压缩包附 SHA-256。想在浏览器里查看和运维正在运行的
+交易进程，用配套的自托管控制台 [Quanterdeck](https://github.com/openquanter/quanterdeck)。
 
 Rust crate 尚未发布。等 API 不再变动时会发；在那之前 `cargo add` 会把人钉在一个
 即将在他们脚下改变的版本上，而一个从 crates.io 撤下的版本，仍然是有人据以构建过
