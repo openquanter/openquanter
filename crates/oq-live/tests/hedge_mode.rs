@@ -76,7 +76,7 @@ fn a_hedged_accounts_two_legs_do_not_cancel() {
     b.adopt(Side::Buy, QtyLots(20), PriceTicks(6_837_492), Nanos(1));
     b.adopt(Side::Sell, QtyLots(20), PriceTicks(6_837_336), Nanos(2));
 
-    let ctx = b.context(tick());
+    let ctx = b.context(tick(), 0);
     assert_eq!(ctx.position, QtyLots(20), "the long is still there");
     // Signed, so the two are distinguishable even at equal size — which
     // is the case that netting turns into nothing.
@@ -131,7 +131,7 @@ fn a_netting_accounts_two_legs_cancel() {
     b.adopt(Side::Sell, QtyLots(20), PriceTicks(6_837_336), Nanos(2));
 
     assert_eq!(
-        b.context(tick()).position,
+        b.context(tick(), 0).position,
         QtyLots(0),
         "netted, because that is the mode"
     );
