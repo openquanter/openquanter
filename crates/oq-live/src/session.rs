@@ -168,6 +168,9 @@ pub struct Session<E: Execution> {
     /// is a choice a caller should have to make rather than a default it
     /// falls into. `oq-trade` opens one unless told not to.
     journal: Option<oq_journal::Writer>,
+    /// Whether each decision is fsynced once written; see
+    /// `Environment::journal_syncs_decisions`.
+    sync_decisions: bool,
     /// Why the journal stopped taking records, once it has.
     journal_lost: Option<String>,
     /// Why the kill switch was tripped, from the first halt until a
@@ -251,6 +254,7 @@ impl<E: Execution> Session<E> {
         Ok(Self {
             submit_latency: Latency::new(),
             journal: None,
+            sync_decisions: false,
             journal_lost: None,
             halt_reason: None,
             venue,
@@ -309,7 +313,17 @@ impl<E: Execution> Session<E> {
     /// placement whose answer never arrived, asked after a restart
     /// instead of after a timeout.
     #[must_use]
-    pub fn journalling(mut self, journal: oq_journal::Writer) -> Self {
+    pub fn journalling(self, journal: oq_journal::Writer) -> Self {
+        self.journalling_with(journal, false)
+    }
+
+    /// [`Session::journalling`], fsyncing each decision once written
+    /// when `sync_decisions` is set — what a journal opened without a
+    /// per-record fsync needs to survive a power loss. Observations are
+    /// left to the next decision's fsync.
+    #[must_use]
+    pub fn journalling_with(mut self, journal: oq_journal::Writer, sync_decisions: bool) -> Self {
+        self.sync_decisions = sync_decisions;
         let start = Record::SessionStart {
             prefix: self.prefix.clone(),
             symbol: self.symbol.clone(),
@@ -321,7 +335,8 @@ impl<E: Execution> Session<E> {
         self
     }
 
-    /// Append one record, if journalling, flushing before returning.
+    /// Append one record, if journalling, flushing — and for a decision
+    /// in a durable session, fsyncing — before returning.
     ///
     /// Whether the record is now in the file; always true without a
     /// journal. A failure is kept, not just printed: the first one ends
@@ -344,9 +359,14 @@ impl<E: Execution> Session<E> {
         // Flushed here rather than on drop: the whole point is that the
         // record exists before the order does, and a record sitting in a
         // buffer does not exist to anything that reads the file.
-        let written = journal
-            .append(record.kind(), &payload)
-            .and_then(|_| journal.flush());
+        let sync = self.sync_decisions && !record.is_observation();
+        let written = journal.append(record.kind(), &payload).and_then(|_| {
+            if sync {
+                journal.sync()
+            } else {
+                journal.flush()
+            }
+        });
         match written {
             Ok(()) => true,
             Err(e) => {

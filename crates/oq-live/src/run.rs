@@ -746,7 +746,7 @@ where
         match env.open_journal(std::path::Path::new(&journal_path)) {
             Ok(w) => {
                 println!("journal          {journal_path}");
-                session.journalling(w)
+                session.journalling_with(w, env.journal_syncs_decisions())
             }
             Err(e) => {
                 eprintln!("journal          FAILED to open {journal_path}: {e}");

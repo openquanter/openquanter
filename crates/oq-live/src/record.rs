@@ -243,6 +243,32 @@ pub enum Record {
 }
 
 impl Record {
+    /// Whether this records what was seen rather than what was decided
+    /// or what the venue did.
+    ///
+    /// An observation lost to a power cut leaves a gap in a replay; a
+    /// decision lost to one can leave a live order nobody can ask about.
+    /// So only decisions are made durable one by one (see
+    /// `Environment::journal_syncs_decisions`).
+    ///
+    /// Exhaustive on purpose: a new record kind has to be put on one
+    /// side or the other, rather than defaulting to the cheap one.
+    #[must_use]
+    pub const fn is_observation(&self) -> bool {
+        match self {
+            Self::Tick { .. } | Self::Waiting { .. } => true,
+            Self::SessionStart { .. }
+            | Self::Submitted { .. }
+            | Self::Outcome { .. }
+            | Self::Cancelled { .. }
+            | Self::Fill { .. }
+            | Self::Refused { .. }
+            | Self::Reconciled { .. }
+            | Self::Operator { .. }
+            | Self::Funding { .. } => false,
+        }
+    }
+
     /// The frame kind this record is written under.
     #[must_use]
     pub const fn kind(&self) -> u16 {
