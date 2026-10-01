@@ -551,6 +551,41 @@ mod tests {
 /// hours with an ESTABLISHED socket and an empty file.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The largest message a connection will assemble, in bytes.
+///
+/// `tungstenite` defaults to 64 MiB, a figure chosen for any server on
+/// the internet rather than for a venue's market data. What these
+/// connections carry is small and measured: on a Binance USDT-M capture
+/// the largest `depth@0ms` message across two hours of 135,000 records
+/// each was 52 KiB, trades and `bookTicker` stay under 200 bytes, and the
+/// largest depth message ever seen is a few hundred kilobytes (see
+/// `frame::MAX_FRAME_LEN`). Binance's book snapshot comes over REST;
+/// OKX's `books` opens with a 400-level snapshot on the socket, which is
+/// tens of kilobytes.
+///
+/// Past the limit the read fails, and that failure takes the path every
+/// broken connection takes: a gap marker and a reconnect. That is the
+/// right reading of a message no venue sends — something is wrong with
+/// the peer, and the archive should say we stopped listening rather
+/// than hold a 60 MiB record.
+pub const MAX_MESSAGE_SIZE: usize = 8 << 20;
+
+/// The largest single frame, in bytes.
+///
+/// The venues captured here send every message as one frame, so this is
+/// the bound that applies in practice: forty times the largest depth
+/// message measured. The message bound is four times larger, the same
+/// ratio as the library's defaults, so a venue that starts fragmenting
+/// is not cut off by this choice.
+pub const MAX_FRAME_SIZE: usize = 2 << 20;
+
+/// The limits every connection opened here reads under.
+fn ws_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_FRAME_SIZE))
+}
+
 /// Open a WebSocket with every step bounded by `timeout`.
 ///
 /// The TCP connect uses `connect_timeout` per resolved address, and the
@@ -616,7 +651,7 @@ pub fn connect_bounded(
     stream.set_write_timeout(Some(timeout))?;
     let _ = stream.set_nodelay(true);
 
-    match tungstenite::client_tls(request, stream) {
+    match tungstenite::client_tls_with_config(request, stream, Some(ws_config()), None) {
         Ok((socket, _response)) => Ok(socket),
         Err(tungstenite::HandshakeError::Failure(e)) => Err(e),
         // A blocking socket interrupts the handshake only when a read or
@@ -659,6 +694,55 @@ mod bounded_connect {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A peer that completes the WebSocket handshake, sends one binary
+    /// message of `len` bytes as a single frame, and waits to be hung up
+    /// on.
+    fn peer_sending(len: usize) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let served = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().expect("accept");
+            let mut ws = tungstenite::accept(conn).expect("handshake");
+            // A send to a client that has already hung up is not this
+            // test's concern; the client's reading of it is.
+            let _ = ws.send(tungstenite::Message::Binary(vec![b'x'; len].into()));
+            while ws.read().is_ok() {}
+        });
+        (port, served)
+    }
+
+    fn connect_and_read(port: u16) -> std::io::Result<Vec<u8>> {
+        use crate::session::{Connector, MessageSource};
+        let mut source =
+            super::WsConnector::from_url(format!("ws://127.0.0.1:{port}/"), Duration::from_secs(5))
+                .connect()
+                .expect("connected");
+        source.next_message()
+    }
+
+    /// A message well past anything a venue sends is a broken
+    /// connection, reported as one — not a WouldBlock the caller would
+    /// read as a quiet market, and not 64 MiB assembled in memory.
+    #[test]
+    fn an_oversized_message_ends_the_connection() {
+        let (port, served) = peer_sending(super::MAX_FRAME_SIZE + 1);
+        let e = connect_and_read(port).expect_err("refused");
+        assert_ne!(e.kind(), std::io::ErrorKind::WouldBlock, "{e}");
+        assert_ne!(e.kind(), std::io::ErrorKind::Interrupted, "{e}");
+        assert!(e.to_string().contains("too long"), "{e}");
+        served.join().expect("peer");
+    }
+
+    /// The limit sits far above what venues send: a message several
+    /// times the largest depth message on record arrives intact.
+    #[test]
+    fn a_large_but_plausible_message_is_read_whole() {
+        let (port, served) = peer_sending(512 << 10);
+        let got = connect_and_read(port).expect("read");
+        assert_eq!(got.len(), 512 << 10);
+        served.join().expect("peer");
     }
 
     #[test]
