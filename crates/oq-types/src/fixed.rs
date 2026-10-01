@@ -193,19 +193,6 @@ impl PriceTicks {
     pub const fn is_market(self) -> bool {
         self.0 == 0
     }
-
-    /// Notional value of `qty` at this price.
-    ///
-    /// Computed in `i128` and narrowed once: prices and quantities are
-    /// each comfortably inside `i64`, but their product at realistic
-    /// crypto prices and sizes is not.
-    #[must_use]
-    pub const fn notional(self, qty: QtyLots, lot_scale: i64, tick_scale: i64) -> Cash {
-        let ticks = self.0 as i128;
-        let lots = qty.0.saturating_abs() as i128;
-        let scaled = ticks * lots * tick_scale as i128 * lot_scale as i128 / CASH_SCALE as i128;
-        Cash(scaled as i64)
-    }
 }
 
 #[cfg(test)]
@@ -247,16 +234,6 @@ mod tests {
     fn zero_price_is_the_market_sentinel() {
         assert!(PriceTicks::ZERO.is_market());
         assert!(!PriceTicks(1).is_market());
-    }
-
-    #[test]
-    fn notional_does_not_overflow_at_crypto_scale() {
-        // 120_000.00 USDT, 100 BTC, tick 0.01 (1e6 at CASH_SCALE),
-        // lot 0.001 -> the intermediate product exceeds i64.
-        let price = PriceTicks(12_000_000);
-        let qty = QtyLots(100_000);
-        let value = price.notional(qty, 100_000, 1_000_000);
-        assert!(value.0 > 0, "notional must stay positive, got {value:?}");
     }
 }
 
