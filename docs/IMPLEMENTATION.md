@@ -96,7 +96,8 @@ axes. L0 semantics are frozen after release and act as the regression anchor.
 `oq-margin` is a separate module, not a field on the account object: tiered
 maintenance-margin tables versioned bitemporally (exchange rules change and old
 backtests must use old rules), per-tick usage and liquidation price,
-liquidation orders that go through the matching engine like any other order,
+liquidation settled at the bankruptcy price with the remainder forfeited to the
+venue's insurance fund,
 and injectable funding-spike scenarios.
 
 Both matching and margin are pure functions covered by property tests:
@@ -457,7 +458,7 @@ which venue is being traded.
 | `oq-journal` | mmap journal, snapshots, replay, torn-tail tolerance | M1 |
 | `oq-core` | Sequencer, deterministic kernel, injected clock, sharding | M1 |
 | `oq-engine` | Matching: L0 (frozen anchor), L1, L2 | M1 / M4 |
-| `oq-margin` | Tiered maintenance margin, liquidation paths, liquidation orders, funding spikes | M1–M2 ★ |
+| `oq-margin` | Tiered maintenance margin, liquidation paths, bankruptcy-price settlement, funding spikes | M1–M2 ★ |
 | `oq-backtest` | Run scheduling, funding, accounting, exports, participation rate, fidelity report | M1 |
 | `oq-parity` | Trade-by-trade diff and difference attribution; baselines identified by the (commit, data hash, config hash) triple (D13) | M1 (built first) |
 | `oq-data` | Dual-timestamp Arrow layer, bitemporal reference data, strict as-of joins | M1–M2 |
@@ -598,7 +599,7 @@ does not belong on a shared or bandwidth-constrained link.
 | P1.3 | `oq-journal` | Append, snapshot, replay, torn-tail recovery all tested including crash injection |
 | P1.4 | `oq-core` | Sequencer plus kernel; determinism test replays a journal to identical output |
 | P1.5 | `oq-engine` L0 | Semantics specified in prose and tests; property invariants green |
-| P1.6 | `oq-margin` skeleton | Tier tables bitemporal; per-tick usage and liquidation price; liquidation order path |
+| P1.6 | `oq-margin` skeleton | Tier tables bitemporal; per-tick usage and liquidation price; bankruptcy-price settlement |
 | P1.7 | `oq-backtest` | End-to-end run on sample data with fidelity report |
 | P1.8 | `oq-sim` prototype | First three catalogue scenarios reproduce from seed |
 | P1.9 | Benchmarks in CI | **Landed.** `criterion` benches in `crates/oq-examples/benches/`, plus a CI job asserting a throughput floor. A floor rather than a tracked baseline, deliberately — see the [roadmap](ROADMAP.md#milestone-overview) |

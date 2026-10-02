@@ -149,13 +149,18 @@ impl DeviationReport {
                 overstated_by,
             } => format!(
                 "{}: LIQUIDATED {count}x, first at t={}; margin-free equity {:.2} vs real {:.2} \
-                 (overstated by {:.2}); {} fills in the margin-free run happened after the \
-                 account was already closed",
+                 (overstated by {:.2}); the venue kept {:.2} at the bankruptcy price; {} fills \
+                 in the margin-free run happened after the account was already closed",
                 self.strategy,
                 first_at.0,
                 self.ignored.final_equity.as_f64(),
                 self.enforced.final_equity.as_f64(),
                 overstated_by.as_f64(),
+                self.enforced
+                    .liquidations
+                    .iter()
+                    .fold(oq_types::Cash::ZERO, |sum, l| sum.add(l.forfeited))
+                    .as_f64(),
                 self.fills_after_first_liquidation(),
             ),
         }

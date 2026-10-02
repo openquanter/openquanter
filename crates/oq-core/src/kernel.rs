@@ -52,10 +52,19 @@ pub enum Output {
     /// path rather than only the outcome.
     Liquidated {
         at: Nanos,
+        /// The mark the account was found insolvent at.
         price: PriceTicks,
         /// The net exposure closed out.
         qty: QtyLots,
+        /// The account's balance after the venue settled it: zero, since
+        /// the close is at the bankruptcy price.
         equity: Cash,
+        /// What the account still had at the mark and the venue kept —
+        /// the gap between the mark and the bankruptcy price, which goes
+        /// to its insurance fund. Negative when the mark was already past
+        /// bankruptcy and the fund covered the deficit instead. Carried
+        /// on the last output of one liquidation; zero on the others.
+        forfeited: Cash,
         /// The holding it happened to.
         instrument: InstrumentId,
         /// Each leg as it was when it was closed, the short negative.
@@ -209,6 +218,15 @@ pub struct State {
     pub now: Nanos,
     pub enforce_liquidation: bool,
     pub matching: Matching,
+    /// Equity the venue kept at liquidation, net of deficits it covered.
+    ///
+    /// A crypto perpetual venue closes an insolvent account at its
+    /// bankruptcy price: the trader is left with nothing, and whatever
+    /// the mark would still have paid goes to the insurance fund. This is
+    /// that amount, summed over every liquidation, so the balance still
+    /// reconciles — starting balance, plus realized, plus funding, less
+    /// fees, less this.
+    pub forfeited: Cash,
 }
 
 impl Holding {
@@ -321,6 +339,7 @@ impl State {
             fees_missing: false,
             enforce_liquidation: true,
             matching: Matching::Simulated,
+            forfeited: Cash::ZERO,
         }
     }
 
@@ -822,14 +841,43 @@ impl State {
         )
     }
 
-    /// Close the position at `price` because the venue liquidated it.
+    /// Close the position because the venue liquidated it.
     ///
     /// With several holdings on one balance — cross margin — the venue
     /// closes every one of them, each at its own price. Closing only the
     /// first, at the price of whichever instrument happened to tick,
     /// left the rest open on an account the check had just found
     /// insolvent. One output per holding closed.
+    ///
+    /// # At the bankruptcy price, not the mark
+    ///
+    /// The positions are closed at the mark and then the account is
+    /// settled to zero: a crypto perpetual venue takes an insolvent
+    /// account over at the price where its equity is exhausted, so the
+    /// trader keeps nothing and the venue's insurance fund keeps the
+    /// difference — or covers it, when the price gapped past bankruptcy.
+    /// Closing at the mark and returning what was left handed the account
+    /// its remaining maintenance margin back, a free liquidation no venue
+    /// offers; and how the venue then executes the close is its fund's
+    /// risk, not the account's, so no fidelity tier changes this result.
     fn liquidate(&mut self, price: PriceTicks) -> Vec<Output> {
+        let mut out = self.close_all(price);
+        let forfeited = self.balance();
+        self.credit(forfeited.neg());
+        self.forfeited = self.forfeited.add(forfeited);
+        let equity = self.balance();
+        for o in &mut out {
+            if let Output::Liquidated { equity: e, .. } = o {
+                *e = equity;
+            }
+        }
+        if let Some(Output::Liquidated { forfeited: f, .. }) = out.last_mut() {
+            *f = forfeited;
+        }
+        out
+    }
+
+    fn close_all(&mut self, price: PriceTicks) -> Vec<Output> {
         if self.holdings.len() == 1 {
             return vec![self.liquidate_holding(0, price)];
         }
@@ -887,6 +935,7 @@ impl State {
             price,
             qty,
             equity,
+            forfeited: Cash::ZERO,
             instrument,
             long,
             short,
@@ -1271,7 +1320,10 @@ impl Kernel {
             // several instruments on one balance, the first holding
             // checked at whichever price just ticked was one position
             // judged at another market's price.
-            self.state.equity() < self.state.maintenance()
+            //
+            // At or below, as for a single holding: the venue liquidates
+            // once the requirement is reached, not only once it is passed.
+            self.state.equity() <= self.state.maintenance()
         } else {
             self.state
                 .position()
@@ -1407,6 +1459,7 @@ impl Kernel {
             realized: self.state.realized,
             funding: self.state.funding,
             fees: self.state.fees,
+            forfeited: self.state.forfeited,
             fees_known: self.state.fees_known(),
             equity: self.state.equity(),
             mark: self.state.holding().mark,
@@ -1466,6 +1519,8 @@ pub struct Summary {
     pub realized: Cash,
     pub funding: Cash,
     pub fees: Cash,
+    /// Equity the venue kept at liquidation; see `State::forfeited`.
+    pub forfeited: Cash,
     pub equity: Cash,
     pub mark: PriceTicks,
     pub now: Nanos,
@@ -1830,6 +1885,83 @@ mod tests {
             "expected a liquidation at {liq:?}, got {outs:?}"
         );
         assert_eq!(k.summary().qty, QtyLots::ZERO, "the venue closed it");
+    }
+
+    /// The venue keeps what the mark would still have paid.
+    ///
+    /// Closing at the mark and returning the rest handed an insolvent
+    /// account its remaining maintenance margin back — a free
+    /// liquidation. A perpetual venue closes at the bankruptcy price, so
+    /// the account ends at zero and the difference is the venue's.
+    #[test]
+    fn a_liquidated_account_keeps_nothing_the_mark_would_have_paid() {
+        let mut k = kernel(100);
+        k.apply(&tick(1, 1_200_000));
+        k.apply(&buy(1, 1_200_000, 10, 1));
+        k.apply(&tick(2, 1_200_000));
+        let liq = k
+            .state()
+            .position()
+            .liquidation_price(&table())
+            .expect("has one");
+        let s = k.summary();
+        // What closing at that mark would have left the account with.
+        let at_mark = s.balance.add(BTC.unrealized(s.entry, liq, s.qty));
+        assert!(
+            at_mark.0 > 0,
+            "a liquidation at the level leaves margin: {at_mark:?}"
+        );
+
+        let outs = k.apply(&tick(3, liq.0)).to_vec();
+        let Some(Output::Liquidated {
+            equity, forfeited, ..
+        }) = outs.iter().find(|o| matches!(o, Output::Liquidated { .. }))
+        else {
+            panic!("expected a liquidation, got {outs:?}");
+        };
+        let after = k.summary();
+        assert_eq!(after.balance, Cash::ZERO, "the account keeps nothing");
+        assert_eq!(*equity, Cash::ZERO);
+        assert_eq!(
+            *forfeited, at_mark,
+            "the venue keeps what the mark would have paid"
+        );
+        assert_eq!(after.forfeited, at_mark);
+        assert!(
+            after.balance <= at_mark,
+            "never more than settling at the mark"
+        );
+        // And the books still reconcile.
+        assert_eq!(
+            after.balance,
+            Cash::from_units(100)
+                .add(after.realized)
+                .add(after.funding)
+                .sub(after.fees)
+                .sub(after.forfeited)
+        );
+    }
+
+    /// A gap past the bankruptcy price is the venue's loss, not a debt.
+    #[test]
+    fn a_gap_past_bankruptcy_leaves_zero_rather_than_a_debt() {
+        let mut k = kernel(100);
+        k.apply(&tick(1, 1_200_000));
+        k.apply(&buy(1, 1_200_000, 10, 1));
+        k.apply(&tick(2, 1_200_000));
+        let s = k.summary();
+        let crash = PriceTicks(600_000);
+        let at_mark = s.balance.add(BTC.unrealized(s.entry, crash, s.qty));
+        assert!(at_mark.0 < 0, "the gap is past bankruptcy: {at_mark:?}");
+
+        k.apply(&tick(3, crash.0));
+        let after = k.summary();
+        assert_eq!(after.qty, QtyLots::ZERO);
+        assert_eq!(after.balance, Cash::ZERO, "the fund covers the deficit");
+        assert_eq!(
+            after.forfeited, at_mark,
+            "and the cover is recorded, negative"
+        );
     }
 
     #[test]

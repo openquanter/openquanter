@@ -40,21 +40,21 @@ within a run. `tail_divergence` does exactly this, and the result is a
 useful negative:
 
 ```
-tail divergence   paired over 460 return samples
-                  arms part at sample 459 of 460
+tail divergence   paired over 459 return samples
+                  arms part at sample 458 of 459
 
   quantile        enforced      margin-free     overstated by
-        1%        -14.6406%       -17.9768%         -3.3362%
-        5%         -4.3673%        -4.5896%         -0.2223%
-       10%         -1.2137%        -1.2300%         -0.0162%
-       25%         -0.0488%        -0.0488%         -0.0000%
+        1%        -14.6406%       -14.6406%          0.0000%
+        5%         -4.3673%        -4.3673%          0.0000%
+       10%         -1.2137%        -1.2137%          0.0000%
+       25%         -0.0488%        -0.0488%          0.0000%
 ```
 
-The arms part at sample 459 of 460 — which is to say, at the liquidation
-and not before. The paired quantiles are near-identical *by construction*,
-and the small numbers they show are not evidence that margin barely
-matters. In this very run the account ended at 61.53 while the margin-free
-arm claimed 20,908.11. The damage is entirely outside the paired region,
+The arms part at sample 458 of 459 — which is to say, at the liquidation
+and not before. The paired quantiles are identical *by construction*, and
+the zeros they show are not evidence that margin does not matter. In this
+very run the venue closed the account and it ended at 0.00 while the
+margin-free arm claimed 20,908.11. The damage is entirely outside the paired region,
 which is why `Fidelity::paired_until` is reported and why every paired
 statistic stops there rather than differencing two series that have
 stopped describing the same account.
@@ -79,16 +79,16 @@ strategy chosen because it is the clearest case, not a representative one:
 ```
   per-window return, by quantile
     quantile      enforced    margin-free       gap
-          5%       -97.71%          -2.84%     94.87%
-         10%       -96.77%          -2.06%     94.71%
-         25%       -94.91%          -1.28%     93.63%
+          5%      -100.00%          -2.84%     97.16%
+         10%      -100.00%          -2.06%     97.94%
+         25%      -100.00%          -1.28%     98.72%
          50%        -1.32%           0.43%      1.75%
          75%         0.41%          99.58%     99.18%
 ```
 
 Read the 5% row and the 50% row together. At the median the two arms
 agree to within 1.75 points: the overlay never bit, and a margin-free
-backtest was right. At the 5th percentile the account lost 97.71% and the
+backtest was right. At the 5th percentile the account lost everything and the
 margin-free backtest reported a loss of 2.84%.
 
 And then read the 5% row across, rather than down. The margin-free arm's
@@ -114,7 +114,7 @@ The conditional statistic is the one to quote alone:
 
 ```
   in the 12 windows that closed the account:
-    the account got               -96.23%
+    the account got              -100.00%
     the margin-free run said      599.89%
 ```
 
@@ -127,8 +127,8 @@ The mix-dependent numbers are still worth reporting, next to their mix:
 
 ```
   windows         40 (28 calm, 12 stressed by construction)
-  mean gap        208.83%   <- what a naive comparison reports
-  worst decile      61.0%   <- share of the total gap it carries
+  mean gap        209.97%   <- what a naive comparison reports
+  worst decile      60.8%   <- share of the total gap it carries
 ```
 
 ## What this does not establish
