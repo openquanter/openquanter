@@ -20,6 +20,15 @@
 
 ## 未发布
 
+### 变更
+
+- **扫描的 deflated Sharpe 按整个搜索计数，而不是一次扫描。** `sweep` 接收一个
+  `TrialRegistry` 并把每个候选都记进去，包括收益太少、无法打分的那些；最优配置按登记里的
+  全部试验 deflate。登记以试验账本的形式持久化（`oq_backtest::ledger`、
+  `TrialRegistry::to_ledger`/`from_ledger`），同一问题上的下一次扫描从完整计数开始。
+  采样频率不同的账本不被改动，deflated Sharpe 被拒绝。扫描文件升到版本 2，多一行
+  `trials`；版本 1 仍可读。`sweep_100 --ledger FILE` 演示了这一点。
+
 ## 2.0.0 — 2026-10-01
 
 第一个打 tag 的发布。下面的内容是"自仓库开始以来"，而不是"自上一个版本以来"；

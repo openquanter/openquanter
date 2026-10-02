@@ -5,9 +5,10 @@
 What a parameter sweep found, and whether it can be trusted, in one file.
 
 ```text
-openquanter-sweep 1
+openquanter-sweep 2
 label ma-cross calm
 equity-every 100
+trials 100 340
 thresholds 0.35 0.95 0
 deflated-sharpe 0.41
 pbo 0.25 16 0.3 0.12 0.8
@@ -40,14 +41,15 @@ cargo run --release -p oq-examples --example sweep_100 -- --out sweep.txt
 
 `sweep_100` runs its hundred configurations as it always does and, with
 `--out FILE`, also writes the result there under the label
-`sweep_100 ma-cross calm`, judged against the default thresholds. A
+`sweep_100 ma-cross calm`, judged against the default thresholds. With
+`--ledger FILE` it also loads and saves a [trial ledger](#the-trial-ledger). A
 program of your own calls `sweep_file::render(label, &report,
 thresholds)` on the `SweepReport` its sweep returned and writes the
 string wherever it likes.
 
 ## The lines
 
-The first line is `openquanter-sweep 1`. Every other line is one fact,
+The first line is `openquanter-sweep 2`. Every other line is one fact,
 named by its first word; a line with several fields separates them with
 tabs, and a tab or newline inside a label is replaced with a space so it
 cannot break a line.
@@ -56,6 +58,7 @@ cannot break a line.
 |---|---|
 | `label` | What the sweep was, as the caller named it |
 | `equity-every` | Ticks per sampled return. A Sharpe ratio without it is not a number anyone can compare |
+| `trials` | The configurations in this sweep, and the trials the deflated Sharpe ratio was deflated by — this sweep's plus every earlier one in the [trial ledger](#the-trial-ledger), scored or not. Absent from a version-1 file |
 | `thresholds` | The largest acceptable PBO, the smallest acceptable deflated Sharpe ratio, and the smallest acceptable out-of-sample-on-in-sample slope the sweep was judged against |
 | `deflated-sharpe` | The deflated Sharpe ratio of the best configuration |
 | `pbo` | The probability of backtest overfitting, the number of splits, the probability of an out-of-sample loss, the median out-of-sample Sharpe ratio, and the degradation slope |
@@ -71,9 +74,40 @@ reason, never as zero.
 
 ## What a reader refuses
 
-A first line other than `openquanter-sweep 1` is refused, for the reason
+A first line other than `openquanter-sweep 1` or `openquanter-sweep 2`
+is refused (version 1 is version 2 without the `trials` line), for the reason
 [the run file](RUN-FORMAT.md) refuses a version it does not know: reading
 what is recognised and ignoring the rest is how a newer file gets
 misread by an older reader. A non-empty line whose first word is not one of the
 above is refused, and so is a `config` row without its eight fields; the
 error names the line number.
+
+## The trial ledger
+
+The deflated Sharpe ratio asks how many configurations were tried. A
+sweep that counted only itself would let that number be shrunk by
+running a grid in pieces, or by forgetting the sweep that went badly —
+so `sweep` records every candidate into a `TrialRegistry` the caller
+hands it, and deflates by everything the registry holds. Configurations
+that produced too few returns to score are counted too: they were tried.
+
+The registry outlives the program as a ledger file, one per research
+question (a strategy family on a body of data):
+
+```text
+openquanter-trials 1
+basis equity-every=64
+trial <sharpe>	<observations>	<skewness>	<kurtosis>	<id>
+unscored <id>
+```
+
+`oq_backtest::ledger::load` reads it — a missing file is an empty
+ledger, an unreadable one is an error rather than a reset — and
+`ledger::save` replaces it whole by writing beside it and renaming.
+
+`basis` is the sampling the Sharpe ratios were measured at. A sweep
+sampled differently does not write to the ledger and reports the
+deflated Sharpe ratio as not computable, which the gate refuses: Sharpe
+ratios at two frequencies have no common dispersion, and deflating by
+the sweep alone would forget the earlier ones.
+

@@ -27,6 +27,19 @@ publishes it verbatim, and refuses a tag without one.
 
 ## Unreleased
 
+### Changed
+
+- **A sweep's deflated Sharpe ratio counts the whole search, not one
+  sweep.** `sweep` takes a `TrialRegistry` and records every candidate
+  into it, including the ones that produced too few returns to score;
+  the best configuration is deflated by everything the registry holds.
+  The registry persists as a trial ledger (`oq_backtest::ledger`,
+  `TrialRegistry::to_ledger`/`from_ledger`), so the next sweep on the
+  same question starts from the full count. A ledger sampled at another
+  frequency is left untouched and the deflated ratio is refused. The
+  sweep file is version 2 and carries a `trials` line; version 1 still
+  reads. `sweep_100 --ledger FILE` shows it.
+
 ## 2.0.0 — 2026-10-01
 
 The first tagged release. Everything below is "since the repository
