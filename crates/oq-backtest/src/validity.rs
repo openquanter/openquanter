@@ -28,11 +28,24 @@
 //! reports nothing under "latency" reads as a backtest where latency was
 //! zero, which is a claim, and it is the claim L0 is actually making.
 //! Saying so is the difference between an assumption and an oversight.
+//!
+//! # The same strategy at two tiers is two answers
+//!
+//! Running a strategy at L0 and again at L2 says how much of its result
+//! the cheaper tier invented. Counting fills says how many trades the
+//! queue never reached; it does not say whether the conclusion survived
+//! them. [`TierDivergence`] carries the conclusion — total return and
+//! Sharpe ratio per tier — and [`FidelityReport::tiers_invalidate`]
+//! refuses the run when the most faithful tier reverses the sign of what
+//! the least faithful one concluded. A gap in size is reported, not
+//! refused: every tier above L0 costs something, and how much is the
+//! measurement. A gap in sign is a different result.
 
 use oq_engine::Tick;
 use oq_types::{Cash, Fill, Liquidity, QtyLots};
 
-use crate::run::{MarginUsage, RunResult};
+use crate::run::{MarginUsage, RunConfig, RunResult};
+use crate::sweep::returns;
 
 /// The share of market volume a run took.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -156,6 +169,159 @@ pub struct FidelityReport {
     pub margin_usage: MarginUsage,
     /// Times the venue closed the account.
     pub liquidations: usize,
+    /// The same strategy run at other tiers, when the caller ran it so.
+    pub tiers: Option<TierDivergence>,
+}
+
+/// One tier's answer in a [`TierDivergence`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TierOutcome {
+    /// The tier, as the run reported it.
+    pub tier: String,
+    /// Fills it produced.
+    pub fills: usize,
+    /// Equity at the end of the run.
+    pub final_equity: Cash,
+    /// Final equity over starting balance, minus one.
+    pub total_return: f64,
+    /// Sharpe ratio of the sampled equity curve, at the sampling
+    /// frequency, or why there is none.
+    pub sharpe: Result<f64, String>,
+}
+
+/// The same strategy, on the same data, at several tiers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TierDivergence {
+    /// Least faithful first, as the caller passed them.
+    pub tiers: Vec<TierOutcome>,
+    /// Ticks per sampled return, shared by every tier or the Sharpe
+    /// ratios are refused.
+    pub equity_every: usize,
+}
+
+impl TierDivergence {
+    /// Compare runs of one strategy at different tiers, least faithful
+    /// first — L0, then L1 or L2.
+    ///
+    /// Each run comes with the configuration it ran under, so the
+    /// starting balance and the sampling interval are the ones that run
+    /// used rather than ones the caller restated. A Sharpe ratio needs
+    /// every run sampled at the same interval: with differing intervals
+    /// every Sharpe ratio is refused rather than compared across
+    /// frequencies.
+    #[must_use]
+    pub fn compare(runs: &[(&RunConfig, &RunResult)]) -> Self {
+        let every = runs.first().map_or(0, |(c, _)| c.equity_every);
+        let shared = runs.iter().all(|(c, _)| c.equity_every == every);
+        let tiers = runs
+            .iter()
+            .map(|(config, result)| {
+                let start = config.starting_balance.0;
+                let total_return = if start > 0 {
+                    (result.final_equity.0 - start) as f64 / start as f64
+                } else {
+                    f64::NAN
+                };
+                let sharpe = if !shared {
+                    Err("the tiers were sampled at different intervals".to_string())
+                } else if every == 0 {
+                    Err(
+                        "no equity curve: sample it with RunConfig::sampling_equity_every"
+                            .to_string(),
+                    )
+                } else {
+                    oq_stats::Moments::from_returns(&returns(&result.equity_curve))
+                        .map(|m| m.sharpe_ratio())
+                        .map_err(|e| e.to_string())
+                };
+                TierOutcome {
+                    tier: result.tier.to_string(),
+                    fills: result.fills.len(),
+                    final_equity: result.final_equity,
+                    total_return,
+                    sharpe,
+                }
+            })
+            .collect();
+        Self {
+            tiers,
+            equity_every: every,
+        }
+    }
+
+    /// How much more the least faithful tier returned than the most
+    /// faithful one, as a fraction of the starting balance. Positive is
+    /// the cheaper tier flattering the strategy.
+    #[must_use]
+    pub fn overstatement(&self) -> Option<f64> {
+        match (self.tiers.first(), self.tiers.last()) {
+            (Some(low), Some(high)) if self.tiers.len() > 1 => {
+                Some(low.total_return - high.total_return)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the most faithful tier reverses what the least faithful
+    /// one concluded: a gain becomes a loss, or a positive Sharpe ratio
+    /// a non-positive one.
+    #[must_use]
+    pub fn reverses(&self) -> bool {
+        let (Some(low), Some(high)) = (self.tiers.first(), self.tiers.last()) else {
+            return false;
+        };
+        if self.tiers.len() < 2 {
+            return false;
+        }
+        let gain_lost = low.total_return > 0.0 && high.total_return <= 0.0;
+        let sharpe_lost = matches!(
+            (&low.sharpe, &high.sharpe),
+            (Ok(a), Ok(b)) if *a > 0.0 && *b <= 0.0
+        );
+        gain_lost || sharpe_lost
+    }
+
+    /// The comparison, as text.
+    #[must_use]
+    pub fn render(&self) -> String {
+        use core::fmt::Write as _;
+        let mut out = String::new();
+        let base = self.tiers.first().map_or(0, |t| t.fills);
+        for t in &self.tiers {
+            let share = if base == 0 {
+                "-".to_string()
+            } else {
+                format!("{:.1}%", 100.0 * t.fills as f64 / base as f64)
+            };
+            let sharpe = t
+                .sharpe
+                .as_ref()
+                .map_or_else(|e| format!("- ({e})"), |s| format!("{s:+.4}"));
+            let _ = writeln!(
+                out,
+                "  {:<14}{:>8} fills ({share} of the first)  return {:+.2}%  Sharpe {sharpe}",
+                t.tier,
+                t.fills,
+                t.total_return * 100.0
+            );
+        }
+        if let Some(gap) = self.overstatement() {
+            let _ = writeln!(
+                out,
+                "  the first tier's return exceeds the last's by {:+.2} points",
+                gap * 100.0
+            );
+        }
+        if self.reverses() {
+            let _ = writeln!(
+                out,
+                "  REVERSED: the most faithful tier contradicts the least faithful one's \
+                 conclusion,\n  so the cheaper tier's result is not a rougher estimate of \
+                 this one — it is a different result"
+            );
+        }
+        out
+    }
 }
 
 impl FidelityReport {
@@ -169,6 +335,21 @@ impl FidelityReport {
         self.participation
             .peak()
             .is_some_and(|p| p > self.threshold)
+    }
+
+    /// Attach a comparison of the same strategy at other tiers.
+    #[must_use]
+    pub fn with_tiers(mut self, tiers: TierDivergence) -> Self {
+        self.tiers = Some(tiers);
+        self
+    }
+
+    /// Whether running the strategy at a more faithful tier reversed the
+    /// result. `false` when no comparison was attached — which the report
+    /// says, rather than letting an absent comparison read as a passing one.
+    #[must_use]
+    pub fn tiers_invalidate(&self) -> bool {
+        self.tiers.as_ref().is_some_and(TierDivergence::reverses)
     }
 
     /// Maker share of fills, or `None` when there were none.
@@ -275,6 +456,23 @@ impl FidelityReport {
         if self.liquidations > 0 {
             let _ = writeln!(out, "  LIQUIDATED      {}x", self.liquidations);
         }
+        match &self.tiers {
+            Some(t) => {
+                let _ = writeln!(
+                    out,
+                    "  across tiers    sampled every {} ticks",
+                    t.equity_every
+                );
+                out.push_str(&t.render());
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  across tiers    not compared — a result at one tier says nothing \
+                     about how\n                  much of it the tier invented"
+                );
+            }
+        }
         out
     }
 }
@@ -320,6 +518,7 @@ pub fn report_at(
         assumptions,
         margin_usage: result.margin_usage,
         liquidations: result.liquidations.len(),
+        tiers: None,
     }
 }
 
@@ -735,5 +934,171 @@ mod tier_tests {
         let text = rendered(Assumptions::l0());
         assert!(text.contains("tier L0"), "{text}");
         assert!(!text.contains("queue  "), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod tier_divergence {
+    use super::*;
+    use crate::run::{Tier, run_stream, tick_at};
+    use oq_engine::{Delay, Impact, Latency, Policy, QueueAhead};
+    use oq_margin::{Contract, TierTable};
+    use oq_strategy::{Context, Intent, Strategy};
+    use oq_types::{InstrumentId, Nanos, OrderId, PriceTicks, QtyLots, Side};
+
+    fn outcome(tier: &str, fills: usize, ret: f64, sharpe: Result<f64, String>) -> TierOutcome {
+        TierOutcome {
+            tier: tier.to_string(),
+            fills,
+            final_equity: Cash::ZERO,
+            total_return: ret,
+            sharpe,
+        }
+    }
+
+    fn pair(low: TierOutcome, high: TierOutcome) -> TierDivergence {
+        TierDivergence {
+            tiers: vec![low, high],
+            equity_every: 10,
+        }
+    }
+
+    #[test]
+    fn a_gain_that_becomes_a_loss_is_a_reversal() {
+        let d = pair(
+            outcome("L0", 100, 0.12, Ok(0.08)),
+            outcome("L2", 30, -0.01, Ok(-0.02)),
+        );
+        assert!(d.reverses());
+        assert!((d.overstatement().unwrap() - 0.13).abs() < 1e-12);
+        assert!(d.render().contains("REVERSED"), "{}", d.render());
+    }
+
+    #[test]
+    fn a_smaller_gain_is_measured_not_refused() {
+        // Every tier above L0 costs something; how much is the finding.
+        let d = pair(
+            outcome("L0", 100, 0.12, Ok(0.08)),
+            outcome("L2", 60, 0.05, Ok(0.03)),
+        );
+        assert!(!d.reverses());
+        assert!(!d.render().contains("REVERSED"));
+    }
+
+    #[test]
+    fn a_sharpe_that_turns_non_positive_is_a_reversal_even_with_a_gain() {
+        let d = pair(
+            outcome("L0", 100, 0.12, Ok(0.08)),
+            outcome("L2", 60, 0.01, Ok(-0.001)),
+        );
+        assert!(d.reverses());
+    }
+
+    #[test]
+    fn one_tier_is_no_comparison() {
+        let d = TierDivergence {
+            tiers: vec![outcome("L0", 1, 0.1, Ok(0.1))],
+            equity_every: 1,
+        };
+        assert!(!d.reverses());
+        assert_eq!(d.overstatement(), None);
+    }
+
+    /// Rests a one-lot bid a tick under the last price, every tick.
+    struct Bidder(u64);
+
+    impl Strategy for Bidder {
+        fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+            out.push(Intent::CancelAll);
+            self.0 += 1;
+            out.push(ctx.limit(
+                OrderId::new(self.0),
+                Side::Buy,
+                PriceTicks(ctx.tick.last.0 - 1),
+                QtyLots(1),
+            ));
+        }
+
+        fn name(&self) -> &str {
+            "bidder"
+        }
+    }
+
+    fn base() -> RunConfig {
+        RunConfig::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(100_000),
+        )
+    }
+
+    fn queued() -> Tier {
+        Tier::L1(Policy {
+            queue: QueueAhead::Fixed(QtyLots(1_000_000)),
+            latency: Latency {
+                entry: Delay::Fixed(Nanos(0)),
+                response: Delay::Fixed(Nanos(0)),
+            },
+            impact: Impact { coefficient: 0 },
+        })
+    }
+
+    fn ticks() -> Vec<Tick> {
+        (0..200)
+            .map(|i| {
+                let p = 6_000_000 + [0, -40, 0, 40][i % 4] - i as i64;
+                tick_at(i as i64 * 1_000_000_000, p, p, p)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compare_takes_each_run_at_its_own_configuration() {
+        let low = base().sampling_equity_every(5);
+        let high = base().sampling_equity_every(5).at_tier(queued());
+        let data = ticks();
+        let a = run_stream(&low, &mut Bidder(0), data.iter().copied());
+        let b = run_stream(&high, &mut Bidder(0), data.iter().copied());
+        let d = TierDivergence::compare(&[(&low, &a), (&high, &b)]);
+        assert_eq!(d.tiers[0].tier, a.tier);
+        assert_eq!(d.tiers[1].tier, b.tier);
+        assert_eq!(
+            (d.tiers[0].fills, d.tiers[1].fills),
+            (a.fills.len(), b.fills.len())
+        );
+        assert!(d.tiers[0].fills > 0, "L0 fills the bids");
+        assert!(d.tiers[0].sharpe.is_ok(), "{:?}", d.tiers[0].sharpe);
+        let start = low.starting_balance.0 as f64;
+        let expected = (b.final_equity.0 as f64 - start) / start;
+        assert!((d.tiers[1].total_return - expected).abs() < 1e-15);
+
+        let report = report(&a, &data, 50, DEFAULT_THRESHOLD).with_tiers(d.clone());
+        assert_eq!(report.tiers_invalidate(), d.reverses());
+        assert!(
+            report
+                .render()
+                .contains("across tiers    sampled every 5 ticks")
+        );
+    }
+
+    #[test]
+    fn tiers_sampled_differently_have_no_sharpe_to_compare() {
+        let low = base().sampling_equity_every(5);
+        let high = base().sampling_equity_every(7).at_tier(queued());
+        let data = ticks();
+        let a = run_stream(&low, &mut Bidder(0), data.iter().copied());
+        let b = run_stream(&high, &mut Bidder(0), data.iter().copied());
+        let d = TierDivergence::compare(&[(&low, &a), (&high, &b)]);
+        assert!(d.tiers.iter().all(|t| t.sharpe.is_err()));
+    }
+
+    #[test]
+    fn a_report_without_a_comparison_says_so() {
+        let data = ticks();
+        let a = run_stream(&base(), &mut Bidder(0), data.iter().copied());
+        let r = report(&a, &data, 50, DEFAULT_THRESHOLD);
+        assert!(!r.tiers_invalidate());
+        assert!(r.render().contains("not compared"), "{}", r.render());
     }
 }

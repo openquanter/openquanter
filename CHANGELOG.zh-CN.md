@@ -22,6 +22,10 @@
 
 ### 变更
 
+- **保真报告按结论而不是成交笔数比较档位。** `TierDivergence::compare` 接收同一策略在
+  多个档位上的运行，报告各自的总收益与 Sharpe；`FidelityReport::with_tiers` 挂上它，
+  当最高保真档位把盈利变成亏损、或把正 Sharpe 变成非正时，`tiers_invalidate` 为真。
+  没有做比较的报告会明说。`oq-tiers` 与 `book_tiers` 会打印它。
 - **做市胜出者的逆向选择成为扫描闸门。** 扫描对最优配置的成交做 markout
   （`oq_backtest::adverse`，与 `oq-parity markout` 同一度量）；当至少一半是挂单成交时，
   若 1、10、60 秒任一跨度的平均 maker markout 低于零，或某个跨度可度量的 maker 成交
@@ -33,6 +37,10 @@
   `TrialRegistry::to_ledger`/`from_ledger`），同一问题上的下一次扫描从完整计数开始。
   采样频率不同的账本不被改动，deflated Sharpe 被拒绝。扫描文件升到版本 2，多一行
   `trials`；版本 1 仍可读。`sweep_100 --ledger FILE` 演示了这一点。
+
+### 修复
+
+- `oq-tiers` 打印最终权益时除以 100 而不是定点刻度，大了一百万倍。
 
 ## 2.0.0 — 2026-10-01
 

@@ -31,7 +31,8 @@
 //! shape a caller who has one uses.
 
 use oq_backtest::{
-    Context, Intent, Observation, RunConfig, RunResult, Strategy, Tier, run_observations,
+    Context, Intent, Observation, RunConfig, RunResult, Strategy, Tier, TierDivergence,
+    run_observations,
 };
 use oq_engine::{Delay, Impact, Latency, Level, Policy, QueueAhead, Tick};
 use oq_examples::{MarketShape, money, series};
@@ -252,6 +253,32 @@ fn main() {
             w[0].0
         );
     }
+
+    // Fill counts say how many trades the queue never reached; whether
+    // the conclusion survived them is the question a report must answer.
+    // The same pair again, with equity sampled so each tier has a return
+    // and a Sharpe ratio to set beside the other's.
+    let (low, high) = (
+        config(Tier::L0).sampling_equity_every(500),
+        config(Tier::L2(policy)).sampling_equity_every(500),
+    );
+    let sampled_l0 = run_observations(
+        &low,
+        &mut strategy(),
+        ticks
+            .iter()
+            .copied()
+            .map(Observation::Tick)
+            .collect::<Vec<_>>(),
+    );
+    let sampled_l2 = run_observations(&high, &mut strategy(), book_for(&ticks, 64));
+    let divergence = TierDivergence::compare(&[(&low, &sampled_l0), (&high, &sampled_l2)]);
+    println!();
+    println!(
+        "L0 against L2 with 64 ahead, sampled every {} ticks",
+        divergence.equity_every
+    );
+    print!("{}", divergence.render());
 
     println!();
     println!(
