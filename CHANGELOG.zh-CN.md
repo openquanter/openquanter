@@ -22,6 +22,11 @@
 
 ### 变更
 
+- **做市胜出者的逆向选择成为扫描闸门。** 扫描对最优配置的成交做 markout
+  （`oq_backtest::adverse`，与 `oq-parity markout` 同一度量）；当至少一半是挂单成交时，
+  若 1、10、60 秒任一跨度的平均 maker markout 低于零，或某个跨度可度量的 maker 成交
+  不足 30 笔，就拒绝它。`Thresholds` 新增 `adverse`；扫描文件新增 `adverse-thresholds`
+  与 `adverse` 两行。
 - **扫描的 deflated Sharpe 按整个搜索计数，而不是一次扫描。** `sweep` 接收一个
   `TrialRegistry` 并把每个候选都记进去，包括收益太少、无法打分的那些；最优配置按登记里的
   全部试验 deflate。登记以试验账本的形式持久化（`oq_backtest::ledger`、

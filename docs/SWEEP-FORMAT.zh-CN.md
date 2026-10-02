@@ -17,6 +17,8 @@ refusal <sentence>
 config <label>	<fills>	<realized>	<fees>	<final equity>	<min equity>	<liquidations>	<sharpe or ->
 unscorable <label>
 lookahead <label>	<verdict>
+adverse-thresholds 0.5 0
+adverse <label>	<summary>
 ```
 
 由 `oq_backtest::sweep_file::render` 写出，由 `SweepFile::parse` 读回。
@@ -58,6 +60,8 @@ cargo run --release -p oq-examples --example sweep_100 -- --out sweep.txt
 | `config` | 一个配置：标签、成交数、已实现盈亏、手续费、最终权益、最低权益、强平次数、Sharpe 比率——收益太少无法打分时写 `-`。金额以账户币种计，不是定点单位 |
 | `unscorable` | 产出的收益太少、无法打分的配置 |
 | `lookahead` | 得分最高那个配置的前视检查：`clean over N signal(s)` 或 `N divergence(s) in M checked` |
+| `adverse-thresholds` | 胜出配置的 maker 成交占比达到多少即按做市策略评判，以及可接受的最小平均 maker markout（基点）。版本 1 的文件没有这一行 |
+| `adverse` | 得分最高那个配置的成交之后价格去了哪里：maker 占比，以及 1、10、60 秒的 maker markout——`maker 92.0%: 1 s -0.41 bps (63% against, n=812), …`。版本 1 的文件没有这一行 |
 
 没能算出的统计量写成 `<名字> - <原因>`——例如 `pbo - fewer than two configurations
 scored`——读回来的是那个原因，绝不是零。
@@ -69,6 +73,20 @@ scored`——读回来的是那个原因，绝不是零。
 拒绝它不认识的版本一样：只读认得的部分、忽略其余，正是较新的文件被较旧的读取方
 误读的方式。第一个词不在上表之列的非空行会被拒绝，少了八个字段中任何一个的 `config` 行
 也会被拒绝；错误信息会指出行号。
+
+## 逆向选择
+
+做市策略之所以成交，是因为有人选择与它成交，而做这个选择的人往往知道价格要往哪走。
+扫描会对胜出配置的成交做 markout（`oq_backtest::adverse`，与 `oq-parity markout` 对实盘
+做的是同一种度量，同样以最新成交价为准）；当至少一半成交是挂单成交时，以下任一情况都会
+拒绝它：
+
+- 任一时间跨度上的平均 maker markout 低于零——markout 以成交价为起点，成交赚到的价差
+  已经包含在内，低于零意味着成交之后的走势吃掉的比这份价差还多；或
+- 某个时间跨度上可做 markout 的 maker 成交不足 30 笔：一个没量过逆向选择的做市策略，
+  并不是一个没有逆向选择的策略。
+
+吃单的 markout 是它据以交易的信号，而不是被选中承担的成本，所以吃单胜出者不会因此被拒绝。
 
 ## 试验账本
 

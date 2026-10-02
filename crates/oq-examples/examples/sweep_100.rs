@@ -267,6 +267,9 @@ fn main() {
         ),
         None => println!("  lookahead        not checked: nothing scored"),
     }
+    if let Some((id, a)) = &report.adverse {
+        println!("  markout          {id}: {}", a.summary());
+    }
     if !report.unscorable.is_empty() {
         println!(
             "  unscorable       {} configuration(s)",

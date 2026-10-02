@@ -903,6 +903,7 @@ dependencies = [
  "oq-core",
  "oq-engine",
  "oq-margin",
+ "oq-parity",
  "oq-stats",
  "oq-strategy",
  "oq-types",

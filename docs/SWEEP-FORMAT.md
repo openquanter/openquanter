@@ -17,6 +17,8 @@ refusal <sentence>
 config <label>	<fills>	<realized>	<fees>	<final equity>	<min equity>	<liquidations>	<sharpe or ->
 unscorable <label>
 lookahead <label>	<verdict>
+adverse-thresholds 0.5 0
+adverse <label>	<summary>
 ```
 
 Written by `oq_backtest::sweep_file::render` and read back by
@@ -67,6 +69,8 @@ cannot break a line.
 | `config` | One configuration: label, fills, realized P&L, fees, final equity, minimum equity, liquidations, Sharpe ratio — `-` when there were too few returns to score it. Amounts are in account currency, not the fixed-point unit |
 | `unscorable` | A configuration that produced too few returns to score |
 | `lookahead` | The lookahead check of the best-scoring configuration: `clean over N signal(s)` or `N divergence(s) in M checked` |
+| `adverse-thresholds` | The maker-fill share at or above which the winner is judged as a maker strategy, and the smallest acceptable mean maker markout in basis points. Absent from a version-1 file |
+| `adverse` | Where the best-scoring configuration's fills went afterwards: its maker share and the maker markout at 1, 10 and 60 s — `maker 92.0%: 1 s -0.41 bps (63% against, n=812), …`. Absent from a version-1 file |
 
 A statistic that could not be computed is written `<name> - <reason>` —
 `pbo - fewer than two configurations scored` — and read back as the
@@ -81,6 +85,24 @@ what is recognised and ignoring the rest is how a newer file gets
 misread by an older reader. A non-empty line whose first word is not one of the
 above is refused, and so is a `config` row without its eight fields; the
 error names the line number.
+
+## Adverse selection
+
+A maker strategy is filled when somebody chooses to trade against it,
+and the ones who choose tend to know where the price is going. The
+sweep marks out the winner's fills (`oq_backtest::adverse`, the same
+measurement as `oq-parity markout` on a live run, against the last
+trade) and, when at least half of them made liquidity, refuses it if:
+
+- the mean maker markout at any horizon is below zero — the markout is
+  taken from the fill price, so the spread the fill earned is already
+  in it, and below zero the moves after the fills cost more than that
+  spread; or
+- a horizon has fewer than 30 maker fills to mark out: a maker strategy
+  whose adverse selection was not measured is not one that has none.
+
+A taker's markout is the signal it traded on, not a cost it was
+selected into, so a taker winner is never refused on it.
 
 ## The trial ledger
 

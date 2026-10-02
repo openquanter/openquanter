@@ -26,6 +26,8 @@
 //! config <label>\t<fills>\t<realized>\t<fees>\t<final equity>\t<min equity>\t<liquidations>\t<sharpe or ->
 //! unscorable <label>
 //! lookahead <label>\t<sentence>
+//! adverse-thresholds 0.5 0          # maker share judged as a maker, smallest mean markout (bps)
+//! adverse <label>\t<sentence>
 //! ```
 //!
 //! A statistic that could not be computed is written `<name> - <reason>`.
@@ -126,6 +128,14 @@ pub fn render(label: &str, report: &SweepReport, thresholds: Thresholds) -> Stri
         };
         let _ = writeln!(out, "lookahead {}\t{verdict}", clean(label));
     }
+    let _ = writeln!(
+        out,
+        "adverse-thresholds {} {}",
+        thresholds.adverse.maker_share, thresholds.adverse.min_mean_bps
+    );
+    if let Some((label, report)) = &report.adverse {
+        let _ = writeln!(out, "adverse {}\t{}", clean(label), report.summary());
+    }
     out
 }
 
@@ -171,6 +181,12 @@ pub struct SweepFile {
     pub configs: Vec<ConfigRow>,
     pub unscorable: Vec<String>,
     pub lookahead: Option<(String, String)>,
+    /// `(maker share judged as a maker, smallest mean maker markout)`;
+    /// `None` in a version-1 file.
+    pub adverse_thresholds: Option<(f64, f64)>,
+    /// The winner's markout summary; `None` in a version-1 file or when
+    /// nothing scored.
+    pub adverse: Option<(String, String)>,
 }
 
 fn num<T: core::str::FromStr>(s: Option<&str>, what: &str, n: usize) -> Result<T, String> {
@@ -205,6 +221,8 @@ impl SweepFile {
             configs: Vec::new(),
             unscorable: Vec::new(),
             lookahead: None,
+            adverse_thresholds: None,
+            adverse: None,
         };
         let mut logits = Vec::new();
         for (i, line) in lines {
@@ -263,6 +281,17 @@ impl SweepFile {
                     let (l, v) = rest.split_once('\t').unwrap_or((rest, ""));
                     f.lookahead = Some((l.to_string(), v.to_string()));
                 }
+                "adverse-thresholds" => {
+                    let mut p = rest.split(' ');
+                    f.adverse_thresholds = Some((
+                        num(p.next(), "maker share", n)?,
+                        num(p.next(), "min mean markout", n)?,
+                    ));
+                }
+                "adverse" => {
+                    let (l, v) = rest.split_once('\t').unwrap_or((rest, ""));
+                    f.adverse = Some((l.to_string(), v.to_string()));
+                }
                 "config" => {
                     let p: Vec<&str> = rest.split('\t').collect();
                     if p.len() != 8 {
@@ -312,12 +341,15 @@ mod tests {
             trials_before: 30,
             trials_total: 31,
             lookahead: None,
+            adverse: None,
         };
         let text = render("demo", &report, Thresholds::default());
         let f = SweepFile::parse(&text).expect("reads");
         assert_eq!(f.label, "demo");
         assert_eq!(f.equity_every, 50);
         assert_eq!(f.trials, Some((0, 31)));
+        assert_eq!(f.adverse_thresholds, Some((0.5, 0.0)));
+        assert_eq!(f.adverse, None);
         assert_eq!(f.deflated_sharpe, Ok(0.42));
         assert_eq!(f.pbo, Err("fewer than two configurations scored".into()));
         assert_eq!(

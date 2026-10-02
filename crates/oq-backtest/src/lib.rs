@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adverse;
 pub mod deviation;
 pub mod fidelity;
 pub mod ledger;
@@ -24,6 +25,9 @@ pub mod sweep;
 pub mod sweep_file;
 pub mod validity;
 
+pub use adverse::{
+    AdverseRefusal, AdverseReport, AdverseThresholds, adverse_selection, adverse_selection_at,
+};
 pub use deviation::{DeviationReport, Verdict};
 pub use fidelity::{
     Arm, Fidelity, StressReport, TailPoint, Unusable, Window, stress, tail_divergence,
