@@ -47,7 +47,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use oq_backtest::{
-    Context, Intent, Observation, RunConfig, RunResult, Strategy, Tier, run_observations,
+    Context, Intent, Observation, RunConfig, RunResult, Strategy, Tier, TierDivergence,
+    run_observations,
 };
 use oq_engine::{Delay, Impact, Latency, Policy, QueueAhead};
 use oq_ingest::batches::{hours, load_hour};
@@ -147,6 +148,9 @@ fn config(instrument: InstrumentId, tier: Tier) -> RunConfig {
         Cash::from_units(10_000_000),
     )
     .at_tier(tier)
+    // One sampled return per sixty observations, the same for both tiers
+    // so their Sharpe ratios are at one frequency.
+    .sampling_equity_every(60)
 }
 
 /// FNV-1a, matching `oq-ingest` so the two agree on an instrument id.
@@ -310,8 +314,9 @@ fn main() -> ExitCode {
         .filter(|o| matches!(o, Observation::Tick(_)))
         .cloned()
         .collect();
-    let l0 = run_observations(&config(id, Tier::L0), &mut strategy(), ticks_only);
-    let l2 = run_observations(&config(id, Tier::L2(policy)), &mut strategy(), stream);
+    let (low, high) = (config(id, Tier::L0), config(id, Tier::L2(policy)));
+    let l0 = run_observations(&low, &mut strategy(), ticks_only);
+    let l2 = run_observations(&high, &mut strategy(), stream);
 
     println!();
     println!(
@@ -320,6 +325,14 @@ fn main() -> ExitCode {
     );
     row("L0", &l0, l0.fills.len());
     row("L2", &l2, l0.fills.len());
+
+    println!();
+    let divergence = TierDivergence::compare(&[(&low, &l0), (&high, &l2)]);
+    println!(
+        "across tiers, sampled every {} ticks",
+        divergence.equity_every
+    );
+    print!("{}", divergence.render());
 
     println!();
     println!(
@@ -370,6 +383,6 @@ fn row(label: &str, r: &RunResult, baseline: usize) {
         "{label:<12} {:>9} {:>8.1}% {:>16}",
         r.fills.len(),
         share,
-        r.final_equity.0 as f64 / 100.0,
+        r.final_equity.0 as f64 / oq_types::CASH_SCALE as f64,
     );
 }

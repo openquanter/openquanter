@@ -43,7 +43,8 @@ pub use run::{
 };
 pub use sweep::{Candidate, SweepReport, returns, sweep};
 pub use validity::{
-    Assumptions, FidelityReport, Participation, report as fidelity_report, report_at,
+    Assumptions, FidelityReport, Participation, TierDivergence, TierOutcome,
+    report as fidelity_report, report_at,
 };
 
 /// Re-exported because [`RunConfig::with_fees`] takes it. Configuring a

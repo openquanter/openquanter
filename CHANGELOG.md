@@ -29,6 +29,13 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **The fidelity report compares tiers by their conclusion, not their
+  fill count.** `TierDivergence::compare` takes the same strategy run at
+  several tiers and reports each one's total return and Sharpe ratio;
+  `FidelityReport::with_tiers` attaches it and `tiers_invalidate` is
+  true when the most faithful tier turns a gain into a loss or a
+  positive Sharpe ratio into a non-positive one. A report without a
+  comparison says so. `oq-tiers` and `book_tiers` print it.
 - **A maker winner's adverse selection gates the sweep.** The sweep
   marks out the best configuration's fills (`oq_backtest::adverse`,
   the same measurement as `oq-parity markout`) and, when at least half
@@ -46,6 +53,11 @@ publishes it verbatim, and refuses a tag without one.
   frequency is left untouched and the deflated ratio is refused. The
   sweep file is version 2 and carries a `trials` line; version 1 still
   reads. `sweep_100 --ledger FILE` shows it.
+
+### Fixed
+
+- `oq-tiers` printed final equity divided by 100 instead of the
+  fixed-point scale, a factor of a million too large.
 
 ## 2.0.0 — 2026-10-01
 
