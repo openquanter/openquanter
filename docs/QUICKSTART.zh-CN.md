@@ -81,19 +81,20 @@ cargo run --example martingale_ladder
 
 ```text
                         enforced      margin-free
-final equity             61.53     20908.11
-lowest equity            61.53    -30302.14
+final equity              0.00     20908.11
+lowest equity             0.00    -30302.14
 fills                        4                6
 liquidations                 1                0
 
 martingale-ladder: LIQUIDATED 1x, first at t=114750000000; margin-free equity
-20908.11 vs real 61.53
-(overstated by 20846.58); 2 fills in the margin-free run happened after the
-account was already closed
+20908.11 vs real 0.00
+(overstated by 20908.11); the venue kept 61.53 at the bankruptcy price; 2 fills
+in the margin-free run happened after the account was already closed
 ```
 
 同一个策略、同一段行情，跑两遍：一遍启用强平，一遍关掉。**关掉强平的回测——也就是
-多数开源回测器给你的东西——声称赚了 20908 USDT，而真实账户最终只剩 61.53。**
+多数开源回测器给你的东西——声称赚了 20908 USDT，而真实账户已被交易所关闭、最终是 0.00**——按标记价还剩的那点
+钱进了交易所的保险基金，真实的永续合约交易所就是这么做的。
 
 真正的破绽是最低权益那一行：**−30302**。权益为负不是回撤，是这个账户已经不存在了。
 之后的每一笔成交，都是一个交易所早已关闭的账户下的单，报告里把它们数了出来。
@@ -350,5 +351,5 @@ cargo run --release -p oq-examples --example classics
 这个例子不会打印一条资金曲线就结束。它把每个策略在**建模强平**和**不建模强平**
 两种模式下各跑一遍并同时打印——因为一条永远不会被强平的曲线，描述的是任何交易所
 都不提供的账户。**不加杠杆时六个策略的两列完全相同**，而这本身就是结论：
-**保证金模型在杠杆变成真的之前是看不见的。** 加了杠杆之后，网格最终剩 4.46、
-账户被交易所关闭两次，而 margin-free 那一侧为一个它一直持有着的仓位报告 −508.12。
+**保证金模型在杠杆变成真的之前是看不见的。** 加了杠杆之后，网格最终是 0.00、
+账户被交易所关闭，而 margin-free 那一侧为一个它一直持有着的仓位报告 −508.12。

@@ -93,21 +93,22 @@ cargo run --example martingale_ladder
 
 ```text
                         enforced      margin-free
-final equity             61.53     20908.11
-lowest equity            61.53    -30302.14
+final equity              0.00     20908.11
+lowest equity             0.00    -30302.14
 fills                        4                6
 liquidations                 1                0
 
 martingale-ladder: LIQUIDATED 1x, first at t=114750000000; margin-free equity
-20908.11 vs real 61.53
-(overstated by 20846.58); 2 fills in the margin-free run happened after the
-account was already closed
+20908.11 vs real 0.00
+(overstated by 20908.11); the venue kept 61.53 at the bankruptcy price; 2 fills
+in the margin-free run happened after the account was already closed
 ```
 
 The same strategy, the same market, run twice: once with liquidation
 enforced and once without. A margin-free backtest — which is what most
 open backtesters give you — reports **20 908 USDT** on an account that
-in reality ended with **61.53**.
+in reality the venue closed, leaving **0.00** — what was left at the
+mark went to its insurance fund, as it does on a real perpetual venue.
 
 The tell is the lowest equity: **−30 302**. Equity below zero is not a
 drawdown, it is an account that stopped existing. Every fill after that
@@ -415,5 +416,5 @@ with liquidation modelled and without, and prints both — because a curve
 that never gets liquidated is a curve about an account no venue offers.
 Unlevered the two columns agree for all six, which is itself the finding:
 **a margin model is invisible until leverage is real.** Levered, the grid
-ends at 4.46 with the venue having closed the account twice, and the
+ends at 0.00 with the venue having closed the account, and the
 margin-free arm reports −508.12 for a position it kept holding.

@@ -281,9 +281,14 @@ pub enum MarginUsage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Liquidation {
     pub at: Nanos,
+    /// The mark the account was found insolvent at.
     pub price: PriceTicks,
     pub qty: QtyLots,
+    /// The balance after the venue settled the account: zero.
     pub equity: Cash,
+    /// What the account still had at that mark and the venue kept for
+    /// its insurance fund, or, negative, the deficit the fund covered.
+    pub forfeited: Cash,
 }
 
 /// Run `strategy` over `ticks`.
@@ -436,6 +441,7 @@ where
                         price,
                         qty,
                         equity,
+                        forfeited,
                         ..
                     } = out
                     {
@@ -444,6 +450,7 @@ where
                             price: *price,
                             qty: *qty,
                             equity: *equity,
+                            forfeited: *forfeited,
                         });
                         closed_by_venue.extend(venue_closes(out));
                     }
@@ -474,6 +481,7 @@ where
                     price,
                     qty,
                     equity,
+                    forfeited,
                     ..
                 } => {
                     liquidations.push(Liquidation {
@@ -481,6 +489,7 @@ where
                         price: *price,
                         qty: *qty,
                         equity: *equity,
+                        forfeited: *forfeited,
                     });
                     closed_by_venue.extend(venue_closes(out));
                 }

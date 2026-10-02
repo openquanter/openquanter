@@ -103,7 +103,7 @@ ladder: any tier may be run with margin enabled.
 |---|---|---|
 | FR-MARGIN-1 | Tiered maintenance-margin schedules are modeled per venue and per instrument, stored **bitemporally** — exchange rules change silently and historical backtests must use the rules in force at the simulated time. | Core |
 | FR-MARGIN-2 | Margin usage and liquidation price are recomputed on every relevant tick, driven by mark price rather than last trade price where the venue does so. | Core |
-| FR-MARGIN-3 | When a liquidation triggers, a liquidation order enters the matching engine like any other order and is subject to the same fidelity tier. | Core |
+| FR-MARGIN-3 | When a liquidation triggers, the account is settled at the bankruptcy price: every position closes, the account keeps nothing, and what the mark would still have paid — or the deficit, past bankruptcy — is recorded as forfeited to the venue's insurance fund. The trader's result does not depend on how the venue then executes the close, so no fidelity tier changes it. (Revised: this requirement first asked for a liquidation order through the matching engine, which models the fund's execution risk as the trader's and returned the remaining maintenance margin to an account no venue returns it to.) | Core |
 | FR-MARGIN-4 | Funding payments are applied on venue schedule, and funding-spike scenarios can be injected for stress testing. | Core |
 | FR-MARGIN-5 | The framework can produce a **tail-divergence report**: the same strategy and data run with and without margin modeling, quantifying the optimism of margin-free simulation. | Core |
 | FR-MARGIN-6 | Cross-margin, isolated-margin, and (where supported) portfolio-margin account modes are distinguishable. | Extended |

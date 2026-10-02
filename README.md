@@ -64,8 +64,8 @@ What the components are built to get right, in order:
 
 1. **A backtest that does not flatter you.** Tiered margin and liquidation are
    modelled, not skipped — see the [worked example](docs/QUICKSTART.md#3-run-the-example-that-explains-the-project)
-   where a margin-free run reports 20 908 USDT on an account that really ended
-   with 61.53.
+   where a margin-free run reports 20 908 USDT on an account the venue really
+   closed, leaving 0.00.
 2. **Speed that does not cost fidelity.** Integer fixed point, no async on the
    hot path, allocation-free after warm-up. Most fast backtesters are fast
    because they simplify; the point here is not having to choose — and the
@@ -271,7 +271,7 @@ Early, and specific about it. **Built and tested today:**
 - **Margin fidelity** — what a backtest with no margin model is worth,
   reported as a cross-window tail rather than a mean, because the error is
   zero almost everywhere and total in a few windows. At the median the two
-  arms agree; at the fifth percentile the account lost 97.71% and the
+  arms agree; at the fifth percentile the account lost everything and the
   margin-free run reported 2.84%. The windows that ruined the account are
   in the margin-free arm's *right* tail: it does not merely understate
   them, it files them under success. Methodology in

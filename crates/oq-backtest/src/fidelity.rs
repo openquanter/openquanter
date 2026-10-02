@@ -497,6 +497,7 @@ mod tests {
                 price: oq_types::PriceTicks(0),
                 qty: oq_types::QtyLots(0),
                 equity: Cash(0),
+                forfeited: Cash(0),
             });
         }
         r

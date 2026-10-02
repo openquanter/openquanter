@@ -170,8 +170,14 @@ fn the_margin_free_arm_reports_an_account_that_did_not_survive() {
         "fills placed by a closed account are the concrete evidence"
     );
 
-    // Pinned exactly: the documentation quotes these.
-    assert_eq!(report.enforced.final_equity, Cash(6_153_200_000));
+    // Pinned exactly: the documentation quotes these. The enforced arm
+    // ends at zero because the venue settles at the bankruptcy price;
+    // the 61.53 the mark would still have paid went to its fund.
+    assert_eq!(report.enforced.final_equity, Cash(0));
+    assert_eq!(
+        report.enforced.liquidations[0].forfeited,
+        Cash(6_153_200_000)
+    );
     assert_eq!(report.ignored.final_equity, Cash(2_090_811_440_000));
     assert_eq!(report.ignored.min_equity, Cash(-3_030_214_120_000));
 }
@@ -417,8 +423,8 @@ fn the_grid_levered_matches_what_the_documentation_quotes() {
     let market = crash_series(11, 3_000, 900, 0.45);
     let (enforced, free) = arms(GridTrader::new, &market, 60);
     assert!(
-        close(enforced, 4.46),
-        "grid, margin enforced: expected 4.46, got {enforced:.2}"
+        close(enforced, 0.00),
+        "grid, margin enforced: expected 0.00, got {enforced:.2}"
     );
     assert!(
         close(free, -508.12),
@@ -433,11 +439,11 @@ fn the_grid_levered_matches_what_the_documentation_quotes() {
 fn every_levered_row_is_pinned() {
     let market = crash_series(11, 3_000, 900, 0.45);
     let rows: [(&str, (f64, f64)); 6] = [
-        ("rsi-reversion", (1.19, -213.73)),
-        ("macd-trend", (1.21, -1.88)),
-        ("bollinger-reversion", (1.33, -214.20)),
+        ("rsi-reversion", (0.00, -213.73)),
+        ("macd-trend", (0.00, -1.88)),
+        ("bollinger-reversion", (0.00, -214.20)),
         ("donchian-breakout", (245.19, 245.19)),
-        ("grid", (4.46, -508.12)),
+        ("grid", (0.00, -508.12)),
         ("dual-thrust", (248.72, 248.72)),
     ];
     let actual = [

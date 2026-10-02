@@ -29,6 +29,33 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Liquidation settles at the bankruptcy price (margin semantics).**
+  A liquidated account used to be closed at the mark and handed back
+  whatever was left — its remaining maintenance margin, a free
+  liquidation no perpetual venue offers. It now ends at zero: the
+  positions close, the remainder is recorded as `forfeited` to the
+  venue's insurance fund (`State::forfeited`, `Summary::forfeited`,
+  `Output::Liquidated::forfeited`, `run::Liquidation::forfeited`), and
+  a gap past bankruptcy leaves zero rather than a debt, with the
+  covered deficit recorded negative. The balance still reconciles:
+  start + realized + funding − fees − forfeited. FR-MARGIN-3 is revised
+  to say this instead of asking for a liquidation order through the
+  matcher: the trader's result does not depend on how the venue then
+  executes, so no tier changes it. Hedged and multi-instrument accounts
+  now liquidate at equity ≤ maintenance, as a single holding already
+  did, rather than strictly below.
+
+  **Numbers the documentation quotes moved** (golden baselines
+  regenerated with confirmation in the pull request):
+  `martingale_ladder`'s enforced arm ends at 0.00, not 61.53, with
+  61.53 forfeited; the levered grid at 0.00, not 4.46; levered
+  rsi-reversion, macd-trend and bollinger-reversion at 0.00, not 1.19,
+  1.21 and 1.33. Under the old model those three were liquidated 754,
+  797 and 3 times in one run, because each liquidation returned enough
+  margin to open again — they are now liquidated once. In
+  `margin_fidelity`, the windows that closed the account return
+  −100.00%, not −96.23%; the 5th percentile is −100.00%, not −97.71%;
+  the mean gap 209.97%, not 208.83%.
 - **The fidelity report compares tiers by their conclusion, not their
   fill count.** `TierDivergence::compare` takes the same strategy run at
   several tiers and reports each one's total return and Sharpe ratio;
