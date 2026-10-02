@@ -35,3 +35,4 @@ Drift.worst_bin                  # which bin the index came from; the headline s
 Pbo.splits                       # read by the console's sweeps page (quanterdeck), which shows how many splits the PBO rests on
 Pbo.degradation                  # read by the console's sweeps page; the slope the no-information refusal is judged on
 SweepFile.thresholds             # read by the console's sweeps page, which shows the limits beside the statistics they judge
+SweepFile.adverse_thresholds             # read by the console's sweeps page, which shows the maker-markout limits beside the markout they judge

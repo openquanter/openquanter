@@ -29,6 +29,13 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **A maker winner's adverse selection gates the sweep.** The sweep
+  marks out the best configuration's fills (`oq_backtest::adverse`,
+  the same measurement as `oq-parity markout`) and, when at least half
+  are maker fills, refuses it if the mean maker markout at any of 1, 10
+  and 60 s is below zero, or if a horizon has fewer than 30 maker fills
+  to measure. `Thresholds` gains `adverse`; the sweep file gains
+  `adverse-thresholds` and `adverse` lines.
 - **A sweep's deflated Sharpe ratio counts the whole search, not one
   sweep.** `sweep` takes a `TrialRegistry` and records every candidate
   into it, including the ones that produced too few returns to score;

@@ -31,6 +31,7 @@ use oq_stats::{Moments, TrialRegistry, probability_of_backtest_overfitting};
 use oq_strategy::Strategy;
 use oq_types::Cash;
 
+use crate::adverse::{AdverseRefusal, AdverseReport, AdverseThresholds, adverse_selection};
 use crate::lookahead::{DEFAULT_POINTS, LookaheadReport, lookahead};
 use crate::run::{RunConfig, RunResult, run_stream};
 use oq_engine::Tick;
@@ -84,6 +85,9 @@ pub struct SweepReport {
     /// The lookahead check of the best-scoring configuration — the one
     /// that would be packaged — or `None` when nothing scored.
     pub lookahead: Option<(String, LookaheadReport)>,
+    /// Where the best-scoring configuration's fills went afterwards, or
+    /// `None` when nothing scored.
+    pub adverse: Option<(String, AdverseReport)>,
 }
 
 /// Simple returns from a sampled equity curve.
@@ -198,11 +202,18 @@ pub fn sweep<S: Strategy>(
 
     // Only the winner: it is the one a deployment would carry, and the
     // check reruns up to its bound of prefixes per configuration.
-    let lookahead = best.map(|(_, index)| {
-        let candidate = &candidates[index];
+    let lookahead = best.as_ref().map(|(_, index)| {
+        let candidate = &candidates[*index];
         (
             candidate.id.clone(),
             lookahead(config, candidate.build, ticks, DEFAULT_POINTS),
+        )
+    });
+
+    let adverse = best.as_ref().map(|(_, index)| {
+        (
+            candidates[*index].id.clone(),
+            adverse_selection(&results[*index].1, ticks),
         )
     });
 
@@ -215,6 +226,7 @@ pub fn sweep<S: Strategy>(
         trials_before,
         trials_total,
         lookahead,
+        adverse,
     }
 }
 
@@ -355,6 +367,9 @@ pub struct Thresholds {
     /// A sweep can pass the PBO threshold and fail this, which is why
     /// it is its own refusal rather than a footnote to that one.
     pub min_degradation_slope: f64,
+    /// When the winner's fills are judged as a maker strategy's, and how
+    /// adverse they may be. See [`crate::adverse`].
+    pub adverse: AdverseThresholds,
 }
 
 impl Default for Thresholds {
@@ -375,6 +390,7 @@ impl Default for Thresholds {
             // nothing. A tolerance would be inventing a threshold where
             // the definition already supplies one.
             min_degradation_slope: 0.0,
+            adverse: AdverseThresholds::default(),
         }
     }
 }
@@ -422,6 +438,15 @@ pub enum Refusal {
         /// Orders it sent on that tick with only the prefix known.
         truncated: usize,
     },
+    /// The configuration to be packaged is a maker strategy whose fills
+    /// were adversely selected, or whose adverse selection could not be
+    /// measured.
+    Adverse {
+        /// Which configuration.
+        id: String,
+        /// What its fills showed.
+        why: AdverseRefusal,
+    },
     /// A statistic could not be computed at all.
     ///
     /// Refused rather than waved through. A sweep too short to score is
@@ -467,6 +492,7 @@ impl core::fmt::Display for Refusal {
                  only the prefix): it uses data it could not have had, and its result is not \
                  one a live run can reproduce"
             ),
+            Self::Adverse { id, why } => write!(f, "{id}: {why}"),
             Self::Unscored { statistic, why } => write!(
                 f,
                 "{statistic} could not be computed ({why}); a sweep that could not be \
@@ -525,6 +551,14 @@ impl SweepReport {
                 statistic: "deflated Sharpe ratio",
                 why: why.clone(),
             }),
+        }
+        if let Some((id, report)) = &self.adverse {
+            out.extend(report.refusals(thresholds.adverse).into_iter().map(|why| {
+                Refusal::Adverse {
+                    id: id.clone(),
+                    why,
+                }
+            }));
         }
         if let Some((id, report)) = &self.lookahead
             && let Some(first) = report.divergences.first()
@@ -587,6 +621,38 @@ mod strict_mode {
         );
     }
 
+    /// A maker winner whose fills were adversely selected is refused, and
+    /// a taker winner with the same markout is not: a taker's markout is
+    /// the signal it traded on, not a cost it was selected into.
+    #[test]
+    fn an_adversely_selected_maker_winner_is_refused() {
+        use oq_parity::markout::{Distribution, Markout};
+        use oq_parity::record::Nanos as N;
+        let selected = |share: f64| AdverseReport {
+            maker_share: Some(share),
+            maker: vec![Markout::Measured(Distribution {
+                horizon: N(1_000_000_000),
+                samples: 120,
+                mean_bps: -1.5,
+                median_bps: -1.0,
+                p10_bps: -6.0,
+                p90_bps: 2.0,
+                adverse_share: 0.7,
+            })],
+            taker: Vec::new(),
+        };
+        let mut r = report(Ok(0.1), Ok(0.99));
+        r.adverse = Some(("tight".to_string(), selected(0.9)));
+        let refusals = r.refusals(Thresholds::default());
+        assert!(
+            matches!(&refusals[..], [Refusal::Adverse { id, why: AdverseRefusal::Selected { .. } }] if id == "tight"),
+            "{refusals:?}"
+        );
+        assert!(refusals[0].to_string().starts_with("tight: maker fills"));
+        r.adverse = Some(("tight".to_string(), selected(0.2)));
+        assert!(r.deployable(Thresholds::default()));
+    }
+
     /// A report with a given PBO and a slope that passes, so a test
     /// about one threshold is not silently also about the other.
     fn report(pbo: Result<f64, String>, dsr: Result<f64, String>) -> SweepReport {
@@ -610,6 +676,7 @@ mod strict_mode {
             trials_before: 0,
             trials_total: 0,
             lookahead: None,
+            adverse: None,
         }
     }
 
