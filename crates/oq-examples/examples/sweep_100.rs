@@ -170,8 +170,28 @@ fn main() {
     // than an optimisation the benchmark declined to do.
     .sampling_equity_every(64);
 
+    // `--ledger FILE` carries the trial count across runs: every earlier
+    // sweep recorded there deflates this one, and this one is added for
+    // the next. Without it the sweep counts only itself.
+    let args: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .map(String::as_str)
+    };
+    let ledger_path = flag("--ledger").map(std::path::Path::new);
+    let mut registry = match ledger_path.map(oq_backtest::ledger::load) {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            eprintln!("could not read the trial ledger: {e}");
+            std::process::exit(2);
+        }
+        None => oq_stats::TrialRegistry::new(),
+    };
+
     let started = Instant::now();
-    let report = sweep(&config, &candidates, &ticks);
+    let report = sweep(&config, &candidates, &ticks, &mut registry);
     let elapsed = started.elapsed().as_secs_f64();
 
     let total_ticks = (CONFIGS * TICKS) as f64;
@@ -189,6 +209,16 @@ fn main() {
     );
     println!();
 
+    println!(
+        "  trials counted   {} ({} before this sweep)",
+        report.trials_total, report.trials_before
+    );
+    if let Some(path) = ledger_path {
+        match oq_backtest::ledger::save(path, &registry) {
+            Ok(()) => println!("  trial ledger     {}", path.display()),
+            Err(e) => eprintln!("could not write the trial ledger: {e}"),
+        }
+    }
     match &report.deflated_sharpe {
         Ok(v) => println!("  deflated Sharpe  {v:.4}"),
         Err(e) => println!("  deflated Sharpe  unavailable: {e}"),
@@ -274,12 +304,7 @@ fn main() {
     let thresholds = Thresholds::default();
     // `--out FILE` keeps the whole result for a console to show, with the
     // overfitting statistics beside the table they judge.
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(path) = args
-        .iter()
-        .position(|a| a == "--out")
-        .and_then(|i| args.get(i + 1))
-    {
+    if let Some(path) = flag("--out") {
         let text = oq_backtest::sweep_file::render("sweep_100 ma-cross calm", &report, thresholds);
         match std::fs::write(path, text) {
             Ok(()) => println!("wrote {path}"),

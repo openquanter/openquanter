@@ -14,9 +14,10 @@
 //! several fields, so it can be read by eye and diffed:
 //!
 //! ```text
-//! openquanter-sweep 1
+//! openquanter-sweep 2
 //! label ma-cross calm
 //! equity-every 100
+//! trials 100 340                    # this sweep's, and all the deflation counted
 //! thresholds 0.35 0.95 0
 //! deflated-sharpe 0.41
 //! pbo 0.25 16 0.3 0.12 0.8          # pbo, splits, P(loss), median OOS Sharpe, slope
@@ -34,7 +35,10 @@ use core::fmt::Write as _;
 use crate::sweep::{SweepReport, Thresholds, returns};
 
 /// The format this build writes and reads.
-pub const VERSION: &str = "1";
+pub const VERSION: &str = "2";
+
+/// Versions this build reads. Version 1 had no `trials` line.
+const READS: [&str; 2] = ["1", "2"];
 
 /// Cash as the file writes it: account currency, not the fixed-point unit.
 #[allow(clippy::cast_precision_loss)]
@@ -50,6 +54,12 @@ pub fn render(label: &str, report: &SweepReport, thresholds: Thresholds) -> Stri
     let _ = writeln!(out, "openquanter-sweep {VERSION}");
     let _ = writeln!(out, "label {}", clean(label));
     let _ = writeln!(out, "equity-every {}", report.equity_every);
+    let _ = writeln!(
+        out,
+        "trials {} {}",
+        report.results.len(),
+        report.trials_total
+    );
     let _ = writeln!(
         out,
         "thresholds {} {} {}",
@@ -149,6 +159,9 @@ pub struct Pbo {
 pub struct SweepFile {
     pub label: String,
     pub equity_every: usize,
+    /// `(configurations in this sweep, trials the deflation counted)`;
+    /// `None` in a version-1 file, which did not record it.
+    pub trials: Option<(usize, usize)>,
     /// `(max pbo, min deflated sharpe, min degradation slope)`.
     pub thresholds: (f64, f64, f64),
     pub deflated_sharpe: Result<f64, String>,
@@ -174,13 +187,17 @@ impl SweepFile {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut lines = text.lines().enumerate();
         match lines.next() {
-            Some((_, l)) if l.trim() == format!("openquanter-sweep {VERSION}") => {}
+            Some((_, l))
+                if l.trim()
+                    .strip_prefix("openquanter-sweep ")
+                    .is_some_and(|v| READS.contains(&v)) => {}
             Some((_, l)) => return Err(format!("not a sweep file this build reads: {l:?}")),
             None => return Err("empty".into()),
         }
         let mut f = Self {
             label: String::new(),
             equity_every: 0,
+            trials: None,
             thresholds: (0.0, 0.0, 0.0),
             deflated_sharpe: Err("not recorded".into()),
             pbo: Err("not recorded".into()),
@@ -196,6 +213,13 @@ impl SweepFile {
             match key {
                 "label" => f.label = rest.to_string(),
                 "equity-every" => f.equity_every = num(Some(rest), "equity-every", n)?,
+                "trials" => {
+                    let mut p = rest.split(' ');
+                    f.trials = Some((
+                        num(p.next(), "configurations", n)?,
+                        num(p.next(), "trials", n)?,
+                    ));
+                }
                 "thresholds" => {
                     let mut p = rest.split(' ');
                     f.thresholds = (
@@ -285,12 +309,15 @@ mod tests {
             deflated_sharpe: Ok(0.42),
             pbo: Err("fewer than two configurations scored".into()),
             unscorable: vec!["fast=1\tslow=2".into()],
+            trials_before: 30,
+            trials_total: 31,
             lookahead: None,
         };
         let text = render("demo", &report, Thresholds::default());
         let f = SweepFile::parse(&text).expect("reads");
         assert_eq!(f.label, "demo");
         assert_eq!(f.equity_every, 50);
+        assert_eq!(f.trials, Some((0, 31)));
         assert_eq!(f.deflated_sharpe, Ok(0.42));
         assert_eq!(f.pbo, Err("fewer than two configurations scored".into()));
         assert_eq!(
@@ -304,5 +331,14 @@ mod tests {
         );
         assert!(SweepFile::parse("openquanter-run 1\n").is_err());
         assert!(SweepFile::parse("openquanter-sweep 1\nconfig a\tb\n").is_err());
+    }
+
+    #[test]
+    fn a_version_1_file_still_reads_without_its_trial_count() {
+        let f = SweepFile::parse("openquanter-sweep 1\nlabel old\nequity-every 10\n")
+            .expect("version 1 is still read");
+        assert_eq!(f.label, "old");
+        assert_eq!(f.trials, None);
+        assert!(SweepFile::parse("openquanter-sweep 3\n").is_err());
     }
 }

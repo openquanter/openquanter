@@ -72,8 +72,15 @@ pub struct SweepReport {
     /// overfit search*, and both were computed on every sweep and
     /// discarded at this line.
     pub pbo: Result<oq_stats::PboReport, String>,
-    /// Configurations that produced too few returns to score.
+    /// Configurations that produced too few returns to score. They are
+    /// counted in the trials all the same: they were tried.
     pub unscorable: Vec<String>,
+    /// Trials the registry held before this sweep — earlier sweeps on
+    /// the same question.
+    pub trials_before: usize,
+    /// Trials the deflated Sharpe ratio was deflated by: the earlier
+    /// ones and this sweep's, scored or not.
+    pub trials_total: usize,
     /// The lookahead check of the best-scoring configuration — the one
     /// that would be packaged — or `None` when nothing scored.
     pub lookahead: Option<(String, LookaheadReport)>,
@@ -102,16 +109,33 @@ pub fn returns(curve: &[Cash]) -> Vec<f64> {
 /// `config.equity_every` must be non-zero or nothing can be scored, and
 /// that is reported rather than silently returning a sweep with no
 /// statistics.
+///
+/// Every candidate is recorded into `registry`, scored or not, and the
+/// deflated Sharpe ratio of this sweep's best configuration is deflated
+/// by everything the registry holds. A registry whose Sharpe ratios were
+/// sampled at another frequency is left untouched and the deflated ratio
+/// is reported as not computable: the variance of Sharpe ratios at two
+/// frequencies is not the dispersion of anything.
 pub fn sweep<S: Strategy>(
     config: &RunConfig,
     candidates: &[Candidate<'_, S>],
     ticks: &[Tick],
+    registry: &mut TrialRegistry,
 ) -> SweepReport {
+    let basis = format!("equity-every={}", config.equity_every);
+    let trials_before = registry.len();
+    let foreign = registry.basis().filter(|b| *b != basis).map(str::to_string);
+    let mut scratch = TrialRegistry::new();
+    let registry = if foreign.is_some() {
+        &mut scratch
+    } else {
+        registry.set_basis(basis.clone());
+        registry
+    };
     let mut results = Vec::new();
-    let mut registry = TrialRegistry::new();
     let mut columns: Vec<Vec<f64>> = Vec::new();
     let mut unscorable = Vec::new();
-    let mut best: Option<(f64, usize)> = None;
+    let mut best: Option<(Trial, usize)> = None;
 
     for (index, candidate) in candidates.iter().enumerate() {
         let mut strategy = (candidate.build)(ticks);
@@ -125,27 +149,46 @@ pub fn sweep<S: Strategy>(
         // them cannot be deflated.
         match Moments::from_returns(&series) {
             Ok(moments) => {
-                let sharpe = moments.sharpe_ratio();
-                if best.is_none_or(|(b, _)| sharpe > b) {
-                    best = Some((sharpe, index));
-                }
-                registry.record(Trial {
+                let trial = Trial {
                     id: candidate.id.clone(),
-                    sharpe,
+                    sharpe: moments.sharpe_ratio(),
                     n_observations: series.len(),
                     skewness: moments.skewness,
                     kurtosis: moments.kurtosis,
-                });
+                };
+                if best.as_ref().is_none_or(|(b, _)| trial.sharpe > b.sharpe) {
+                    best = Some((trial.clone(), index));
+                }
+                registry.record(trial);
                 columns.push(series);
             }
-            Err(_) => unscorable.push(candidate.id.clone()),
+            Err(_) => {
+                registry.record_unscored(candidate.id.clone());
+                unscorable.push(candidate.id.clone());
+            }
         }
         results.push((candidate.id.clone(), result));
     }
 
-    let deflated_sharpe = registry
-        .deflated_sharpe_of_best()
-        .map_err(|e| format!("{e}"));
+    let deflated_sharpe = match (&foreign, &best) {
+        (Some(other), _) => Err(format!(
+            "the trial ledger holds Sharpe ratios sampled at {other}, this sweep's are at \
+             {basis}; they cannot be deflated together, and counting this sweep alone \
+             would forget the earlier ones"
+        )),
+        (None, Some((trial, _))) => registry
+            .deflated_sharpe_of(trial)
+            .map_err(|e| format!("{e}")),
+        (None, None) => Err(format!(
+            "{}",
+            oq_stats::StatsError::TooFewObservations { got: 0, need: 1 }
+        )),
+    };
+    let trials_total = if foreign.is_some() {
+        trials_before
+    } else {
+        registry.len()
+    };
 
     // PBO needs a rectangular matrix, so the columns are cut to the
     // shortest. Cutting rather than padding: a padded column would
@@ -169,6 +212,8 @@ pub fn sweep<S: Strategy>(
         deflated_sharpe,
         pbo,
         unscorable,
+        trials_before,
+        trials_total,
         lookahead,
     }
 }
@@ -562,6 +607,8 @@ mod strict_mode {
                 performance_degradation: slope,
             }),
             unscorable: Vec::new(),
+            trials_before: 0,
+            trials_total: 0,
             lookahead: None,
         }
     }
@@ -691,5 +738,133 @@ mod strict_mode {
         let t = Thresholds::default();
         let r = report(Ok(t.max_pbo), Ok(t.min_deflated_sharpe));
         assert!(r.deployable(t), "{:?}", r.refusals(t));
+    }
+}
+
+#[cfg(test)]
+mod ledger {
+    use super::*;
+    use crate::run::tick_at;
+    use oq_margin::{Contract, TierTable};
+    use oq_strategy::{Context, Intent};
+    use oq_types::{InstrumentId, OrderId, PriceTicks, QtyLots, Side};
+
+    fn config(every: usize) -> RunConfig {
+        RunConfig::new(
+            InstrumentId::new(1),
+            Contract::new(1_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(20_000),
+        )
+        .sampling_equity_every(every)
+    }
+
+    fn ticks(n: usize) -> Vec<Tick> {
+        (0..n)
+            .map(|i| {
+                let wobble = [0, 300, -200, 500, -400, 100, -100][i % 7];
+                let p = 6_000_000 + i as i64 * 50 + wobble;
+                tick_at(i as i64 * 1_000_000_000, p, p, p)
+            })
+            .collect()
+    }
+
+    /// Buys one lot every `every` ticks; `every == 0` never trades, which
+    /// leaves a flat curve with no Sharpe ratio.
+    struct Every {
+        every: usize,
+        seen: usize,
+        next: u64,
+    }
+
+    impl Strategy for Every {
+        fn on_tick(&mut self, ctx: &Context, out: &mut Vec<Intent>) {
+            self.seen += 1;
+            if self.every > 0 && self.seen.is_multiple_of(self.every) {
+                self.next += 1;
+                out.push(ctx.limit(
+                    OrderId::new(self.next),
+                    Side::Buy,
+                    PriceTicks(ctx.tick.last.0),
+                    QtyLots(1),
+                ));
+            }
+        }
+
+        fn name(&self) -> &str {
+            "every"
+        }
+    }
+
+    type Build = Box<dyn Fn(&[Tick]) -> Every>;
+
+    fn run(registry: &mut TrialRegistry, every: usize, periods: &[usize]) -> SweepReport {
+        let builders: Vec<Build> = periods
+            .iter()
+            .map(|&p| {
+                Box::new(move |_: &[Tick]| Every {
+                    every: p,
+                    seen: 0,
+                    next: 0,
+                }) as Build
+            })
+            .collect();
+        let candidates: Vec<Candidate<'_, Every>> = periods
+            .iter()
+            .zip(&builders)
+            .map(|(p, b)| Candidate {
+                id: format!("every={p}"),
+                build: b.as_ref(),
+            })
+            .collect();
+        sweep(&config(every), &candidates, &ticks(400), registry)
+    }
+
+    #[test]
+    fn a_second_sweep_on_the_same_ledger_is_deflated_by_both() {
+        let mut fresh = TrialRegistry::new();
+        let alone = run(&mut fresh, 5, &[3, 7, 11, 13]);
+        assert_eq!((alone.trials_before, alone.trials_total), (0, 4));
+
+        let mut carried = fresh.clone();
+        let again = run(&mut carried, 5, &[3, 7, 11, 13]);
+        assert_eq!((again.trials_before, again.trials_total), (4, 8));
+        assert_eq!(carried.len(), 8);
+        // The same winner, found in a search twice as wide.
+        let (a, b) = (
+            alone.deflated_sharpe.unwrap(),
+            again.deflated_sharpe.unwrap(),
+        );
+        assert!(b < a, "a repeated search must deflate further: {b} vs {a}");
+    }
+
+    #[test]
+    fn a_configuration_that_could_not_be_scored_is_still_counted() {
+        let mut registry = TrialRegistry::new();
+        let report = run(&mut registry, 5, &[0, 3, 7]);
+        assert_eq!(report.unscorable, vec!["every=0".to_string()]);
+        assert_eq!(report.trials_total, 3);
+        assert_eq!(registry.unscored(), ["every=0".to_string()]);
+    }
+
+    #[test]
+    fn a_ledger_sampled_at_another_frequency_is_refused_and_left_alone() {
+        let mut registry = TrialRegistry::new();
+        run(&mut registry, 5, &[3, 7]);
+        let before = registry.clone();
+        let report = run(&mut registry, 9, &[3, 7]);
+        assert_eq!(registry, before, "a foreign ledger is not written to");
+        let why = report.deflated_sharpe.clone().expect_err("not deflatable");
+        assert!(
+            why.contains("equity-every=5") && why.contains("equity-every=9"),
+            "{why}"
+        );
+        assert!(
+            report
+                .refusals(Thresholds::default())
+                .iter()
+                .any(|r| matches!(r, Refusal::Unscored { .. })),
+            "and the gate refuses it"
+        );
     }
 }
