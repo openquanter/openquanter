@@ -149,6 +149,11 @@
 //! `self.position`, `self.equity`, `self.entry` — mirrored before each
 //! call rather than fetched across the boundary.
 
+// pyo3's `from_py_object` on a `Copy` class (`Tick`, `Order`) expands to
+// a `.clone()` that clippy 0.1.99 flags. The expansion is a separate item
+// from the struct, so an allow on the struct does not reach it.
+#![allow(clippy::clone_on_copy)]
+
 use oq_backtest::{Context, Intent, MarginMode, RunConfig, Strategy, run, run_stream};
 use std::sync::{Arc, Mutex};
 
