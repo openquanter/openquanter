@@ -149,9 +149,9 @@ deciding whether to use this now.
   decompose as an **unexplained residual**. This is the aim at the top of the
   page made concrete. The instrument exists and every live run feeds it: a
   shadow kernel runs beside the venue on the same observations, and the run
-  ends with the gap decomposed (see [Status](#status)). What it has not had
-  is a long run to decompose: the pillar is built and not yet exercised at
-  length, which is a different thing from unbuilt.
+  emits a decomposition (see [Status](#status)). Sustained testnet operation
+  now supplies evidence for historical audit; an available report is not yet
+  proof that the entire gap has been accounted for.
 
 ## Documentation
 
@@ -338,12 +338,14 @@ That run's strategy was `oq-trade probe`, which places one order at a
 time to measure the round trip — a diagnostic, not a strategy.
 `cargo run -p oq-live --example grid_live` is the same assembly with an
 actual strategy in it, and it is about thirty lines because the assembly
-is the part that was hard. **It has not been run long.** A strategy
-running for hours is what M3's second entry trigger asks for, and that
-has not happened yet; what is claimed here is that there is now something
-to run, not that it has run.
+is the part that was hard. **Validation is now beyond a short probe.**
+Sustained testnet operation provides journals, venue fills, account
+reconciliation and shadow outputs. The next step is a full-window audit of
+those records: replay, order and position consistency, recovery and
+deduplication, ledger reconciliation, and gap attribution. A healthy current
+snapshot is evidence about the present, not a pass for the whole history.
 
-Those runs are the evidence for everything claimed above, and each of them
+The early probes established the assembly, and each of them
 found something no unit test could reach — a price with the right number
 of decimal places that was not a multiple of the tick size; a risk gate
 handed a hardcoded position of zero, so its position cap could never fire;
@@ -353,8 +355,8 @@ reported as a lost connection, costing fourteen reconnections in two
 minutes on a market doing nothing; and an order below the venue's minimum,
 because knowing the precision and the grid is not knowing the floor.
 
-What has not happened is a strategy with an edge running unattended with
-money behind it. The two strategies `oq-trade` ships are deliberately not
+Testnet validation does not establish profitability or production-market
+fill fidelity. The two strategies `oq-trade` ships are deliberately not
 strategies: one never trades and exists to prove the loop, the other rests
 one order far from the market and withdraws it. `grid_live` runs a textbook
 grid, which is a teaching reference and claims no edge.
@@ -419,14 +421,25 @@ filled, under one identity — and `<stem>.oqtk`, the observations,
 rewritten every fifteen minutes and at exit, so `oq-parity` can compare
 the two and `oq-parity markout` can price them afterwards.
 
-So "every cent accounted for" is now a report each run prints rather
-than an intention. Funding is measured on both sides: the venue's own
+So "every cent accounted for" can now be tested against a report rather
+than asserted as an intention. Funding is measured on both sides: the venue's own
 ledger for the account, and the model's positions charged at the rate and
 mark the venue settled at — a computation checked against the ledger at
 every settlement, which reports funding unavailable, with the reason,
-the moment it fails to reproduce it. What keeps it short of the aim is
-that no long run has been decomposed. Binance only; other venues report
-funding unavailable.
+the moment it fails to reproduce it. **Long-run acceptance is pending
+historical audit, not generically waiting for more trading time.** Missing
+funding or fee evidence must be recovered and the report recomputed, or the
+uncovered interval and its effect identified; an unavailable residual is
+not zero and cannot pass the attribution gate. Acceptance binds the replay
+and report to a `RunManifest`; the deployed build must be identified rather
+than assumed to be the current public release. Binance only; other venues
+report funding unavailable.
+
+Capture retention now extends beyond the initial seven-day trial. Existing
+archives can support gap-rate, sequence-integrity and storage-growth audits;
+the retained window alone does not establish completeness. The
+[roadmap](docs/ROADMAP.md#evidence-led-validation) defines the next validation
+deliverables and the distinction between testnet and production calibration.
 
 One clarification, because the names collide: the order book reconstruction
 in `oq-l2feed` is a tool for **verifying an archive**, and the L2 fidelity
