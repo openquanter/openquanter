@@ -47,7 +47,7 @@ commitments.
 | **M0** | Foundations: repository, capture, statistics | 3–6 pw | Mostly landed |
 | **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
 | **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | Acceptance open: G3 needs the workload defined in Requirements; G7's batching trade-off is measured, not waived; G11 was withdrawn |
-| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | Acceptance open: audit existing sustained testnet evidence; attribution, cutover, G6 and adoption gates remain separate |
+| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | Historical review completed; G12 not passed. Resolve the specific accounting/evidence defects; cutover, G6 and adoption gates remain separate |
 | **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Calibration and input-validity work next; audit available records before asking for new samples, and distinguish testnet execution validation from production-market calibration |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
 | **API stability** | API stabilization and semantic versioning | — | After M3 + external adoption |
@@ -185,7 +185,7 @@ failed audit names the defect or uncovered interval; it does not become
 | Cutover | Position-carrying playbook | **Written, never rehearsed**; its §6 lists what is missing before one can be |
 | Cutover | Account record/compare tooling (a rehearsal precondition) | Built — both halves: `oq-recon` compares the **venue** against a record, `oq-belief` compares the **new process's own journal** against the same one |
 | Entry trigger | 1. Core released ≥ 6 months, no open P0/P1 | **Not met** |
-| Entry trigger | 2. Shadow run with every divergence attributed | **Pending historical audit** — runtime alone does not close attribution; see the evidence-led validation plan |
+| Entry trigger | 2. Shadow run with every divergence attributed | **Not passed after historical review** — close the accounting and evidence defects listed in README Status; runtime alone does not close attribution |
 | Entry trigger | 3. Two successful testnet cutover rehearsals | **Not met** |
 | Entry trigger | 4. At least one real third-party user | **Not met** |
 
@@ -507,6 +507,12 @@ not in the matching kernel.
 - Staged rollout stable for ≥ 2 weeks.
 
 ## Evidence-led validation
+
+The first historical review has completed; its scoped outcomes and issue
+links live in [README Status](../README.md#historical-validation-review--2026-10-11).
+Execution checks and evidence-enriched accounting replay have been run.
+Remaining work now names accounting precision, shadow fill deduplication
+and fee/funding provenance, rather than an unspecified lack of runtime.
 
 Use the records described in [README Status](../README.md#status) before
 asking for another run. Each audit ends in **pass**, **fail**, or **specific

@@ -340,10 +340,9 @@ time to measure the round trip — a diagnostic, not a strategy.
 actual strategy in it, and it is about thirty lines because the assembly
 is the part that was hard. **Validation is now beyond a short probe.**
 Sustained testnet operation provides journals, venue fills, account
-reconciliation and shadow outputs. The next step is a full-window audit of
-those records: replay, order and position consistency, recovery and
-deduplication, ledger reconciliation, and gap attribution. A healthy current
-snapshot is evidence about the present, not a pass for the whole history.
+reconciliation and shadow outputs. A historical evidence review has now
+checked those records; its scoped results are below. A healthy current
+snapshot alone is evidence about the present, not a pass for the whole history.
 
 The early probes established the assembly, and each of them
 found something no unit test could reach — a price with the right number
@@ -426,14 +425,38 @@ than asserted as an intention. Funding is measured on both sides: the venue's ow
 ledger for the account, and the model's positions charged at the rate and
 mark the venue settled at — a computation checked against the ledger at
 every settlement, which reports funding unavailable, with the reason,
-the moment it fails to reproduce it. **Long-run acceptance is pending
-historical audit, not generically waiting for more trading time.** Missing
+the moment it fails to reproduce it. **The historical review is complete;
+G12 has not passed because evidence and accounting defects remain.** Missing
 funding or fee evidence must be recovered and the report recomputed, or the
 uncovered interval and its effect identified; an unavailable residual is
 not zero and cannot pass the attribution gate. Acceptance binds the replay
 and report to a `RunManifest`; the deployed build must be identified rather
 than assumed to be the current public release. Binance only; other venues
 report funding unavailable.
+
+### Historical validation review — 2026-10-11
+
+The review used off-repository records and independent venue statements.
+These are scoped audit outcomes, not certification of every build or
+deployment; no account data or operational records are published here.
+
+| Check | Audited outcome |
+|---|---|
+| Journal integrity and run-file integrity | Checksums, dense journal sequences and run body hashes verified at the audit cutoff |
+| Executions and order lifecycle | Venue trade identities match booked journal fills; normalized side, price and quantity agree; no orphan fills, overfills or unresolved submissions in the reviewed records |
+| Position continuity | Adopted quantities agree across restarts; reconstructed final legs and entry prices agree with the venue at recorded price precision; current resting order identities agree |
+| Historical funding | Venue statements recovered; per-leg settlement arithmetic, truncated at settlement precision, reproduces the retrieved ledger exactly |
+| Evidence-enriched kernel accounting replay | Repeated replay is deterministic; quantities, final entries, fees and recovered funding agree. Exact realized P&L still differs because cost basis is rounded: [#353](https://github.com/openquanter/openquanter/issues/353), with a fully synthetic reproduction |
+| Shadow/exported venue fills | Surplus rows relative to accepted unique executions prevent using the exports as a clean attribution baseline; deduplicate before forwarding to shadow: [#354](https://github.com/openquanter/openquanter/issues/354) |
+| Net accounting and G12 | **Not passed.** Recorded fee/funding evidence is incomplete, and a numeric residual remains unavailable. Persist provenance and backfill it idempotently: [#355](https://github.com/openquanter/openquanter/issues/355) |
+
+The accounting replay joins fee statements and venue leg information that
+the original live journal does not fully carry; it is not a self-contained
+replay of all strategy decisions, margin checks or opening wallet state.
+Position recovery across ordinary restarts also does not establish the
+playbook's abort rehearsal. Close these specific gaps rather than restart
+a generic long-run waiting period. Passing the scoped execution checks does
+not waive G6, cutover, production-market calibration or adoption gates.
 
 Capture retention now extends beyond the initial seven-day trial. Existing
 archives can support gap-rate, sequence-integrity and storage-growth audits;
