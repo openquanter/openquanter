@@ -34,6 +34,7 @@
 
 #![forbid(unsafe_code)]
 
+mod cost;
 pub mod event;
 pub mod kernel;
 pub mod matcher;

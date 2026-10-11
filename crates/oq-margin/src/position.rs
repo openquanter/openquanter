@@ -69,6 +69,8 @@ pub struct MarginedPosition {
     pub qty: QtyLots,
     /// Collateral allocated to this position.
     pub margin: Cash,
+    /// Remaining quote cost before rounding the displayed entry to ticks.
+    pub entry_cost: Option<i128>,
 }
 
 /// What the mark price implies for a position.
@@ -96,7 +98,15 @@ impl MarginedPosition {
             entry,
             qty,
             margin,
+            entry_cost: None,
         }
+    }
+
+    /// Retain precise accounting while still displaying a grid-aligned entry.
+    #[must_use]
+    pub const fn with_entry_cost(mut self, cost: i128) -> Self {
+        self.entry_cost = Some(cost);
+        self
     }
 
     #[must_use]
@@ -112,7 +122,10 @@ impl MarginedPosition {
     /// Unrealized profit at `mark`.
     #[must_use]
     pub const fn unrealized(&self, mark: PriceTicks) -> Cash {
-        self.contract.unrealized(self.entry, mark, self.qty)
+        match self.entry_cost {
+            Some(cost) => self.contract.unrealized_from_cost(cost, mark, self.qty),
+            None => self.contract.unrealized(self.entry, mark, self.qty),
+        }
     }
 
     /// Margin plus unrealized profit.
@@ -161,7 +174,9 @@ impl MarginedPosition {
 
         let k = self.contract.tick_cash as i128;
         let size = self.qty.0.saturating_abs() as i128;
-        let entry = self.entry.0 as i128;
+        let entry_cost = self
+            .entry_cost
+            .unwrap_or_else(|| self.contract.notional_wide(self.entry, self.qty));
         let margin = self.margin.0 as i128;
         let amount = tier.amount.0 as i128;
         let rate = tier.rate.0 as i128;
@@ -171,12 +186,12 @@ impl MarginedPosition {
         // ratio scale cleared by multiplying the numerator by `scale`.
         let (num, den) = if self.qty.0 > 0 {
             (
-                (entry * size * k - margin - amount) * scale,
+                (entry_cost - margin - amount) * scale,
                 size * k * (scale - rate),
             )
         } else {
             (
-                (entry * size * k + margin + amount) * scale,
+                (entry_cost + margin + amount) * scale,
                 size * k * (scale + rate),
             )
         };

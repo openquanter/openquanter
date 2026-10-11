@@ -81,14 +81,14 @@ cargo run --example martingale_ladder
 
 ```text
                         enforced      margin-free
-final equity              0.00     20908.11
-lowest equity             0.00    -30302.14
+final equity              0.00     20908.09
+lowest equity             0.00    -30302.17
 fills                        4                6
 liquidations                 1                0
 
 martingale-ladder: LIQUIDATED 1x, first at t=114750000000; margin-free equity
-20908.11 vs real 0.00
-(overstated by 20908.11); the venue kept 61.53 at the bankruptcy price; 2 fills
+20908.09 vs real 0.00
+(overstated by 20908.09); the venue kept 61.53 at the bankruptcy price; 2 fills
 in the margin-free run happened after the account was already closed
 ```
 
