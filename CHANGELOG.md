@@ -110,6 +110,12 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Fixed
 
+- Live shadow evidence now receives only fills accepted by the authoritative
+  books. Recovered-then-stream redeliveries, stale trade identities and
+  unidentifiable reports no longer add surplus venue rows to run exports.
+  Distinct partial fills and both sides of a shared trade identity remain
+  observable, including maker rebates. Legacy exports with surplus rows
+  require rebuilding from accepted journal fills under a new manifest.
 - `oq-tiers` printed final equity divided by 100 instead of the
   fixed-point scale, a factor of a million too large.
 
