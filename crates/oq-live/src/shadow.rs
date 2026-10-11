@@ -181,6 +181,8 @@ struct Pending {
 /// available.
 pub struct Shadow {
     kernel: Kernel,
+    seed: ModelSeed,
+    pairing_valid: bool,
     /// The last observation, for the prevailing price at a fill.
     last: Option<PriceTicks>,
     /// Fills both sides made, kept so the gap can be attributed rather
@@ -208,6 +210,16 @@ pub struct Shadow {
     /// and calling that a divergence would report a divergence for every
     /// fill, which is the same as reporting none.
     grace: Nanos,
+}
+
+struct ModelSeed {
+    instrument: InstrumentId,
+    tick_cash: i64,
+    balance: Cash,
+    mode: oq_core::PositionMode,
+    legs: Vec<(Side, QtyLots, PriceTicks)>,
+    clean: bool,
+    identity: String,
 }
 
 impl Shadow {
@@ -241,8 +253,41 @@ impl Shadow {
 
     /// Start from a stated model seed, including its optional fee policy.
     pub fn from_state(state: State) -> Self {
+        let holding = state.holding();
+        let mut legs = Vec::new();
+        if holding.qty.0 != 0 {
+            legs.push((
+                if holding.qty.0 > 0 {
+                    Side::Buy
+                } else {
+                    Side::Sell
+                },
+                QtyLots(holding.qty.0.saturating_abs()),
+                holding.entry,
+            ));
+        }
+        if holding.short_qty.0 != 0 {
+            legs.push((
+                Side::Sell,
+                QtyLots(holding.short_qty.0.saturating_abs()),
+                holding.short_entry,
+            ));
+        }
+        let seed = ModelSeed {
+            instrument: holding.instrument,
+            tick_cash: holding.contract.tick_cash,
+            balance: state.balance(),
+            mode: state.mode,
+            legs,
+            clean: state.realized == Cash::ZERO
+                && state.fees == Cash::ZERO
+                && state.funding == Cash::ZERO,
+            identity: format!("{state:?}"),
+        };
         Self {
             kernel: Kernel::new(state),
+            seed,
+            pairing_valid: true,
             last: None,
             matched: Vec::new(),
             unpaired: Vec::new(),
@@ -330,6 +375,7 @@ impl Shadow {
         // point is to notice when the prices differ.
         if let Some(i) = self.unmatched_model.iter().position(|p| p.id == id) {
             let model = self.unmatched_model.remove(i);
+            self.pairing_valid &= model.side == side && model.qty == qty;
             // Kept whether or not it diverged: a matched pair with the
             // same price contributes zero slippage, and a decomposition
             // that only saw the divergent pairs would be attributing a
@@ -487,6 +533,34 @@ impl Shadow {
         self.kernel.state().fees_known()
     }
 
+    pub(crate) fn seed_matches(
+        &self,
+        instrument: InstrumentId,
+        tick_cash: i64,
+        balance: Cash,
+        mode: oq_core::PositionMode,
+        legs: &[(Side, QtyLots, PriceTicks)],
+    ) -> bool {
+        self.seed.clean
+            && self.seed.instrument == instrument
+            && self.seed.tick_cash == tick_cash
+            && self.seed.balance == balance
+            && self.seed.mode == mode
+            && self.seed.legs == legs
+    }
+
+    pub(crate) fn seed_identity(&self) -> &str {
+        &self.seed.identity
+    }
+
+    pub(crate) fn model_funding(&self) -> Cash {
+        self.kernel.state().funding
+    }
+
+    pub(crate) fn pairing_valid(&self) -> bool {
+        self.pairing_valid
+    }
+
     /// The model's realized result, for the decomposition's other side.
     ///
     /// The gap `attribute` decomposes is the venue's P&L minus this one,
@@ -537,6 +611,14 @@ impl Shadow {
             .push((at, fill.order, fill.side, fill.price, fill.qty));
         if let Some(i) = self.unmatched_venue.iter().position(|p| p.id == fill.order) {
             let venue = self.unmatched_venue.remove(i);
+            self.pairing_valid &= venue.side == fill.side && venue.qty == fill.qty;
+            self.matched.push(oq_parity::attribution::Matched {
+                side: fill.side,
+                qty: fill.qty,
+                model_price: fill.price,
+                venue_price: venue.price,
+                reference_price: self.last,
+            });
             if venue.price != fill.price {
                 self.divergences.push(Divergence::Price {
                     id: fill.order,
@@ -741,6 +823,59 @@ mod tests {
             stamp(ns),
         ));
         s.on_tick(tick(ns, price));
+    }
+
+    #[test]
+    fn venue_before_model_keeps_the_matched_price_evidence() {
+        let mut s = shadow();
+        s.on_tick(tick(SEC, 6_000_000));
+        s.apply(&submitted(
+            OrderId(1),
+            Side::Buy,
+            None,
+            QtyLots(1),
+            Offset::Open,
+            stamp(SEC),
+        ));
+        s.on_venue_fill(
+            OrderId(1),
+            Side::Buy,
+            PriceTicks(6_000_000),
+            QtyLots(1),
+            Nanos(SEC),
+        );
+        s.on_tick(tick(SEC + 1, 6_000_000));
+        s.finish(Nanos(60 * SEC));
+        assert_eq!(s.evidence_counts(), (1, 0));
+        assert!(s.pairing_valid());
+        assert_eq!(s.matched[0].venue_price, PriceTicks(6_000_000));
+        assert!(s.matched[0].reference_price.is_some());
+    }
+
+    #[test]
+    fn mismatched_sides_or_quantities_cannot_certify_complete_pairing() {
+        for (side, qty) in [(Side::Sell, QtyLots(1)), (Side::Buy, QtyLots(2))] {
+            for venue_first in [false, true] {
+                let mut s = shadow();
+                s.on_tick(tick(SEC, 6_000_000));
+                s.apply(&submitted(
+                    OrderId(1),
+                    Side::Buy,
+                    None,
+                    QtyLots(1),
+                    Offset::Open,
+                    stamp(SEC),
+                ));
+                if !venue_first {
+                    s.on_tick(tick(SEC + 1, 6_000_000));
+                }
+                s.on_venue_fill(OrderId(1), side, PriceTicks(6_000_000), qty, Nanos(SEC));
+                if venue_first {
+                    s.on_tick(tick(SEC + 1, 6_000_000));
+                }
+                assert!(!s.pairing_valid());
+            }
+        }
     }
 
     /// The baseline. When the venue confirms what the model did, at the

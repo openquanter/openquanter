@@ -67,6 +67,7 @@ OPTIONS:
     --warm-minutes <N>     Replay this much history first [default: 0]
     --model-maker-fee-ppm <N>  Stated shadow maker fee, signed integer ppm
     --model-taker-fee-ppm <N>  Stated shadow taker fee; both rates required
+    --account-scope-hash <SHA256>  Established opaque venue/account scope for coverage
     --max-qty <LOTS>       Largest single order [default: 1]
                            One lot is below the minimum notional on most
                            contracts, so the gate refuses every order at the
@@ -284,6 +285,26 @@ fn model_fee_policy(args: &[String]) -> Result<Option<oq_core::Fees>, String> {
     }
 }
 
+fn account_scope_policy(args: &[String]) -> Result<Option<String>, String> {
+    let mut positions = args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, arg)| (arg == "--account-scope-hash").then_some(i));
+    let Some(i) = positions.next() else {
+        return Ok(None);
+    };
+    if positions.next().is_some() {
+        return Err("--account-scope-hash was repeated".into());
+    }
+    let hash = args
+        .get(i + 1)
+        .ok_or("--account-scope-hash needs SHA-256")?;
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("--account-scope-hash needs a 64-digit SHA-256".into());
+    }
+    Ok(Some(hash.to_ascii_lowercase()))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -300,6 +321,14 @@ fn main() -> ExitCode {
     let mut environment = oq_live::env::Production::new();
     if let Some(fees) = model_fees {
         environment = environment.with_model_fees(fees);
+    }
+    match account_scope_policy(&args) {
+        Ok(Some(hash)) => environment = environment.with_account_scope_hash(hash),
+        Ok(None) => {}
+        Err(why) => {
+            eprintln!("oq-trade: {why}");
+            return ExitCode::FAILURE;
+        }
     }
     let value = |flag: &str| -> Option<String> {
         args.iter()
@@ -461,6 +490,28 @@ mod tests {
             vec!["--model-maker-fee-ppm", "0", "--model-maker-fee-ppm", "0"],
         ] {
             assert!(policy(&words).is_err(), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn account_scope_requires_a_single_opaque_hash() {
+        assert_eq!(account_scope_policy(&[]).unwrap(), None);
+        let hash = "B".repeat(64);
+        assert_eq!(
+            account_scope_policy(&["--account-scope-hash".into(), hash.clone()]).unwrap(),
+            Some(hash.to_ascii_lowercase())
+        );
+        for args in [
+            vec!["--account-scope-hash".into()],
+            vec!["--account-scope-hash".into(), "unknown".into()],
+            vec![
+                "--account-scope-hash".into(),
+                hash.clone(),
+                "--account-scope-hash".into(),
+                hash,
+            ],
+        ] {
+            assert!(account_scope_policy(&args).is_err());
         }
     }
 }

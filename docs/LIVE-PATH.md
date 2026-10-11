@@ -752,6 +752,39 @@ identity; use the covered report's `verify_baseline` for the coverage identity.
 The historical evaluation time in the attachment is replayed, not replaced
 with wall time when an offline report is read.
 
+### Covered final live attribution
+
+The production host accepts `--account-scope-hash SHA256`; library hosts
+provide `Environment::account_scope_hash` (production builder:
+`with_account_scope_hash`). This is an opaque, externally established scope,
+not authentication by hashing arbitrary text. After final funding and fee
+recovery, a healthy native journal and both bounded sources are required.
+Verified histories are exclusively persisted as
+`<stem>.<coverage-data-hash>.<coverage-policy-hash>.history-evidence`.
+Source or attachment failure leaves the final decomposition incomplete.
+Interim control reports likewise have no numeric residual before final
+closed-window evidence exists.
+
+`ledger::attribute_with_history` verifies the same immutable native snapshot
+and compares its realized-minus-fees-plus-funding result with Books. It also
+checks the shadow's clean starting instrument/contract, balance, position
+mode and observed legs, and exact canonical venue fill sequence. Actual P&L
+comes from the fold, not the explained component sum; model P&L comes from
+the independent shadow. A model fee policy must be stated. Model funding
+is unavailable for unmodelled recovered lines, unverified settlements,
+missing/pending/gapped obligations or stale/inconsistent funding totals.
+No historical model inventory is invented to turn a known cash line into
+a modelled settlement.
+
+The report scope is `openquanter covered live attribution v1`. Its data hash
+binds complete source coverage, and its config hash binds native context,
+run policy and effective model seed. Full data/config hashes accompany the
+printed report. A code-only change remains distinguishable from changed
+inputs/configuration. A synthetic round-trip with a non-zero independently
+folded P&L gap checks a fully measured zero residual and refusal of foreign
+seeds, fills, fees or totals. Historical production acceptance still needs
+its own identified build, original model inventory and covered report.
+
 ### Identity-bound native ledger reports
 
 ```sh
