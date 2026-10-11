@@ -29,6 +29,14 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Funding journals retain original venue ledger identities.** Additive
+  `FUNDING_EVIDENCE` (14) stores each `(id, time_ms, amount)` line beside the
+  settlement's rate, mark, venue/model totals and verification result.
+  Native ledger replay checks exact line totals, settlement-window placement
+  and duplicate identities across settlements, and prints the identified
+  line count. Legacy `FUNDING` (11) remains readable without invented IDs.
+  Identity evidence is not proof that every historical settlement was read;
+  `--require-coverage` still refuses unverified funding coverage.
 - **Funding history pagination refuses an incomplete prefix.** Binance
   funding ledger and rate history use a bounded inclusive-time walk with
   stable-identity deduplication and conflict detection. A full page that

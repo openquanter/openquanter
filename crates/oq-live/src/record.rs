@@ -71,6 +71,9 @@ pub mod kind {
     pub const EXECUTION: u16 = 12;
     /// The parameters of the authoritative account ledger.
     pub const LEDGER_START: u16 = 13;
+    /// Funding with original venue ledger identities, added independently
+    /// of the legacy aggregate record's unchanged payload.
+    pub const FUNDING_EVIDENCE: u16 = 14;
 }
 
 /// How a submitted order turned out.
@@ -244,6 +247,18 @@ pub enum Record {
         model: Cash,
         verified: bool,
     },
+    /// A funding settlement with the original `(id, time_ms, amount)`
+    /// rows. The aggregate alone cannot establish cash-flow identities.
+    FundingEvidence {
+        at: Nanos,
+        settled_ms: i64,
+        rate: String,
+        mark: String,
+        venue: Cash,
+        model: Cash,
+        verified: bool,
+        lines: Vec<(i64, i64, Cash)>,
+    },
     /// Uses the core's canonical venue-fill payload instead of a second
     /// encoder for offset, liquidity, clocks and reported commission.
     Execution {
@@ -286,6 +301,7 @@ impl Record {
             | Self::Reconciled { .. }
             | Self::Operator { .. }
             | Self::Funding { .. }
+            | Self::FundingEvidence { .. }
             | Self::Execution { .. }
             | Self::LedgerStart { .. } => false,
         }
@@ -306,6 +322,7 @@ impl Record {
             Self::Waiting { .. } => kind::WAITING,
             Self::Operator { .. } => kind::OPERATOR,
             Self::Funding { .. } => kind::FUNDING,
+            Self::FundingEvidence { .. } => kind::FUNDING_EVIDENCE,
             Self::Execution { .. } => kind::EXECUTION,
             Self::LedgerStart { .. } => kind::LEDGER_START,
         }
@@ -486,6 +503,38 @@ impl Record {
                 put_i64(&mut out, model.0);
                 out.push(u8::from(*verified));
             }
+            Self::FundingEvidence {
+                at,
+                settled_ms,
+                rate,
+                mark,
+                venue,
+                model,
+                verified,
+                lines,
+            } => {
+                out.extend(
+                    Self::Funding {
+                        at: *at,
+                        settled_ms: *settled_ms,
+                        rate: rate.clone(),
+                        mark: mark.clone(),
+                        venue: *venue,
+                        model: *model,
+                        verified: *verified,
+                    }
+                    .encode(),
+                );
+                put_i64(
+                    &mut out,
+                    i64::try_from(lines.len()).expect("funding line count fits i64"),
+                );
+                for (id, time_ms, amount) in lines {
+                    put_i64(&mut out, *id);
+                    put_i64(&mut out, *time_ms);
+                    put_i64(&mut out, amount.0);
+                }
+            }
             Self::Reconciled { at, legs } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(legs.len()).unwrap_or(0));
@@ -589,6 +638,41 @@ impl Record {
                 model: Cash(take_i64(&mut p)?),
                 verified: take_u8(&mut p)? != 0,
             },
+            kind::FUNDING_EVIDENCE => {
+                let at = Nanos(take_i64(&mut p)?);
+                let settled_ms = take_i64(&mut p)?;
+                let rate = take_str(&mut p)?;
+                let mark = take_str(&mut p)?;
+                let venue = Cash(take_i64(&mut p)?);
+                let model = Cash(take_i64(&mut p)?);
+                let verified = match take_u8(&mut p)? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                };
+                let count = usize::try_from(take_i64(&mut p)?).ok()?;
+                if count.checked_mul(24)? != p.len() {
+                    return None;
+                }
+                let mut lines = Vec::with_capacity(count);
+                for _ in 0..count {
+                    lines.push((
+                        take_i64(&mut p)?,
+                        take_i64(&mut p)?,
+                        Cash(take_i64(&mut p)?),
+                    ));
+                }
+                Self::FundingEvidence {
+                    at,
+                    settled_ms,
+                    rate,
+                    mark,
+                    venue,
+                    model,
+                    verified,
+                    lines,
+                }
+            }
             kind::EXECUTION => {
                 let client_id = take_str(&mut p)?;
                 if p.len() < 4 {

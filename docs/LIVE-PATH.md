@@ -586,3 +586,16 @@ boundary is never skipped: if a full millisecond cannot be enumerated by
 this cursor, it remains unresolved. Reading a terminal short page does not
 prove that the venue retains every earlier row or establish persisted
 account-history coverage.
+
+New funding settlements use additive `FUNDING_EVIDENCE` (14). Its payload
+starts with the unchanged `FUNDING` fields (receive ns, settlement ms,
+length-prefixed rate/mark, venue/model cash and a 0/1 verification byte),
+then an i64 LE non-negative row count and one `(id, time_ms, amount)` tuple
+of three i64 LE values per original ledger line. The decoder rejects torn
+rows, invalid counts/flags and trailing bytes. Rows are scoped by the
+session's venue/account boundary and ledger symbol. Ledger replay verifies
+their exact sum, rejects a repeated ID even across different settlements,
+and checks each row lies within 60 seconds of its settlement. It reports
+the identified line count, without promoting identity evidence to history
+coverage. Old aggregate-only funding remains readable but has no IDs to
+verify; its payload is never repurposed.

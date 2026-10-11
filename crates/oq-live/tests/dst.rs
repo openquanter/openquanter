@@ -988,6 +988,12 @@ fn funding_records(tag: &str, seed: u64) -> Vec<(i64, i64, bool)> {
                 model,
                 verified,
                 ..
+            }
+            | oq_live::record::Record::FundingEvidence {
+                venue,
+                model,
+                verified,
+                ..
             } => Some((venue.0, model.0, verified)),
             _ => None,
         })
