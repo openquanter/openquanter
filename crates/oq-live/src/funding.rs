@@ -140,6 +140,15 @@ pub struct ScheduleGap {
     pub until_ms: Option<i64>,
 }
 
+/// Confirmed cash during an unknown schedule interval. There is no model
+/// amount: historical model inventory was not observed at settlement.
+#[derive(Debug, Clone)]
+pub struct RecoveredFunding {
+    pub since_ms: i64,
+    pub through_ms: i64,
+    pub lines: Vec<FundingCharge>,
+}
+
 /// Settlements crossed, and what has been learnt about them.
 #[derive(Debug, Clone)]
 pub struct FundingWatch {
@@ -274,11 +283,79 @@ impl FundingWatch {
     /// The earliest settlement still waiting, to ask the venue from.
     #[must_use]
     pub fn asking_since(&self) -> Option<i64> {
-        self.pending
+        let pending = self
+            .pending
             .iter()
             .map(|p| p.at_ms)
             .min()
-            .map(|t| t - SAME_SETTLEMENT_MS)
+            .map(|t| t.saturating_sub(SAME_SETTLEMENT_MS));
+        pending
+            .into_iter()
+            .chain(self.schedule_gaps.iter().map(|gap| gap.since_ms))
+            .min()
+    }
+
+    #[must_use]
+    pub fn needs_poll(&self) -> bool {
+        self.waiting() || self.needs_schedule() || !self.schedule_gaps.is_empty()
+    }
+
+    /// Book only previously unseen venue rows within recorded unknown
+    /// intervals. Known pending settlements retain their model snapshot
+    /// and must go through `resolve`, even if their rate is still missing.
+    pub fn recover_unknown(
+        &mut self,
+        lines: &[FundingCharge],
+        now_ms: i64,
+    ) -> Option<RecoveredFunding> {
+        let since_ms = self.schedule_gaps.iter().map(|gap| gap.since_ms).min()?;
+        let mut unique = std::collections::BTreeMap::new();
+        for line in lines {
+            if self
+                .booked_lines
+                .get(&line.id)
+                .is_some_and(|prior| *prior != (line.time_ms, line.amount))
+                || unique
+                    .insert(line.id, line)
+                    .is_some_and(|prior: &FundingCharge| prior != line)
+            {
+                self.problem = Some(format!(
+                    "funding recovery identity {} has conflicting evidence",
+                    line.id
+                ));
+                return None;
+            }
+        }
+        let mut recovered = Vec::new();
+        for line in unique.into_values() {
+            if self.booked_lines.contains_key(&line.id) || line.time_ms > now_ms {
+                continue;
+            }
+            if !self.schedule_gaps.iter().any(|gap| {
+                line.time_ms >= gap.since_ms && line.time_ms <= gap.until_ms.unwrap_or(now_ms)
+            }) {
+                continue;
+            }
+            if self.pending.iter().any(|p| {
+                i128::from(line.time_ms).abs_diff(i128::from(p.at_ms)) <= SAME_SETTLEMENT_MS as u128
+            }) {
+                continue;
+            }
+            recovered.push(*line);
+        }
+        if recovered.is_empty() {
+            return None;
+        }
+        recovered.sort_by_key(|line| (line.time_ms, line.id));
+        for line in &recovered {
+            self.booked_lines
+                .insert(line.id, (line.time_ms, line.amount));
+        }
+        Some(RecoveredFunding {
+            since_ms,
+            through_ms: now_ms,
+            lines: recovered,
+        })
     }
 
     /// Resolve what the venue's figures now answer. Each resolved
@@ -720,6 +797,70 @@ mod tests {
             }
         );
         assert!(w.evidence().is_err());
+    }
+
+    #[test]
+    fn unknown_interval_cash_recovers_once_without_creating_model_evidence() {
+        let t = 1_790_323_200_000;
+        let legs = (QtyLots(4), QtyLots(0));
+        let mut w = FundingWatch::new(btc(), Err("discovery failed".into()));
+        w.on_time(t, legs, legs, || None);
+        w.rediscover_schedule(t + 10, Ok(Some(t + 100_000)));
+        let rows = [
+            line(t + 5, -10, 1),
+            line(t + 5, -10, 1),
+            line(t - 1, -20, 2),
+            line(t + 100_000, -30, 3),
+        ];
+        let recovered = w.recover_unknown(&rows, t + 20).unwrap();
+        assert_eq!(recovered.lines, vec![line(t + 5, -10, 1)]);
+        assert_eq!((recovered.since_ms, recovered.through_ms), (t, t + 20));
+        assert!(w.recover_unknown(&rows, t + 30).is_none());
+        assert!(
+            w.needs_poll(),
+            "closed gaps still poll for late published rows"
+        );
+        assert_eq!(
+            w.settled(),
+            0,
+            "a recovered ledger row is not a model settlement"
+        );
+        assert!(w.evidence().is_err());
+    }
+
+    #[test]
+    fn known_pending_settlement_rows_are_not_stolen_by_unknown_interval_recovery() {
+        let t = 1_790_323_200_000;
+        let legs = (QtyLots(4), QtyLots(0));
+        let mut w = FundingWatch::new(btc(), Ok(Some(t)));
+        w.on_time(t, legs, legs, || None);
+        let rows = [line(t + 5, -3_359_784, 1)];
+        assert!(w.recover_unknown(&rows, t + 10).is_none());
+        assert_eq!(w.unresolved(), vec![t]);
+        assert_eq!(w.resolve(&[rate(t)], &rows, t + 11).len(), 1);
+        assert!(w.recover_unknown(&rows, t + 12).is_none());
+    }
+
+    #[test]
+    fn conflicting_unknown_history_is_refused_before_any_new_identity_is_consumed() {
+        let t = 1_790_323_200_000;
+        let mut w = FundingWatch::new(btc(), Err("discovery failed".into()));
+        w.on_time(
+            t,
+            (QtyLots(0), QtyLots(0)),
+            (QtyLots(0), QtyLots(0)),
+            || None,
+        );
+        assert!(
+            w.recover_unknown(&[line(t + 1, 10, 1), line(t + 1, 11, 1)], t + 2)
+                .is_none()
+        );
+        let recovered = w.recover_unknown(&[line(t + 1, 10, 1)], t + 3).unwrap();
+        assert_eq!(recovered.lines.len(), 1);
+        assert!(
+            w.evidence().is_err(),
+            "correcting rows does not silently erase the observed conflict"
+        );
     }
 
     #[test]

@@ -176,6 +176,10 @@ fn render_ledger(path: &str, require_coverage: bool) -> ExitCode {
     println!("recorded fees      {}", cash(report.recorded_fees));
     println!("recorded funding   {}", cash(report.funding));
     println!("funding identities {}", report.funding_identified_lines);
+    println!(
+        "unmodelled funding {} lines",
+        report.funding_unmodelled_lines
+    );
     println!("executions         {}", report.executions);
     println!("missing fees       {}", report.missing_fees);
     println!(
@@ -308,6 +312,18 @@ fn render(record: &Record) -> String {
         } => format!(
             "operator {}  {command} by {origin}: {reason} -> {outcome}",
             at.0
+        ),
+        Record::FundingRecovered {
+            at,
+            since_ms,
+            through_ms,
+            lines,
+        } => format!(
+            "funding recovered {}  {} original venue line(s) in {}..{}; model amount unavailable",
+            at.0,
+            lines.len(),
+            since_ms,
+            through_ms
         ),
         Record::Funding {
             at,

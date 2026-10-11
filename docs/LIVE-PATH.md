@@ -599,3 +599,21 @@ and checks each row lies within 60 seconds of its settlement. It reports
 the identified line count, without promoting identity evidence to history
 coverage. Old aggregate-only funding remains readable but has no IDs to
 verify; its payload is never repurposed.
+
+During an unknown schedule interval, confirmed funding ledger rows can
+restore venue cash without reconstructing unobserved model positions.
+Polling continues over the oldest recorded gap after schedule rediscovery.
+Rate unavailability does not block this ledger-only path, and rows matching
+a known pending settlement remain with its captured inventory. Stable IDs
+are shared by known-settlement and gap recovery; repeated history is not
+booked again and conflicts remain explicit. Only rows within recorded gaps
+and no later than receipt are eligible. This is not complete account-history
+recovery across restarts or a claim about rows outside those gaps.
+
+`FUNDING_RECOVERED` (15) encodes receive ns, queried lower/upper ms and
+non-negative line count as i64 LE, followed by original `(id, time_ms,
+amount)` triples. It deliberately has no model-amount field. Replay checks
+the range against receipt, validates line placement and rejects duplicate
+IDs shared with `FUNDING_EVIDENCE`. `oq-replay --ledger` reports how many
+funding rows have no historical model amount. Restoring observed cash does
+not repair attribution, prove coverage or close G12.

@@ -1695,20 +1695,25 @@ where
             }
         }
 
-        if (funding.waiting() || funding.needs_schedule())
-            && clock.elapsed().saturating_sub(last_funding_poll) >= FUNDING_POLL
+        if funding.needs_poll() && clock.elapsed().saturating_sub(last_funding_poll) >= FUNDING_POLL
         {
             last_funding_poll = clock.elapsed();
             let at = clock.wall();
-            for settled in poll_funding(
+            let (settled, recovered) = poll_funding(
                 &mut funding,
                 trader.venue(),
                 &symbol,
                 &mut books,
                 &mut shadow,
                 at,
-            ) {
+            );
+            for settled in settled {
                 trader.session_mut().record_funding(at, &settled);
+            }
+            if let Some(recovered) = recovered {
+                trader
+                    .session_mut()
+                    .record_recovered_funding(at, &recovered);
             }
         }
 
@@ -1895,17 +1900,23 @@ where
     }
     // A settlement crossed just before the end is asked about once more,
     // so a run that stops soon after one can still account for it.
-    if funding.waiting() || funding.needs_schedule() {
+    if funding.needs_poll() {
         let at = clock.wall();
-        for settled in poll_funding(
+        let (settled, recovered) = poll_funding(
             &mut funding,
             trader.venue(),
             &symbol,
             &mut books,
             &mut shadow,
             at,
-        ) {
+        );
+        for settled in settled {
             trader.session_mut().record_funding(at, &settled);
+        }
+        if let Some(recovered) = recovered {
+            trader
+                .session_mut()
+                .record_recovered_funding(at, &recovered);
         }
     }
     if let Some(why) = funding.problem() {
@@ -4236,7 +4247,10 @@ fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
     books: &mut crate::books::Books,
     shadow: &mut crate::shadow::Shadow,
     at: Nanos,
-) -> Vec<crate::funding::Settled> {
+) -> (
+    Vec<crate::funding::Settled>,
+    Option<crate::funding::RecoveredFunding>,
+) {
     if funding.needs_schedule() {
         let now_ms = at.0 / 1_000_000;
         funding.rediscover_schedule(
@@ -4255,21 +4269,38 @@ fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
         }
     }
     let Some(since) = funding.asking_since() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let before = funding.problem().map(str::to_string);
-    let settled = match (
-        venue.funding_rates(symbol, since),
-        venue.funding_charged(symbol, since),
-    ) {
-        (Ok(Some(rates)), Ok(Some(lines))) => funding.resolve(&rates, &lines, at.0 / 1_000_000),
-        // Asked again at the next poll; unresolved settlements remain
-        // obligations even when their publishing delay becomes overdue.
-        (Err(e), _) | (_, Err(e)) => {
-            eprintln!("funding          could not be read: {e}");
-            return Vec::new();
+    let lines = match venue.funding_charged(symbol, since) {
+        Ok(Some(lines)) => lines,
+        Err(e) => {
+            eprintln!("funding          ledger could not be read: {e}");
+            return (Vec::new(), None);
         }
-        _ => return Vec::new(),
+        Ok(None) => return (Vec::new(), None),
+    };
+    let settled = if funding.waiting() {
+        match venue.funding_rates(symbol, since) {
+            Ok(Some(rates)) => funding.resolve(&rates, &lines, at.0 / 1_000_000),
+            Err(e) => {
+                eprintln!("funding          rates could not be read: {e}");
+                Vec::new()
+            }
+            Ok(None) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let recovered = funding.recover_unknown(&lines, at.0 / 1_000_000);
+    if let Some(recovered) = &recovered {
+        for line in &recovered.lines {
+            books.on_funding_charged(line.amount, at);
+        }
+        println!(
+            "funding          recovered {} venue ledger line(s); historical model attribution unavailable",
+            recovered.lines.len()
+        );
     };
     for s in &settled {
         books.on_funding_charged(s.venue, at);
@@ -4298,7 +4329,7 @@ fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
     {
         eprintln!("funding          unavailable for this run: {why}");
     }
-    settled
+    (settled, recovered)
 }
 
 /// Cash to its last place, as the venue writes it.
