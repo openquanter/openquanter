@@ -558,3 +558,12 @@ therefore contains only model executions after startup. Initial basis has
 only the precision supplied by the venue snapshot. This boundary condition
 does not reconstruct historical economics or strategy warm-up state, and
 cannot establish restart parity or funding/history coverage by itself.
+
+Funding settlements awaiting a rate or ledger are retained after the
+30-minute overdue boundary. `FundingWatch::unresolved` exposes their
+timestamps, and `asking_since` continues to include the oldest one. A late
+answer can be booked once. Within the watch, stable funding ledger IDs
+deduplicate overlapping history; conflicting identities or assigning one
+ID to two settlement windows keep attribution unavailable. These checks do
+not establish complete history coverage, persist pending state across a
+restart or rediscover settlements that were never scheduled.
