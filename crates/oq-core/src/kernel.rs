@@ -473,6 +473,39 @@ impl State {
         self
     }
 
+    /// Seed observed opening inventory without fabricating a fill, fee,
+    /// realized result or liquidation. Entry precision is only what the
+    /// supplied basis carries. Call before submitting any orders.
+    pub fn with_initial_legs(
+        mut self,
+        long: Option<(QtyLots, PriceTicks)>,
+        short: Option<(QtyLots, PriceTicks)>,
+    ) -> Result<Self, &'static str> {
+        if self.holdings.len() != 1
+            || !self.is_flat()
+            || self.holding().engine.book().iter().next().is_some()
+            || self.holding().engine.shadowed() != 0
+        {
+            return Err("initial inventory requires one empty holding with no orders");
+        }
+        if self.mode == PositionMode::OneWay && long.is_some() && short.is_some() {
+            return Err("one-way initial inventory cannot contain both legs");
+        }
+        for (qty, entry) in [long, short].into_iter().flatten() {
+            if qty.0 <= 0 || entry.0 <= 0 {
+                return Err("initial inventory requires positive size and entry basis");
+            }
+        }
+        if let Some((qty, entry)) = long {
+            self.at(0).open_leg(false, qty, entry, 1);
+        }
+        if let Some((qty, entry)) = short {
+            let hedged = self.mode == PositionMode::Hedge;
+            self.at(0).open_leg(hedged, qty, entry, -1);
+        }
+        Ok(self)
+    }
+
     /// The only holding, for the single-instrument path.
     ///
     /// Most of this kernel was written when an account had exactly one,

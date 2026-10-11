@@ -406,3 +406,12 @@ oq-replay session.oqj --ledger --require-coverage
 
 实盘账本不依据模型 mark 合成强平成交或保险金转移，而是等待账户流确认平仓后才改变
 实际库存。shadow/风控可投影强平，但投影不是交易所事件。
+
+### shadow 的初始库存
+
+runner 以同一份观测钱包、仓位模式、数量和入场基础启动 books 与 shadow。hedge 模式
+保留双腿，即使 net 为零；one-way 模式拒绝双腿初态。`State::with_initial_legs` 直接
+初始化成本基础，不伪造成交、手续费、已实现 P&L，也不按尚未观测的 mark 清算。
+shadow 成交日志因此只有启动后的模型执行。初始基础精度仅限交易所快照提供的精度。
+这个边界条件不重建历史经济记录或策略 warm-up 状态，也不能单独证明重启 parity 或
+资金费/历史覆盖完整性。

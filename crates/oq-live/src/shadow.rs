@@ -219,8 +219,29 @@ impl Shadow {
         table: TierTable,
         starting_balance: Cash,
     ) -> Self {
+        Self::from_state(State::new(instrument, contract, table, starting_balance))
+    }
+
+    /// Start beside the live books with the same observed mode and entry
+    /// bases. Adoption is a boundary condition, never a model execution.
+    pub fn with_initial_legs(
+        instrument: InstrumentId,
+        contract: Contract,
+        table: TierTable,
+        starting_balance: Cash,
+        mode: oq_core::PositionMode,
+        long: Option<(QtyLots, PriceTicks)>,
+        short: Option<(QtyLots, PriceTicks)>,
+    ) -> Result<Self, &'static str> {
+        let state = State::new(instrument, contract, table, starting_balance)
+            .with_mode(mode)
+            .with_initial_legs(long, short)?;
+        Ok(Self::from_state(state))
+    }
+
+    fn from_state(state: State) -> Self {
         Self {
-            kernel: Kernel::new(State::new(instrument, contract, table, starting_balance)),
+            kernel: Kernel::new(state),
             last: None,
             matched: Vec::new(),
             unpaired: Vec::new(),
@@ -688,6 +709,128 @@ mod tests {
         );
         s.finish(Nanos(10 * SEC));
         assert_eq!(s.divergences(), &[], "identical fills must not diverge");
+    }
+
+    #[test]
+    fn adopted_hedge_legs_keep_their_bases_without_synthetic_fill_evidence() {
+        let mut s = Shadow::with_initial_legs(
+            InstrumentId(1),
+            Contract::new(100_000_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(10_000),
+            oq_core::PositionMode::Hedge,
+            Some((QtyLots(3), PriceTicks(100))),
+            Some((QtyLots(3), PriceTicks(110))),
+        )
+        .unwrap();
+        assert_eq!(s.legs(), (QtyLots(3), QtyLots(-3)));
+        assert_eq!(s.net_position(), QtyLots(0));
+        assert_eq!(s.model_pnl(), Cash::ZERO);
+        assert_eq!(s.model_fees(), Cash::ZERO);
+        assert_eq!(s.fills("SYNTH"), (vec![], vec![]));
+        s.on_tick(tick(SEC, 105));
+        assert_eq!(s.equity(), Cash::from_units(10_030));
+        s.compare_position(QtyLots(0), Nanos(SEC));
+        assert!(s.divergences().is_empty());
+        s.apply(&submitted(
+            OrderId(1),
+            Side::Sell,
+            None,
+            QtyLots(3),
+            Offset::Close,
+            stamp(SEC),
+        ));
+        s.on_tick(tick(2 * SEC, 105));
+        assert_eq!(s.legs(), (QtyLots(0), QtyLots(-3)));
+        assert_eq!(
+            s.model_pnl(),
+            Cash::from_units(12),
+            "sell executes at bid 104 against basis 100"
+        );
+        assert_eq!(
+            s.fills("SYNTH").1.len(),
+            1,
+            "only the actual model close is evidence"
+        );
+    }
+
+    #[test]
+    fn adopted_one_way_short_and_flat_have_correct_opening_inventory() {
+        let s = Shadow::with_initial_legs(
+            InstrumentId(1),
+            Contract::new(100_000_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(10_000),
+            oq_core::PositionMode::OneWay,
+            None,
+            Some((QtyLots(2), PriceTicks(100))),
+        )
+        .unwrap();
+        assert_eq!(s.legs(), (QtyLots(-2), QtyLots(0)));
+        assert_eq!(s.model_pnl(), Cash::ZERO);
+        let flat = Shadow::with_initial_legs(
+            InstrumentId(1),
+            Contract::new(1),
+            TierTable::example_btcusdt(),
+            Cash(123),
+            oq_core::PositionMode::Hedge,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(flat.legs(), (QtyLots(0), QtyLots(0)));
+        assert_eq!(flat.equity(), Cash(123));
+    }
+
+    #[test]
+    fn invalid_initial_inventory_is_refused_without_simulated_liquidation() {
+        let make = |mode, long, short| {
+            Shadow::with_initial_legs(
+                InstrumentId(1),
+                Contract::new(100_000_000),
+                TierTable::example_btcusdt(),
+                Cash(1),
+                mode,
+                long,
+                short,
+            )
+        };
+        assert!(
+            make(
+                oq_core::PositionMode::OneWay,
+                Some((QtyLots(1), PriceTicks(100))),
+                Some((QtyLots(1), PriceTicks(100)))
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                oq_core::PositionMode::Hedge,
+                Some((QtyLots(-1), PriceTicks(100))),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                oq_core::PositionMode::Hedge,
+                None,
+                Some((QtyLots(1), PriceTicks(0)))
+            )
+            .is_err()
+        );
+        let s = make(
+            oq_core::PositionMode::Hedge,
+            Some((QtyLots(5), PriceTicks(100))),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            s.legs(),
+            (QtyLots(5), QtyLots(0)),
+            "adoption must not liquidate against the unobserved zero mark"
+        );
+        assert_eq!(s.model_pnl(), Cash::ZERO);
     }
 
     /// The direction that flatters a backtest: the model booked a fill

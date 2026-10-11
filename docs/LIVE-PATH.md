@@ -546,3 +546,15 @@ Live books do not synthesize liquidation fills or insurance transfers from
 a model mark. They keep confirmed inventory until the account stream closes
 it. The shadow/risk path may project liquidation, but that projection is
 not a venue event.
+
+### Opening inventory in the shadow
+
+The runner starts books and shadow from the same observed wallet, position
+mode, sizes and entry bases. Hedge mode keeps both legs, even when net is
+zero; one-way mode rejects two opening legs. `State::with_initial_legs`
+seeds the cost basis without manufacturing fills, commissions, realized
+P&L or liquidation against a mark not yet observed. The shadow's fill log
+therefore contains only model executions after startup. Initial basis has
+only the precision supplied by the venue snapshot. This boundary condition
+does not reconstruct historical economics or strategy warm-up state, and
+cannot establish restart parity or funding/history coverage by itself.

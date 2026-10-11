@@ -29,6 +29,15 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Live shadow starts from the observed inventory and position mode.**
+  The live runner supplies the same adopted sizes and entry bases to books
+  and shadow, including both hedge legs. Initial inventory is a boundary
+  condition, not a model fill: it creates no execution evidence, fee,
+  realized result or liquidation against an unobserved mark. Invalid basis,
+  non-positive size, duplicate legs and two legs in one-way mode are refused.
+  Subsequent model closes realize against the adopted basis. This does not
+  recover pre-session P&L, commissions or funding, or prove restart strategy
+  parity; those remain separate evidence requirements.
 - **L2 invalid intervals suspend execution until a snapshot.** Capture gaps
   reach the matcher as observations; refused depth also invalidates the
   stale book. Existing orders survive, already-executed delayed responses

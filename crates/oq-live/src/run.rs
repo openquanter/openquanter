@@ -647,7 +647,20 @@ where
     // It never places anything. `Shadow::apply` returns nothing for that
     // reason — a caller acting on its outputs would be running a second
     // trading system.
-    let mut shadow = crate::shadow::Shadow::new(
+    let initial = adopted_lots(&positions, &instrument);
+    let long = initial
+        .iter()
+        .find(|(side, _, _)| *side == Side::Buy)
+        .map(|(_, qty, entry)| (*qty, *entry));
+    let short = initial
+        .iter()
+        .find(|(side, _, _)| *side == Side::Sell)
+        .map(|(_, qty, entry)| (*qty, *entry));
+    if initial.len() != usize::from(long.is_some()) + usize::from(short.is_some()) {
+        eprintln!("shadow           FAILED: initial inventory repeats a leg");
+        return ExitCode::FAILURE;
+    }
+    let mut shadow = match crate::shadow::Shadow::with_initial_legs(
         oq_types::InstrumentId::new(1),
         // The contract the books use, from the venue's own figures. A
         // literal here was the constant this file's own comments call a
@@ -655,13 +668,26 @@ where
         contract,
         oq_margin::TierTable::example_btcusdt(),
         starting_balance,
-    );
+        if hedged {
+            oq_core::PositionMode::Hedge
+        } else {
+            oq_core::PositionMode::OneWay
+        },
+        long,
+        short,
+    ) {
+        Ok(shadow) => shadow,
+        Err(why) => {
+            eprintln!("shadow           FAILED: {why}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Kept so the adoption can be recorded once the journal exists.
     // Adopting is an in-memory act and has to happen here, before the
     // startup check; recording it has to happen after the writer opens.
     // Conflating the two is what left this step invisible.
     let adopted = adopted_legs(&positions, &instrument, &symbol);
-    for (side, lots, entry) in adopted_lots(&positions, &instrument) {
+    for (side, lots, entry) in initial {
         books.adopt(side, lots, entry, clock.wall());
         println!(
             "adopted          {} {} lots at {}",
