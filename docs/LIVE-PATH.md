@@ -577,3 +577,12 @@ resume, but attribution remains unavailable for a run with an unknown
 schedule interval. These intervals currently live in the watch; durable
 history/coverage records and reconstruction of missed settlements remain
 separate recovery work.
+
+The Binance funding ledger and rate readers page through inclusive time
+boundaries, deduplicate stable identities and reject conflicting evidence.
+They fail rather than return a prefix when a full page cannot progress,
+a later request fails or the 50-page bound is exhausted. The shared-time
+boundary is never skipped: if a full millisecond cannot be enumerated by
+this cursor, it remains unresolved. Reading a terminal short page does not
+prove that the venue retains every earlier row or establish persisted
+account-history coverage.
