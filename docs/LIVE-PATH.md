@@ -567,3 +567,13 @@ deduplicate overlapping history; conflicting identities or assigning one
 ID to two settlement windows keep attribution unavailable. These checks do
 not establish complete history coverage, persist pending state across a
 restart or rediscover settlements that were never scheduled.
+
+When the next settlement cannot be discovered, the host retries that query
+on the same 60-second funding poll, including when there are no pending
+settlements. `FundingWatch::schedule_gaps` keeps the injected-time interval
+from discovery loss until a future schedule is obtained; it never accepts
+a stale next time or extrapolates the venue's interval. Future settlements
+resume, but attribution remains unavailable for a run with an unknown
+schedule interval. These intervals currently live in the watch; durable
+history/coverage records and reconstruction of missed settlements remain
+separate recovery work.

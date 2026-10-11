@@ -1695,7 +1695,9 @@ where
             }
         }
 
-        if funding.waiting() && clock.elapsed().saturating_sub(last_funding_poll) >= FUNDING_POLL {
+        if (funding.waiting() || funding.needs_schedule())
+            && clock.elapsed().saturating_sub(last_funding_poll) >= FUNDING_POLL
+        {
             last_funding_poll = clock.elapsed();
             let at = clock.wall();
             for settled in poll_funding(
@@ -1893,7 +1895,7 @@ where
     }
     // A settlement crossed just before the end is asked about once more,
     // so a run that stops soon after one can still account for it.
-    if funding.waiting() {
+    if funding.waiting() || funding.needs_schedule() {
         let at = clock.wall();
         for settled in poll_funding(
             &mut funding,
@@ -4235,6 +4237,23 @@ fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
     shadow: &mut crate::shadow::Shadow,
     at: Nanos,
 ) -> Vec<crate::funding::Settled> {
+    if funding.needs_schedule() {
+        let now_ms = at.0 / 1_000_000;
+        funding.rediscover_schedule(
+            now_ms,
+            venue.next_funding_ms(symbol).map_err(|e| e.to_string()),
+        );
+        if let Some(gap) = funding
+            .schedule_gaps()
+            .last()
+            .filter(|gap| gap.until_ms == Some(now_ms))
+        {
+            eprintln!(
+                "funding          schedule rediscovered; interval {}..{} remains unverified",
+                gap.since_ms, now_ms
+            );
+        }
+    }
     let Some(since) = funding.asking_since() else {
         return Vec::new();
     };
@@ -4244,8 +4263,8 @@ fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
         venue.funding_charged(symbol, since),
     ) {
         (Ok(Some(rates)), Ok(Some(lines))) => funding.resolve(&rates, &lines, at.0 / 1_000_000),
-        // Asked again at the next poll; a settlement that stays
-        // unanswered is given up on, with a reason.
+        // Asked again at the next poll; unresolved settlements remain
+        // obligations even when their publishing delay becomes overdue.
         (Err(e), _) | (_, Err(e)) => {
             eprintln!("funding          could not be read: {e}");
             return Vec::new();

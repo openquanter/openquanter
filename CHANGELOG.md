@@ -29,6 +29,13 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Funding schedule discovery retries after a temporary failure.** The
+  host's 60-second funding poll retries missing next-settlement discovery
+  even when no settlement is pending. The deterministic watch records
+  unknown schedule intervals at injected times, refuses stale answers and
+  resumes future settlement capture without extrapolating an interval.
+  Rediscovery does not certify the past gap or repair attribution; history
+  backfill and persisted coverage are still required for that.
 - **Unanswered funding settlements remain recoverable after 30 minutes.**
   They become overdue, remain in the request range and expose their
   unresolved timestamps instead of disappearing from the booking queue.
