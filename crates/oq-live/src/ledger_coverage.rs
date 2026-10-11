@@ -13,6 +13,9 @@ use oq_types::Fee;
 
 use crate::record::{Record, venue_fee};
 
+mod wire;
+pub use wire::{evidence_text, parse_evidence, write_evidence};
+
 /// Why a producer cannot certify the whole closed interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Completeness {

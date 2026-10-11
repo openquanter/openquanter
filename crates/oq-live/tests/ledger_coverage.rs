@@ -158,6 +158,103 @@ fn bounded_account_response_retains_its_declared_window_and_source_boundary() {
 }
 
 #[test]
+fn evidence_wire_is_strict_and_never_overwrites_an_attachment() {
+    let (records, native, evidence) = fixture();
+    let text = evidence_text(&evidence).unwrap();
+    let decoded = parse_evidence(&text).unwrap();
+    assert_eq!(decoded, evidence);
+    assert_eq!(
+        verify(&records, &native, &decoded).unwrap(),
+        verify(&records, &native, &evidence).unwrap()
+    );
+    for changed in [
+        text.replace(" v1\n", " v2\n"),
+        format!("{text}extra=1\n"),
+        text.replace("fees.rows=1", "fees.rows=99999999"),
+        text.replace("fee=1,BUY", "fee=1,LONG"),
+        text.replace("since_ms=0", "since_ms=+0"),
+        text.replace("funding=9,11,-3", "funding=9,11"),
+        text.replace("fees.symbol=SYNTH", "fees.symbol=OTHER"),
+    ] {
+        assert!(parse_evidence(&changed).is_err(), "{changed}");
+    }
+    let truncated = text.lines().take(10).collect::<Vec<_>>().join("\n");
+    assert!(parse_evidence(&truncated).is_err());
+    let path = std::env::temp_dir().join(format!("oq-evidence-wire-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    write_evidence(&path, &evidence).unwrap();
+    assert!(write_evidence(&path, &evidence).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    std::fs::remove_file(path).unwrap();
+    let mut incomplete = evidence;
+    incomplete.funding.completeness = Completeness::Incomplete("unsupported".into());
+    assert!(evidence_text(&incomplete).is_err());
+}
+
+#[test]
+fn replay_cli_requires_valid_evidence_for_closed_window_coverage() {
+    let (records, _, mut evidence) = fixture();
+    let path = std::env::temp_dir().join(format!("oq-coverage-cli-{}.oqj", std::process::id()));
+    let sidecar = path.with_extension("evidence");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&sidecar);
+    let mut writer =
+        oq_journal::Writer::open(&path, oq_journal::SyncPolicy::EveryRecordNoFsync).unwrap();
+    for record in records {
+        writer.append(record.kind(), &record.encode()).unwrap();
+    }
+    drop(writer);
+    evidence.journal_data_hash = ledger::replay_bound(&path, "unknown", None)
+        .unwrap()
+        .manifest
+        .data_hash;
+    write_evidence(&sidecar, &evidence).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_oq-replay"))
+        .arg(&path)
+        .args(["--ledger", "--require-coverage", "--coverage-evidence"])
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("coverage rows      1 fees, 1 funding")
+    );
+    for args in [
+        vec!["--coverage-evidence"],
+        vec!["--ledger", "--coverage-evidence"],
+        vec![
+            "--ledger",
+            "--coverage-evidence",
+            "a",
+            "--coverage-evidence",
+            "b",
+        ],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_oq-replay"))
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
+    evidence.journal_data_hash = "0".repeat(64);
+    std::fs::write(&sidecar, evidence_text(&evidence).unwrap()).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_oq-replay"))
+        .arg(&path)
+        .args(["--ledger", "--coverage-evidence"])
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(sidecar).unwrap();
+}
+
+#[test]
 fn missing_surplus_and_same_sum_different_identity_are_not_coverage() {
     let (records, native, evidence) = fixture();
     let mut missing = evidence.clone();

@@ -520,8 +520,28 @@ producer 负责建立该声明。现有 `Account` 历史 vector 接口不自动�
 来源行、来源元数据及评估策略。证据变化使基线失效；仅代码变化仍可区分。通过覆盖
 报告的 `verify_baseline` 验证完整证据身份；仅原生 manifest 及未知代码被拒绝。普通原生
 重放继续报告 funding coverage 为 false；覆盖重放成功仅证明声明区间的费用/资金费。
-CLI 尚不读取这些外部 window。覆盖不重建调度缺口中的模型仓位、不认证其他账户
+覆盖不重建调度缺口中的模型仓位、不认证其他账户
 转账、不恢复策略，也不提供 G12 数值残差。
+
+`ledger::capture_history(path, code, account, scope_hash, through_ms, clock,
+max_age_ms)` 从最新原生账本上下文取得起点，查询两个 bounded 历史，以注入时钟评估，
+返回覆盖报告和证据。不支持的来源或身份集合验证失败不返回成功附件。全过程使用
+同一 Reader 快照；journal 后续追加需要新证据。
+
+通过 `ledger_coverage::write_evidence` 持久化成功附件，用 `parse_evidence` 读取。
+严格文本格式以 `openquanter ledger-history evidence v1` 开头；有序字段包含 journal/
+账户 hash、请求/评估边界，然后是每个来源的 symbol、上下界、观测时刻、行数及原始行。
+行整数和 BUY/SELL 必须规范；额外/乱序字段、不合理数量、截断及不完整来源 window
+均拒绝。exclusive 创建加 fsync 防止覆盖 journal 或旧附件；撕裂文件不能通过验证。
+
+```text
+oq-replay run.oqj --ledger --coverage-evidence run.history-evidence --require-coverage
+```
+
+CLI 打印来源区间、账户 scope、行数及覆盖数据/策略 hash。错误证据即使没有
+`--require-coverage` 也返回 2。`--write-manifest` / `--verify-manifest` 仍描述仅原生
+身份；覆盖身份通过覆盖报告的 `verify_baseline` 验证。离线读取重放附件的历史评估
+时刻，不以当前墙钟替换它。
 
 ### 身份绑定的原生账本报告
 

@@ -32,6 +32,7 @@ OPTIONS:
     --require-coverage  With --ledger, return 2 unless fee/funding evidence is complete
     --write-manifest <FILE>  With --ledger, create a new identity sidecar
     --verify-manifest <FILE> With --ledger, reject changed input/context or unknown code
+    --coverage-evidence <FILE> With --ledger, verify original closed-window histories
     --help
 ";
 
@@ -42,6 +43,13 @@ fn main() -> ExitCode {
         return ExitCode::from(u8::from(args.is_empty()));
     }
     let path = &args[0];
+    let coverage = match option_value(&args, "--coverage-evidence") {
+        Ok(value) => value,
+        Err(why) => {
+            eprintln!("oq-replay: {why}");
+            return ExitCode::from(2);
+        }
+    };
     let verify = match option_value(&args, "--verify-manifest") {
         Ok(value) => value,
         Err(why) => {
@@ -62,10 +70,11 @@ fn main() -> ExitCode {
             args.iter().any(|a| a == "--require-coverage"),
             verify,
             write,
+            coverage,
         );
     }
-    if verify.is_some() || write.is_some() {
-        eprintln!("oq-replay: manifest options require --ledger");
+    if verify.is_some() || write.is_some() || coverage.is_some() {
+        eprintln!("oq-replay: manifest and coverage options require --ledger");
         return ExitCode::from(2);
     }
     let orders_only = args.iter().any(|a| a == "--orders");
@@ -207,6 +216,7 @@ fn render_ledger(
     require_coverage: bool,
     verify: Option<&str>,
     write: Option<&str>,
+    coverage_file: Option<&str>,
 ) -> ExitCode {
     let expected = match verify
         .map(|path| {
@@ -225,17 +235,42 @@ fn render_ledger(
     let code = option_env!("GIT_COMMIT")
         .or(option_env!("GITHUB_SHA"))
         .unwrap_or("unknown");
-    let bound = match oq_live::ledger::replay_bound(path, code, expected.as_ref()) {
+    let result = if let Some(file) = coverage_file {
+        std::fs::read_to_string(file)
+            .map_err(|e| e.to_string())
+            .and_then(|text| oq_live::ledger_coverage::parse_evidence(&text))
+            .and_then(|evidence| {
+                oq_live::ledger::replay_with_history_bound(path, code, &evidence, expected.as_ref())
+                    .map(|covered| (covered.native, Some((covered.coverage, evidence))))
+            })
+    } else {
+        oq_live::ledger::replay_bound(path, code, expected.as_ref()).map(|native| (native, None))
+    };
+    let (bound, coverage) = match result {
         Ok(report) => report,
         Err(error) => {
             eprintln!("oq-replay ledger: {error}");
-            return if verify.is_some() {
+            return if verify.is_some() || coverage_file.is_some() {
                 ExitCode::from(2)
             } else {
                 ExitCode::FAILURE
             };
         }
     };
+    if let Some((coverage, evidence)) = &coverage {
+        println!(
+            "coverage interval  {}..={} ms",
+            evidence.since_ms, evidence.through_ms
+        );
+        println!("coverage account   {}", evidence.account_scope_hash);
+        println!(
+            "coverage rows      {} fees, {} funding",
+            coverage.fee_executions, coverage.funding_lines
+        );
+        println!("coverage data hash {}", coverage.manifest.data_hash);
+        println!("coverage policy hash {}", coverage.manifest.config_hash);
+        println!("coverage baseline  separate from the native-only manifest");
+    }
     if let Some(path) = write {
         use std::io::Write;
         let result = oq_live::ledger::manifest_text(&bound.manifest).and_then(|text| {

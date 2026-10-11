@@ -721,10 +721,36 @@ its baseline; a code-only change stays distinguishable. Use the covered
 report's `verify_baseline` to verify this complete evidence identity; it
 refuses native-only manifests and unknown code. Plain native replay
 continues to report funding coverage as false; a successful covered replay
-reports fee/funding coverage for the declared interval only. The CLI does
-not yet ingest these external windows. Coverage does not reconstruct model
+reports fee/funding coverage for the declared interval only. Coverage does not reconstruct model
 positions in schedule gaps, certify other account transfers, restore a
 strategy, or supply a numeric G12 residual.
+
+`ledger::capture_history(path, code, account, scope_hash, through_ms, clock,
+max_age_ms)` derives the start from the latest native ledger context,
+queries both bounded histories, evaluates them with the injected clock and
+returns a covered report plus its evidence. Unsupported sources or failed
+identity-set checks return no successful attachment. The same reader snapshot
+is used throughout, so an appended journal requires new evidence.
+
+Persist a successful attachment with `ledger_coverage::write_evidence` and
+read it with `parse_evidence`. The strict text format starts with
+`openquanter ledger-history evidence v1`; ordered fields carry journal and
+account hashes, requested/evaluation boundaries, then each source's symbol,
+bounds, observation, row count and original rows. Row integers and BUY/SELL
+are canonical; extra/reordered fields, unreasonable counts, truncation and
+incomplete source windows are refused. Exclusive creation plus fsync avoids
+overwriting a journal or earlier attachment; a torn file cannot verify.
+
+```text
+oq-replay run.oqj --ledger --coverage-evidence run.history-evidence --require-coverage
+```
+
+The CLI prints source interval, account scope, row counts and coverage
+data/policy hashes. Bad evidence returns 2 even without `--require-coverage`.
+`--write-manifest` / `--verify-manifest` still describe the native-only
+identity; use the covered report's `verify_baseline` for the coverage identity.
+The historical evaluation time in the attachment is replayed, not replaced
+with wall time when an offline report is read.
 
 ### Identity-bound native ledger reports
 
