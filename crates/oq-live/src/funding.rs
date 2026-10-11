@@ -46,9 +46,8 @@
 use oq_gateway::account::{FundingCharge, SettledRate};
 use oq_types::{Cash, Instrument, QtyLots};
 
-/// How long to keep asking about a settlement before saying it will not
-/// be answered.
-const GIVE_UP_MS: i64 = 30 * 60_000;
+/// An unanswered settlement becomes overdue, not economically terminal.
+const OVERDUE_MS: i64 = 30 * 60_000;
 /// How far apart a ledger line's time and its settlement's may be.
 const SAME_SETTLEMENT_MS: i64 = 60_000;
 
@@ -114,6 +113,7 @@ struct Pending {
     at_ms: i64,
     live: Legs,
     model: Legs,
+    overdue: bool,
 }
 
 /// One settlement, resolved: what to book on each side.
@@ -141,6 +141,7 @@ pub struct FundingWatch {
     /// Why funding cannot be reported for this run, once there is one.
     problem: Option<String>,
     settled: usize,
+    booked_lines: std::collections::BTreeMap<i64, (i64, Cash)>,
 }
 
 impl FundingWatch {
@@ -174,6 +175,7 @@ impl FundingWatch {
             model_total: Cash::ZERO,
             problem,
             settled: 0,
+            booked_lines: std::collections::BTreeMap::new(),
         }
     }
 
@@ -194,6 +196,7 @@ impl FundingWatch {
             at_ms: t,
             live,
             model,
+            overdue: false,
         });
         // Asked again rather than added to: intervals differ by contract
         // and the venue changes them.
@@ -227,18 +230,54 @@ impl FundingWatch {
         lines: &[FundingCharge],
         now_ms: i64,
     ) -> Vec<Settled> {
+        // History requests can overlap pages or race stream delivery. A
+        // stable ledger identity appears once; conflicting evidence must
+        // never be quietly replaced by whichever row arrived last.
+        let mut unique = std::collections::BTreeMap::new();
+        for line in lines {
+            if self
+                .booked_lines
+                .get(&line.id)
+                .is_some_and(|prior| *prior != (line.time_ms, line.amount))
+            {
+                self.problem = Some(format!(
+                    "funding ledger identity {} changed after booking",
+                    line.id
+                ));
+                return Vec::new();
+            }
+            if unique
+                .insert(line.id, line)
+                .is_some_and(|prior| prior.time_ms != line.time_ms || prior.amount != line.amount)
+            {
+                self.problem = Some(format!(
+                    "funding ledger identity {} has conflicting evidence",
+                    line.id
+                ));
+                return Vec::new();
+            }
+        }
         let mut out = Vec::new();
         let mut still = Vec::new();
         for p in std::mem::take(&mut self.pending) {
             let rate = rates
                 .iter()
                 .find(|r| (r.time_ms - p.at_ms).abs() <= SAME_SETTLEMENT_MS);
-            let booked: Vec<&FundingCharge> = lines
-                .iter()
+            let booked: Vec<&FundingCharge> = unique
+                .values()
+                .copied()
                 .filter(|l| (l.time_ms - p.at_ms).abs() <= SAME_SETTLEMENT_MS)
                 .collect();
+            if booked.iter().any(|l| self.booked_lines.contains_key(&l.id)) {
+                self.problem = Some(format!(
+                    "the settlement at {} overlaps an already booked ledger identity",
+                    p.at_ms
+                ));
+                Self::keep_pending(p, now_ms, &mut still);
+                continue;
+            }
             let Some(rate) = rate else {
-                self.keep_or_give_up(p, now_ms, "its rate", &mut still);
+                Self::keep_pending(p, now_ms, &mut still);
                 continue;
             };
             let (Some(expected), Some(model)) = (
@@ -246,12 +285,13 @@ impl FundingWatch {
                 charge_legs(&self.instrument, p.model, &rate.rate, &rate.mark),
             ) else {
                 self.problem = Some(format!("the settlement at {} did not compute", p.at_ms));
+                Self::keep_pending(p, now_ms, &mut still);
                 continue;
             };
             // A position that was charged has a ledger line; until it
             // appears, the settlement is not over.
             if booked.is_empty() && expected != Cash::ZERO {
-                self.keep_or_give_up(p, now_ms, "its ledger lines", &mut still);
+                Self::keep_pending(p, now_ms, &mut still);
                 continue;
             }
             let venue = booked.iter().fold(Cash::ZERO, |a, l| a.add(l.amount));
@@ -266,6 +306,10 @@ impl FundingWatch {
             self.venue_total = self.venue_total.add(venue);
             self.model_total = self.model_total.add(model);
             self.settled += 1;
+            for line in &booked {
+                self.booked_lines
+                    .insert(line.id, (line.time_ms, line.amount));
+            }
             out.push(Settled {
                 at_ms: p.at_ms,
                 rate: rate.rate.clone(),
@@ -279,15 +323,15 @@ impl FundingWatch {
         out
     }
 
-    fn keep_or_give_up(&mut self, p: Pending, now_ms: i64, what: &str, still: &mut Vec<Pending>) {
-        if now_ms - p.at_ms > GIVE_UP_MS {
-            self.problem = Some(format!(
-                "the settlement at {} has no {what} after 30 minutes",
-                p.at_ms
-            ));
-        } else {
-            still.push(p);
-        }
+    fn keep_pending(mut p: Pending, now_ms: i64, still: &mut Vec<Pending>) {
+        p.overdue |= now_ms.saturating_sub(p.at_ms) > OVERDUE_MS;
+        still.push(p);
+    }
+
+    /// Settlements lacking rate or ledger evidence, retained until answered.
+    #[must_use]
+    pub fn unresolved(&self) -> Vec<i64> {
+        self.pending.iter().map(|p| p.at_ms).collect()
     }
 
     /// Funding as attribution takes it: `(venue, model)`, or why not —
@@ -302,8 +346,13 @@ impl FundingWatch {
         }
         if let Some(p) = self.pending.first() {
             return Err(format!(
-                "the settlement at {} is waiting for the venue to publish its rate and ledger",
-                p.at_ms
+                "the settlement at {} is {}waiting for the venue to publish its rate and ledger",
+                p.at_ms,
+                if p.overdue {
+                    "overdue after 30 minutes and still "
+                } else {
+                    ""
+                }
             ));
         }
         Ok((self.venue_total, self.model_total))
@@ -448,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn a_settlement_never_answered_is_given_up_on_and_says_so() {
+    fn an_overdue_settlement_stays_unresolved_and_late_evidence_is_booked_once() {
         let t = 1_790_323_200_000;
         let mut w = FundingWatch::new(btc(), Ok(Some(t)));
         w.on_time(
@@ -457,9 +506,85 @@ mod tests {
             (QtyLots(0), QtyLots(0)),
             || Some(t + 28_800_000),
         );
-        assert!(w.resolve(&[rate(t)], &[], t + GIVE_UP_MS + 1).is_empty());
-        assert!(!w.waiting());
-        assert!(w.problem().is_some_and(|p| p.contains("ledger lines")));
+        assert!(w.resolve(&[rate(t)], &[], t + OVERDUE_MS + 1).is_empty());
+        assert!(w.waiting());
+        assert_eq!(w.unresolved(), vec![t]);
+        assert!(w.evidence().is_err_and(|p| p.contains("overdue")));
+        let rows = [line(t, -3_359_784, 1), line(t, -3_359_784, 1)];
+        let late = w.resolve(&[rate(t)], &rows, t + OVERDUE_MS + 2);
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].venue, Cash(-3_359_784));
+        assert!(w.unresolved().is_empty());
+        assert_eq!(w.evidence(), Ok((Cash(-3_359_784), Cash::ZERO)));
+        assert!(w.resolve(&[rate(t)], &rows, t + OVERDUE_MS + 3).is_empty());
+        assert_eq!(w.settled(), 1);
+    }
+
+    #[test]
+    fn conflicting_history_identity_cannot_change_economics_or_discard_pending() {
+        let t = 1_790_323_200_000;
+        let mut w = FundingWatch::new(btc(), Ok(Some(t)));
+        w.on_time(
+            t,
+            (QtyLots(4), QtyLots(0)),
+            (QtyLots(4), QtyLots(0)),
+            || Some(t + 28_800_000),
+        );
+        assert!(
+            w.resolve(
+                &[rate(t)],
+                &[line(t, -3_359_784, 1), line(t, -3_359_783, 1)],
+                t + 1
+            )
+            .is_empty()
+        );
+        assert_eq!(w.unresolved(), vec![t]);
+        assert_eq!(w.settled(), 0);
+        assert!(
+            w.problem()
+                .is_some_and(|p| p.contains("conflicting evidence"))
+        );
+        let resolved = w.resolve(&[rate(t)], &[line(t, -3_359_784, 1)], t + 2);
+        assert_eq!(
+            resolved[0].venue,
+            Cash(-3_359_784),
+            "confirmed venue cash is still booked while attribution is untrusted"
+        );
+        assert!(w.evidence().is_err());
+    }
+
+    #[test]
+    fn a_missing_rate_also_remains_recoverable_after_the_overdue_boundary() {
+        let t = 1_790_323_200_000;
+        let mut w = FundingWatch::new(btc(), Ok(Some(t)));
+        w.on_time(
+            t,
+            (QtyLots(4), QtyLots(0)),
+            (QtyLots(4), QtyLots(0)),
+            || Some(t + 28_800_000),
+        );
+        let rows = [line(t, -3_359_784, 1)];
+        assert!(w.resolve(&[], &rows, t + OVERDUE_MS + 1).is_empty());
+        assert_eq!(w.asking_since(), Some(t - SAME_SETTLEMENT_MS));
+        assert_eq!(w.unresolved(), vec![t]);
+        assert_eq!(w.resolve(&[rate(t)], &rows, t + OVERDUE_MS + 2).len(), 1);
+        assert_eq!(w.evidence(), Ok((Cash(-3_359_784), Cash(-3_359_784))));
+    }
+
+    #[test]
+    fn overlapping_settlement_windows_cannot_book_the_same_identity_twice() {
+        let t = 1_790_323_200_000;
+        let mut w = FundingWatch::new(btc(), Ok(Some(t)));
+        let legs = (QtyLots(4), QtyLots(0));
+        w.on_time(t, legs, legs, || Some(t + 1));
+        w.on_time(t + 1, legs, legs, || Some(t + 28_800_000));
+        let rows = [line(t, -3_359_784, 1)];
+        let resolved = w.resolve(&[rate(t)], &rows, t + 2);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(w.settled(), 1);
+        assert_eq!(w.unresolved(), vec![t + 1]);
+        assert!(w.problem().is_some_and(|p| p.contains("overlaps")));
+        assert!(w.resolve(&[rate(t)], &rows, t + 3).is_empty());
     }
 
     #[test]

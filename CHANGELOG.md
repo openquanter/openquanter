@@ -29,6 +29,16 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Unanswered funding settlements remain recoverable after 30 minutes.**
+  They become overdue, remain in the request range and expose their
+  unresolved timestamps instead of disappearing from the booking queue.
+  Late rate/ledger evidence can resolve them; elapsed time alone does not
+  certify a zero charge. Funding history deduplicates stable ledger IDs,
+  refuses conflicting rows and prevents an ID from being booked by two
+  overlapping settlement windows. Confirmed venue cash remains bookable
+  when model attribution is already untrusted. This is in-process recovery;
+  schedule rediscovery, persisted pagination/coverage and unknown historical
+  model positions still require separate evidence.
 - **Live shadow starts from the observed inventory and position mode.**
   The live runner supplies the same adopted sizes and entry bases to books
   and shadow, including both hedge legs. Initial inventory is a boundary
