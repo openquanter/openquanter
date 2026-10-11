@@ -474,6 +474,9 @@ instrument、来源不在未来、重复不冲突。返佣与明确报告的零�
 以及原始 core `VenueFill` payload，其中费为 `Fee::Reported(amount)`。原生重放要求
 已有等价的 typed execution，且其费用未知；拒绝覆盖已知费用或重复恢复。使用补齐
 费用重算最终账户经济结果，库存和已实现 P&L 不变。原始成交保留，费用证据不是第二
-笔 fill。当前 run 结束查询补齐 journal，不修改 live projection 过去风控，也不导出
-重建的日内现金曲线。重启/live 增量费用恢复、完整覆盖及 manifest-bound 证据仍是
-独立工作。
+笔 fill。host 在费用 pending 时每 60 秒及 run 结束时轮询。Books 验证完整待补 fill，
+在接收边界入账现金一次；重复证据不生效，冲突金额和已有定价 fill 被拒绝。部分补齐
+仍保持费用未知。core `FeeRecovered`（14）编码接收 ns、支出正/返佣负金额及剩余
+未知数量（三个 8-byte LE 整数），只影响现金/费用。身份校验属于 host 待补库存，
+数量描述已接收 fill，不代表完整交易所历史。不改写过去风控/现金曲线。重启状态
+恢复、完整覆盖及 manifest-bound 证据仍是独立工作。

@@ -951,6 +951,7 @@ where
         None => println!("funding          next settlement read; charged from the venue's ledger"),
     }
     let mut last_funding_poll = clock.elapsed();
+    let mut last_fee_poll = clock.elapsed();
     env.listen_for_shutdown();
     let deadline = match deadline_from(minutes, clock.elapsed()) {
         Ok(deadline) => deadline,
@@ -1719,6 +1720,18 @@ where
             trader.session_mut().record_funding_state(at, &funding);
         }
 
+        if !books.unpriced_fills().is_empty()
+            && clock.elapsed().saturating_sub(last_fee_poll) >= FUNDING_POLL
+        {
+            last_fee_poll = clock.elapsed();
+            let recovered = poll_fees(trader.venue(), &symbol, &mut books, clock);
+            for (fill, source_ms, amount) in recovered.fills {
+                trader
+                    .session_mut()
+                    .record_fee_evidence(recovered.at, source_ms, fill, amount);
+            }
+        }
+
         if let Some(a) = &artifacts
             && clock.elapsed().saturating_sub(last_artifacts) >= ARTIFACTS_EVERY
         {
@@ -1924,42 +1937,11 @@ where
     trader
         .session_mut()
         .record_funding_state(clock.wall(), &funding);
-    // Preserve original missing-fee executions and append independent
-    // venue evidence. Native accounting can then recompute final cash;
-    // this does not replay strategy decisions or silently mutate live risk.
-    if let Some(since) = books
-        .unpriced_fills()
-        .iter()
-        .map(|fill| fill.stamp.exch.0 / 1_000_000)
-        .min()
-    {
-        match trader
-            .venue()
-            .execution_fees(&symbol, since.saturating_sub(60_000))
-        {
-            Ok(Some(rows)) => {
-                let received = clock.wall();
-                match crate::fee_history::bind(books.unpriced_fills(), &rows, received) {
-                    Ok(evidence) => {
-                        println!(
-                            "fees             recovered evidence for {} of {} unknown executions; native ledger enrichment",
-                            evidence.len(),
-                            books.unpriced_fills().len()
-                        );
-                        for (fill, source_ms, amount) in evidence {
-                            trader
-                                .session_mut()
-                                .record_fee_evidence(received, source_ms, fill, amount);
-                        }
-                    }
-                    Err(why) => eprintln!("fees             enrichment refused: {why}"),
-                }
-            }
-            Ok(None) => {
-                eprintln!("fees             per-execution history unavailable; unknown fees remain")
-            }
-            Err(why) => eprintln!("fees             history could not be read: {why}"),
-        }
+    let recovered_fees = poll_fees(trader.venue(), &symbol, &mut books, clock);
+    for (fill, source_ms, amount) in recovered_fees.fills {
+        trader
+            .session_mut()
+            .record_fee_evidence(recovered_fees.at, source_ms, fill, amount);
     }
     if let Some(why) = funding.problem() {
         println!("funding          unavailable: {why}");
@@ -4279,9 +4261,67 @@ const ARTIFACTS_EVERY: Duration = Duration::from_secs(15 * 60);
 /// venue has published its rate and ledger lines.
 const FUNDING_POLL: Duration = Duration::from_secs(60);
 
-/// Ask the venue about crossed settlements, and book what it answers:
-/// its ledger to the live books, the model's charge to the shadow. The
-/// settlements booked are returned for the journal.
+/// Accepted fee recoveries and their common receive boundary, for the journal.
+#[derive(Default)]
+struct RecoveredFees {
+    at: Nanos,
+    fills: Vec<(oq_types::Fill, i64, Cash)>,
+}
+
+fn poll_fees<A: oq_gateway::account::Account + ?Sized>(
+    venue: &A,
+    symbol: &str,
+    books: &mut crate::books::Books,
+    clock: &dyn Clock,
+) -> RecoveredFees {
+    let Some(since) = books
+        .unpriced_fills()
+        .iter()
+        .map(|fill| fill.stamp.exch.0 / 1_000_000)
+        .min()
+    else {
+        return RecoveredFees::default();
+    };
+    let rows = match venue.execution_fees(symbol, since.saturating_sub(60_000)) {
+        Ok(Some(rows)) => rows,
+        Ok(None) => {
+            eprintln!("fees             per-execution history unavailable; unknown fees remain");
+            return RecoveredFees::default();
+        }
+        Err(why) => {
+            eprintln!("fees             history could not be read: {why}");
+            return RecoveredFees::default();
+        }
+    };
+    let at = clock.wall();
+    let bound = match crate::fee_history::bind(books.unpriced_fills(), &rows, at) {
+        Ok(bound) => bound,
+        Err(why) => {
+            eprintln!("fees             recovery refused: {why}");
+            return RecoveredFees::default();
+        }
+    };
+    let mut recovered = RecoveredFees {
+        at,
+        fills: Vec::new(),
+    };
+    for (fill, source_ms, amount) in bound {
+        match books.recover_fee(&fill, amount, at) {
+            Ok(true) => recovered.fills.push((fill, source_ms, amount)),
+            Ok(false) => {}
+            Err(why) => eprintln!("fees             recovery refused: {why}"),
+        }
+    }
+    if !recovered.fills.is_empty() {
+        println!(
+            "fees             booked {} recovered commission(s); {} execution(s) remain unknown",
+            recovered.fills.len(),
+            books.unpriced_fills().len()
+        );
+    }
+    recovered
+}
+
 fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
     funding: &mut crate::funding::FundingWatch,
     venue: &A,

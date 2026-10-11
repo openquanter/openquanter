@@ -650,8 +650,14 @@ canonical payload length, and the original core `VenueFill` payload with
 execution with an unknown fee, and refuses replacement of known commission
 or duplicate recovery. It recomputes final account economics with the
 recovered commission and unchanged inventory/realized P&L. The original
-execution is preserved; fee evidence is not a second fill. The run-end
-query currently enriches the journal rather than modifying the live
-projection's past risk or exporting a reconstructed intraday cash curve.
-Restart/live incremental fee recovery, complete coverage and manifest-bound
-evidence remain separate work.
+execution is preserved; fee evidence is not a second fill. The host polls
+pending fees every 60 seconds and at run end. Books validate the exact
+pending fill and recover cash once at receipt; duplicate evidence is a
+no-op, conflicting amounts and already-priced fills are refused. Partial
+recovery keeps fees unknown. Core `FeeRecovered` (14) encodes receive ns,
+paid-positive/rebate-negative amount and remaining unknown count (three
+8-byte LE integers); it affects cash/fees only. Identity validation belongs
+to the host's pending inventory, and its count describes accepted fills,
+not complete venue history. No past risk/cash curve is rewritten. Restart
+state restoration, complete coverage and manifest-bound evidence remain
+separate work.

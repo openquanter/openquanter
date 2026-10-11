@@ -126,6 +126,7 @@ pub struct Books {
     /// booked trades that went down would read as trades unbooked.
     booked: u64,
     unpriced_fills: Vec<Fill>,
+    recovered_fees: Vec<(Fill, Cash)>,
 }
 
 impl Books {
@@ -166,6 +167,7 @@ impl Books {
             seen: TradeWindow::default(),
             booked: 0,
             unpriced_fills: Vec::new(),
+            recovered_fees: Vec::new(),
         }
     }
 
@@ -270,6 +272,40 @@ impl Books {
     #[must_use]
     pub fn unpriced_fills(&self) -> &[Fill] {
         &self.unpriced_fills
+    }
+
+    /// Recover a prior unknown commission exactly once at receipt. The
+    /// full original fill binds this cash event; no quantity changes.
+    pub fn recover_fee(&mut self, fill: &Fill, amount: Cash, at: Nanos) -> Result<bool, String> {
+        if at < fill.stamp.local {
+            return Err("fee recovery precedes execution receipt".into());
+        }
+        if let Some((_, prior)) = self
+            .recovered_fees
+            .iter()
+            .find(|(original, _)| original == fill)
+        {
+            return if *prior == amount {
+                Ok(false)
+            } else {
+                Err("fee recovery conflicts with already booked evidence".into())
+            };
+        }
+        let Some(index) = self
+            .unpriced_fills
+            .iter()
+            .position(|original| original == fill)
+        else {
+            return Err("fee recovery has no exact pending unknown-fee execution".into());
+        };
+        self.unpriced_fills.remove(index);
+        self.kernel.apply(&Event::FeeRecovered {
+            at,
+            amount,
+            remaining_missing: self.unpriced_fills.len() as u64,
+        });
+        self.recovered_fees.push((*fill, amount));
+        Ok(true)
     }
 
     /// A hedge close beyond the held leg cannot be represented by the
@@ -458,6 +494,56 @@ mod tests {
             // written against.
             oq_core::PositionMode::OneWay,
         )
+    }
+
+    #[test]
+    fn recovered_commissions_update_cash_once_and_keep_partial_uncertainty() {
+        let mut b = books();
+        b.on_tick(&tick(SEC, 6_000_000));
+        let first = fill(SEC, 1, Side::Buy, 6_000_000, 1, Offset::Open);
+        let second = fill(SEC, 2, Side::Buy, 6_000_000, 1, Offset::Open);
+        b.on_venue_fill(&first, oq_types::Fee::Unreadable);
+        b.on_venue_fill(&second, oq_types::Fee::Unsaid);
+        let equity = b.equity();
+        let position = b.net_position();
+        assert_eq!(b.unpriced_fills().len(), 2);
+        assert!(!b.fees_known());
+        assert_eq!(b.recover_fee(&first, Cash(7), Nanos(2 * SEC)), Ok(true));
+        assert_eq!(b.equity(), equity.sub(Cash(7)));
+        assert!(!b.fees_known(), "another execution remains unpriced");
+        assert_eq!(b.recover_fee(&first, Cash(7), Nanos(3 * SEC)), Ok(false));
+        assert!(b.recover_fee(&first, Cash(8), Nanos(3 * SEC)).is_err());
+        assert_eq!(b.recover_fee(&second, Cash(-3), Nanos(3 * SEC)), Ok(true));
+        assert!(b.fees_known());
+        assert!(b.unpriced_fills().is_empty());
+        assert_eq!(b.equity(), equity.sub(Cash(4)));
+        assert_eq!(b.net_position(), position);
+        assert_eq!(b.realized_parts().1, Cash(4));
+        assert_eq!(
+            b.booked(),
+            2,
+            "recovering commission never books another execution"
+        );
+    }
+
+    #[test]
+    fn recovered_zero_is_known_but_altered_or_already_priced_fills_are_refused() {
+        let mut b = books();
+        b.on_tick(&tick(SEC, 6_000_000));
+        let original = fill(SEC, 1, Side::Buy, 6_000_000, 1, Offset::Open);
+        b.on_venue_fill(&original, oq_types::Fee::Unreadable);
+        let equity = b.equity();
+        let mut altered = original;
+        altered.qty.0 += 1;
+        assert!(b.recover_fee(&altered, Cash(7), Nanos(2 * SEC)).is_err());
+        assert!(b.recover_fee(&original, Cash(7), Nanos(0)).is_err());
+        assert_eq!(b.recover_fee(&original, Cash(0), Nanos(2 * SEC)), Ok(true));
+        assert_eq!(b.equity(), equity);
+        assert!(b.fees_known());
+        let known = fill(2 * SEC, 2, Side::Buy, 6_000_000, 1, Offset::Open);
+        b.on_venue_fill(&known, oq_types::Fee::Reported(Cash(5)));
+        assert!(b.recover_fee(&known, Cash(6), Nanos(3 * SEC)).is_err());
+        assert_eq!(b.realized_parts().1, Cash(5));
     }
 
     fn tick(ns: i64, price: i64) -> Tick {

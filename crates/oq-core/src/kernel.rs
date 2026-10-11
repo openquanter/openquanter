@@ -1166,6 +1166,17 @@ impl Kernel {
                 self.outputs.push(Output::Funded { amount, at });
             }
             Event::Time(at) => self.state.now = at,
+            Event::FeeRecovered {
+                at,
+                amount,
+                remaining_missing,
+            } => {
+                self.state.now = at;
+                self.state.fees = self.state.fees.add(amount);
+                self.state.credit(amount.neg());
+                self.state.fees_covered = true;
+                self.state.fees_missing = remaining_missing != 0;
+            }
             Event::MarginDeposit { amount, at } => {
                 self.state.now = at;
                 self.state.credit(Cash(amount));
