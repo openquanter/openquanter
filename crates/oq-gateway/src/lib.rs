@@ -59,6 +59,7 @@ pub(crate) mod json;
 pub mod klines;
 pub mod kraken;
 pub mod okx;
+pub mod position_read;
 pub mod reconcile;
 pub mod record;
 pub mod snapshot;

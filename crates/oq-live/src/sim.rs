@@ -1040,6 +1040,40 @@ impl Account for SimAccount {
             .collect())
     }
 
+    fn positions_observed(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<oq_gateway::position_read::PositionObservation>, VenueError> {
+        let mut positions = self.positions(symbol)?;
+        let core = self.0.0.borrow();
+        let expected: &[&str] = if core.cfg.hedged {
+            &["LONG", "SHORT"]
+        } else {
+            &["BOTH"]
+        };
+        for side in expected {
+            if !positions.iter().any(|p| p.position_side == *side) {
+                positions.push(PositionSnapshot {
+                    symbol: core.cfg.symbol.clone(),
+                    position_side: (*side).into(),
+                    amount: 0.0,
+                    amount_text: decimal(0, core.instrument.qty_scale),
+                    entry_price: 0.0,
+                    entry_text: decimal(0, core.instrument.price_scale),
+                    unrealized: 0.0,
+                });
+            }
+        }
+        let at = core.now_ms();
+        Ok(Some(oq_gateway::position_read::PositionObservation {
+            symbol: symbol.into(),
+            hedged: core.cfg.hedged,
+            positions,
+            requested_ms: at,
+            received_ms: at,
+        }))
+    }
+
     fn funding_charged(
         &self,
         _symbol: &str,

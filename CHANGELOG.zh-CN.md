@@ -22,6 +22,12 @@
 
 ### 变更
 
+- **live 仓位检查要求明确且新鲜的读取边界。** 可选 `Account::positions_observed`
+  携带客户端请求/接收边界及全部预期仓位腿，含明确空仓行。启动及周期检查拒绝不完整、
+  外来、过期/未来、非法或模式不符的观测；本地成交 revision 变化使边界失效。
+  hedge 一致性按腿判定，净仓相同不能授权 resume。重连调度同一条 checked 比较，
+  不覆盖 risk view。resume 要求同 revision、从请求起不超过五秒的正向比较结果；
+  否则请求新的 checked read。
 - **最终 live 残差要求独立覆盖的原生经济记录。** 最后一次资金费/手续费恢复后，host
   在建立 `--account-scope-hash SHA256`（或 environment 对应配置）时核验并保存闭区间
   历史。原生净盈亏须与 Books 相符；shadow 初始合约、余额、模式、仓位腿及规范交易所

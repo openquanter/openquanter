@@ -775,8 +775,8 @@ fn an_operator_shutdown_ends_the_run_and_says_so_in_its_exit_status() {
 }
 
 /// Resume is refused unless the process was started allowing it, and
-/// allowed only once a position check since has agreed with the venue.
-/// Then trading starts again.
+/// allowed only after a fresh cut of the current execution revision
+/// agrees. A stale attempt requests the new cut; a retry can then resume.
 #[test]
 fn resume_needs_permission_and_agreeing_books() {
     let script: &[(Duration, &str)] = &[
@@ -806,18 +806,27 @@ fn resume_needs_permission_and_agreeing_books() {
         ]
     );
 
+    let retry_script: &[(Duration, &str)] = &[
+        (Duration::from_secs(30), "halt\tdeck test\tlooking"),
+        (Duration::from_secs(150), "resume\tdeck test\tlooked, fine"),
+        (
+            Duration::from_secs(151),
+            "resume\tdeck test\tchecked fresh cut",
+        ),
+    ];
     let (sim, _, _) = run_controlled(
         "resume",
         7,
         5,
         Faults::default(),
         Kind::Patient,
-        script,
+        retry_script,
         true,
     );
     let answers = sim.control_answers();
-    assert!(answers[1].1.contains(r#""state":"resumed""#), "{answers:?}");
-    let resumed = Duration::from_secs(150);
+    assert!(answers[1].1.contains(r#""ok":false"#), "{answers:?}");
+    assert!(answers[2].1.contains(r#""state":"resumed""#), "{answers:?}");
+    let resumed = Duration::from_secs(151);
     assert!(
         sim.placed_at().into_iter().any(|at| at > resumed),
         "nothing sent after the resume"

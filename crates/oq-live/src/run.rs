@@ -345,8 +345,27 @@ where
         if hedged { "hedged" } else { "one-way" }
     );
 
-    let positions = match venue.positions(&symbol) {
-        Ok(p) => p,
+    let positions = match venue.positions_observed(&symbol) {
+        Ok(Some(p)) => {
+            if let Err(why) = p.check(
+                &symbol,
+                hedged,
+                clock.wall().0 / 1_000_000,
+                POSITION_READ_MAX_AGE_MS,
+                0,
+                0,
+            ) {
+                eprintln!("positions        REFUSED: {why}");
+                return ExitCode::FAILURE;
+            }
+            p.positions
+        }
+        Ok(None) => {
+            eprintln!(
+                "positions        FAILED: explicit coverage and receipt boundaries are unsupported"
+            );
+            return ExitCode::FAILURE;
+        }
         Err(e) => {
             eprintln!("positions        FAILED: {e}");
             return ExitCode::FAILURE;
@@ -999,6 +1018,7 @@ where
     // and after an adapter that does not report fees.
     // The last position check: when, and whether the books agreed.
     let mut last_reconcile: Option<(Nanos, bool)> = None;
+    let mut last_reconcile_revision = 0usize;
     let mut reported_unresolved = 0_u64;
     let mut reconnect = Retry::default();
     let mut cancel_failed = 0_u64;
@@ -1382,7 +1402,7 @@ where
             }
             StreamOutcome::Event(event) => {
                 for action in supervisor.on_event(&event) {
-                    act(&action, &mut trader, &symbol);
+                    settle(&action, &mut trader, &mut reader, env, &mut supervisor);
                 }
             }
             StreamOutcome::Disconnected(why) if reconnect.due(clock.elapsed()) => {
@@ -1425,7 +1445,7 @@ where
                                 reconnect.failed(now_instant);
                             }
                         } else {
-                            settle(&action, &mut trader, &mut reader, &symbol, env);
+                            settle(&action, &mut trader, &mut reader, env, &mut supervisor);
                         }
                     }
                 }
@@ -1444,7 +1464,7 @@ where
         while reported_unresolved < unresolved {
             reported_unresolved += 1;
             for action in supervisor.on_unresolved() {
-                settle(&action, &mut trader, &mut reader, &symbol, env);
+                settle(&action, &mut trader, &mut reader, env, &mut supervisor);
             }
         }
 
@@ -1542,11 +1562,20 @@ where
                             .into_iter()
                             .find(|(k, _)| *k == "books_disagree")
                             .map_or(0, |(_, v)| v);
+                        let agreement = current_position_agreement(
+                            last_reconcile,
+                            last_reconcile_revision,
+                            books.booked(),
+                            clock.wall(),
+                        );
+                        if agreement.is_none() {
+                            supervisor.request_position_check();
+                        }
                         let refused = resume_refusal(
                             cfg.control_allow_resume,
                             trader.session().gate().kill_switch().is_tripped(),
                             trader.session().journal_lost(),
-                            last_reconcile.map(|(_, ok)| ok),
+                            agreement,
                             books_disagree,
                         );
                         match refused {
@@ -1605,29 +1634,53 @@ where
                 // this loop held the evidence sixteen hundred times over
                 // thirty-three hours without once looking at it.
                 Action::CheckPositions | Action::Reconcile => {
-                    match trader.venue().positions(&symbol) {
-                        Ok(venue) => {
-                            supervisor.on_read_succeeded();
+                    let before = books.booked();
+                    let observed = trader
+                        .venue()
+                        .positions_observed(&symbol)
+                        .map_err(|e| e.to_string())
+                        .and_then(|source| {
+                            let source =
+                                source.ok_or("explicit position coverage is unsupported")?;
+                            source
+                                .check(
+                                    &symbol,
+                                    hedged,
+                                    clock.wall().0 / 1_000_000,
+                                    POSITION_READ_MAX_AGE_MS,
+                                    before,
+                                    books.booked(),
+                                )
+                                .map_err(|e| e.to_string())?;
+                            Ok((
+                                source.positions,
+                                Nanos(source.requested_ms.saturating_mul(1_000_000)),
+                            ))
+                        });
+                    match observed {
+                        Ok((venue, cut_at)) => {
                             let net = match venue_net_lots(&venue, &instrument) {
                                 Ok(net) => net,
                                 Err(why) => {
                                     metrics.incomplete_reads += 1;
+                                    last_reconcile = None;
                                     trader.halt(&why);
                                     continue;
                                 }
                             };
                             if let Err(why) = crate::session::validate_positions(&venue) {
                                 trader.halt(&why.to_string());
+                                continue;
                             }
+                            supervisor.on_read_succeeded();
                             // Reported, never quietly corrected: books
                             // that adopted the venue's number here would
                             // destroy the evidence of how they came to
                             // differ, which is the only thing that could
                             // explain it afterwards.
                             let verdict = books.reconcile(net, clock.wall());
-                            if verdict.is_none() {
-                                last_reconcile = Some((clock.wall(), true));
-                            }
+                            let net_agrees = verdict.is_none();
+                            last_reconcile_revision = books.booked();
                             if let Some(m) = verdict {
                                 // Ask before judging. A stream that
                                 // dropped does not replay what it missed,
@@ -1645,6 +1698,7 @@ where
                                         books.has_booked(t, side)
                                     });
                                 if !missed.is_empty() {
+                                    last_reconcile = Some((cut_at, false));
                                     eprintln!(
                                         "reconcile        MISMATCH ours {} theirs {}, drift {}; \
                                          {} report(s) the stream never delivered, recovered \
@@ -1672,7 +1726,6 @@ where
                                     continue;
                                 }
                                 metrics.reconciliation_mismatches += 1;
-                                last_reconcile = Some((clock.wall(), false));
                                 eprintln!(
                                     "reconcile        MISMATCH ours {} theirs {}, drift {}",
                                     m.ours.0,
@@ -1682,11 +1735,18 @@ where
                             }
                             // The comparison the zombie check exists for.
                             let streamed = streamed_legs(&books, &symbol, &instrument);
-                            for verdict in supervisor.on_positions(&streamed, &venue) {
-                                settle(&verdict, &mut trader, &mut reader, &symbol, env);
+                            let (health, verdicts) = supervisor.position_verdict(&streamed, &venue);
+                            let legs_agree = health == oq_gateway::stream::Health::Agreed;
+                            if net_agrees && !legs_agree {
+                                metrics.reconciliation_mismatches += 1;
+                            }
+                            last_reconcile = Some((cut_at, net_agrees && legs_agree));
+                            for verdict in verdicts {
+                                settle(&verdict, &mut trader, &mut reader, env, &mut supervisor);
                             }
                         }
                         Err(e) => {
+                            last_reconcile = None;
                             // Not checking is not the same as passing —
                             // the rule `oq-recon` states for its own exit
                             // codes, applied where the check actually
@@ -1696,12 +1756,12 @@ where
                             metrics.incomplete_reads += 1;
                             eprintln!("reconcile        FAILED: {e}");
                             for verdict in supervisor.on_read_failed() {
-                                settle(&verdict, &mut trader, &mut reader, &symbol, env);
+                                settle(&verdict, &mut trader, &mut reader, env, &mut supervisor);
                             }
                         }
                     }
                 }
-                other => act(&other, &mut trader, &symbol),
+                other => act(&other, &mut trader, &mut supervisor),
             }
         }
 
@@ -2095,7 +2155,6 @@ trait TraderLike {
     /// venue's open-order view that none remains.
     fn cancel_all(&mut self, symbol: &str, clock: &dyn Clock) -> Result<(), String>;
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError>;
-    fn reconcile(&mut self, symbol: &str);
     fn renew(&self);
     /// Stop trading, and withdraw what would add to the position.
     fn halt(&mut self, why: &str);
@@ -2208,16 +2267,6 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     fn close_stream(&self) -> Result<(), oq_gateway::VenueError> {
         self.session().venue().close_user_stream()
     }
-    fn reconcile(&mut self, symbol: &str) {
-        match self.session().venue().positions(symbol) {
-            Ok(p) => {
-                if let Err(why) = self.session_mut().reconcile(&p) {
-                    self.halt(&why);
-                }
-            }
-            Err(e) => eprintln!("reconcile        FAILED: {e}"),
-        }
-    }
     fn renew(&self) {
         if let Err(e) = self.session().venue().keepalive_user_stream() {
             eprintln!("keepalive        FAILED: {e}");
@@ -2246,10 +2295,10 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
     }
 }
 
-fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
+fn act<T: TraderLike>(action: &Action, trader: &mut T, supervisor: &mut Supervisor) {
     match action {
         Action::RenewKey => trader.renew(),
-        Action::CheckPositions | Action::Reconcile => trader.reconcile(symbol),
+        Action::CheckPositions | Action::Reconcile => supervisor.request_position_check(),
         // Reconnection of the account stream is left to the next
         // iteration's read, which opens one when it finds none. What
         // matters here is that the reconcile that follows it happens.
@@ -2429,14 +2478,14 @@ fn settle<S: Strategy>(
     action: &Action,
     trader: &mut Trader<S, Box<dyn Account>>,
     reader: &mut Box<dyn UserEvents>,
-    symbol: &str,
     env: &dyn Environment,
+    supervisor: &mut Supervisor,
 ) {
     match action {
         Action::Reconnect => {
             reopen_user_stream(trader.venue().as_ref(), reader, env);
         }
-        other => act(other, trader, symbol),
+        other => act(other, trader, supervisor),
     }
 }
 
@@ -4248,8 +4297,55 @@ fn resume_refusal(
     None
 }
 
+/// A resume uses a fresh qualified cut of the same local execution revision.
+fn current_position_agreement(
+    last: Option<(Nanos, bool)>,
+    at_revision: usize,
+    current_revision: usize,
+    now: Nanos,
+) -> Option<bool> {
+    let (at, agreed) = last?;
+    let age = now.0.checked_sub(at.0)?;
+    (at_revision == current_revision && (0..=POSITION_READ_MAX_AGE_MS * 1_000_000).contains(&age))
+        .then_some(agreed)
+}
+
+#[cfg(test)]
+mod position_cut_tests {
+    use super::*;
+
+    #[test]
+    fn resume_needs_a_fresh_positive_cut_of_the_same_execution_revision() {
+        let first = Some((Nanos(0), true));
+        assert_eq!(
+            current_position_agreement(first, 1, 1, Nanos(1)),
+            Some(true)
+        );
+        assert_eq!(
+            current_position_agreement(first, 1, 3, Nanos(1)),
+            None,
+            "even a flat round trip changes the cut"
+        );
+        assert_eq!(
+            current_position_agreement(first, 1, 1, Nanos(5_000_000_001)),
+            None
+        );
+        assert_eq!(current_position_agreement(first, 1, 1, Nanos(-1)), None);
+        let unknown = current_position_agreement(None, 1, 1, Nanos(1));
+        assert!(resume_refusal(true, true, None, unknown, 0).is_some());
+        let refreshed = current_position_agreement(
+            Some((Nanos(6_000_000_000), true)),
+            3,
+            3,
+            Nanos(6_000_000_001),
+        );
+        assert!(resume_refusal(true, true, None, refreshed, 0).is_none());
+    }
+}
+
 /// How often the run files are rewritten while a run goes on.
 const ARTIFACTS_EVERY: Duration = Duration::from_secs(15 * 60);
+const POSITION_READ_MAX_AGE_MS: i64 = 5_000;
 
 /// How often a crossed funding settlement is asked about until the
 /// venue has published its rate and ledger lines.

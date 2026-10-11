@@ -113,6 +113,15 @@ pub trait Account: Execution {
     /// Whatever the request reports.
     fn positions(&self, symbol: &str) -> Result<Vec<PositionSnapshot>, VenueError>;
 
+    /// Explicit leg coverage and client-clock request/receipt boundaries.
+    /// Legacy vectors cannot certify missing legs as flat by default.
+    fn positions_observed(
+        &self,
+        _symbol: &str,
+    ) -> Result<Option<crate::position_read::PositionObservation>, VenueError> {
+        Ok(None)
+    }
+
     /// Wallet balance and unrealised profit, from the venue.
     ///
     /// # Errors
@@ -413,6 +422,12 @@ impl Account for Box<dyn Account> {
     }
     fn positions(&self, symbol: &str) -> Result<Vec<PositionSnapshot>, VenueError> {
         (**self).positions(symbol)
+    }
+    fn positions_observed(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<crate::position_read::PositionObservation>, VenueError> {
+        (**self).positions_observed(symbol)
     }
     fn balances(&self) -> Result<AccountSnapshot, VenueError> {
         (**self).balances()
