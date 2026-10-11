@@ -130,6 +130,14 @@ pub struct Settled {
     pub verified: bool,
 }
 
+/// An interval where no next settlement was known. Rediscovery closes
+/// its receive boundary, not its historical coverage obligation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduleGap {
+    pub since_ms: i64,
+    pub until_ms: Option<i64>,
+}
+
 /// Settlements crossed, and what has been learnt about them.
 #[derive(Debug, Clone)]
 pub struct FundingWatch {
@@ -142,6 +150,7 @@ pub struct FundingWatch {
     problem: Option<String>,
     settled: usize,
     booked_lines: std::collections::BTreeMap<i64, (i64, Cash)>,
+    schedule_gaps: Vec<ScheduleGap>,
 }
 
 impl FundingWatch {
@@ -176,6 +185,7 @@ impl FundingWatch {
             problem,
             settled: 0,
             booked_lines: std::collections::BTreeMap::new(),
+            schedule_gaps: Vec::new(),
         }
     }
 
@@ -188,7 +198,10 @@ impl FundingWatch {
         model: Legs,
         next: impl FnOnce() -> Option<i64>,
     ) {
-        let Some(t) = self.next_ms else { return };
+        let Some(t) = self.next_ms else {
+            self.begin_schedule_gap(now_ms);
+            return;
+        };
         if now_ms < t {
             return;
         }
@@ -201,9 +214,53 @@ impl FundingWatch {
         // Asked again rather than added to: intervals differ by contract
         // and the venue changes them.
         self.next_ms = next().filter(|n| *n > t);
+        if self.next_ms.is_none() {
+            self.begin_schedule_gap(t.saturating_add(1));
+        }
         if self.next_ms.is_none() && self.problem.is_none() {
             self.problem = Some(format!("the settlement after {t} could not be read"));
         }
+    }
+
+    fn begin_schedule_gap(&mut self, since_ms: i64) {
+        if self
+            .schedule_gaps
+            .last()
+            .is_none_or(|gap| gap.until_ms.is_some())
+        {
+            self.schedule_gaps.push(ScheduleGap {
+                since_ms,
+                until_ms: None,
+            });
+        }
+    }
+
+    /// Host polling, rather than every event-loop iteration, retries I/O.
+    #[must_use]
+    pub const fn needs_schedule(&self) -> bool {
+        self.next_ms.is_none()
+    }
+
+    /// Apply the result of a host's schedule request at an injected time.
+    /// Never extrapolate an interval or install a stale next settlement.
+    pub fn rediscover_schedule(&mut self, now_ms: i64, next: Result<Option<i64>, String>) {
+        if !self.needs_schedule() {
+            return;
+        }
+        self.begin_schedule_gap(now_ms);
+        if let Some(next_ms) = next.ok().flatten().filter(|next_ms| *next_ms > now_ms) {
+            self.next_ms = Some(next_ms);
+            if let Some(gap) = self.schedule_gaps.last_mut() {
+                gap.until_ms = Some(now_ms);
+            }
+        }
+    }
+
+    /// Unknown schedule intervals remain obligations even after retry
+    /// succeeds; current discovery cannot certify what happened earlier.
+    #[must_use]
+    pub fn schedule_gaps(&self) -> &[ScheduleGap] {
+        &self.schedule_gaps
     }
 
     /// Whether there is anything to ask the venue.
@@ -585,6 +642,81 @@ mod tests {
         assert_eq!(w.unresolved(), vec![t + 1]);
         assert!(w.problem().is_some_and(|p| p.contains("overlaps")));
         assert!(w.resolve(&[rate(t)], &rows, t + 3).is_empty());
+    }
+
+    #[test]
+    fn schedule_rediscovery_resumes_future_booking_without_certifying_the_unknown_interval() {
+        let t = 1_790_323_200_000;
+        let mut w = FundingWatch::new(btc(), Err("temporary discovery failure".into()));
+        let legs = (QtyLots(4), QtyLots(0));
+        w.on_time(t, legs, legs, || {
+            panic!("retry belongs to host polling, not the hot loop")
+        });
+        w.on_time(t + 1, legs, legs, || panic!("no repeated schedule I/O"));
+        assert_eq!(
+            w.schedule_gaps(),
+            &[ScheduleGap {
+                since_ms: t,
+                until_ms: None
+            }]
+        );
+        w.rediscover_schedule(t + 10, Err("still down".into()));
+        w.rediscover_schedule(t + 20, Ok(Some(t + 20)));
+        assert!(w.needs_schedule(), "stale schedule is not extrapolated");
+        w.rediscover_schedule(t + 30, Ok(Some(t + 60_000)));
+        assert!(!w.needs_schedule());
+        assert_eq!(
+            w.schedule_gaps(),
+            &[ScheduleGap {
+                since_ms: t,
+                until_ms: Some(t + 30)
+            }]
+        );
+        w.on_time(t + 60_000, legs, legs, || Some(t + 28_800_000));
+        let resolved = w.resolve(
+            &[rate(t + 60_000)],
+            &[line(t + 60_000, -3_359_784, 1)],
+            t + 60_001,
+        );
+        assert_eq!(resolved[0].venue, Cash(-3_359_784));
+        assert!(
+            w.evidence().is_err(),
+            "rediscovery cannot reconstruct model inventory during the unknown interval"
+        );
+    }
+
+    #[test]
+    fn losing_the_next_schedule_keeps_the_known_settlement_and_records_a_new_gap() {
+        let t = 1_790_323_200_000;
+        let legs = (QtyLots(4), QtyLots(0));
+        let mut w = FundingWatch::new(btc(), Ok(Some(t)));
+        w.on_time(t, legs, legs, || None);
+        assert!(w.needs_schedule());
+        assert_eq!(w.unresolved(), vec![t]);
+        assert_eq!(
+            w.schedule_gaps(),
+            &[ScheduleGap {
+                since_ms: t + 1,
+                until_ms: None
+            }]
+        );
+        w.rediscover_schedule(t + 10, Ok(Some(t + 100_000)));
+        assert_eq!(
+            w.resolve(&[rate(t)], &[line(t, -3_359_784, 1)], t + 11)
+                .len(),
+            1
+        );
+        w.on_time(t + 100_000, legs, legs, || None);
+        assert_eq!(w.schedule_gaps().len(), 2);
+        assert_eq!(w.schedule_gaps()[0].until_ms, Some(t + 10));
+        assert_eq!(
+            w.schedule_gaps()[1],
+            ScheduleGap {
+                since_ms: t + 100_001,
+                until_ms: None
+            }
+        );
+        assert!(w.evidence().is_err());
     }
 
     #[test]
