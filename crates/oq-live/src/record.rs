@@ -76,6 +76,8 @@ pub mod kind {
     pub const FUNDING_EVIDENCE: u16 = 14;
     /// Recovered venue cash without an observed historical model position.
     pub const FUNDING_RECOVERED: u16 = 15;
+    /// A snapshot of unresolved funding obligations, never a completion flag.
+    pub const FUNDING_STATE: u16 = 16;
 }
 
 /// How a submitted order turned out.
@@ -269,6 +271,10 @@ pub enum Record {
         through_ms: i64,
         lines: Vec<(i64, i64, Cash)>,
     },
+    FundingState {
+        at: Nanos,
+        obligations: crate::funding::FundingObligations,
+    },
     /// Uses the core's canonical venue-fill payload instead of a second
     /// encoder for offset, liquidity, clocks and reported commission.
     Execution {
@@ -313,6 +319,7 @@ impl Record {
             | Self::Funding { .. }
             | Self::FundingEvidence { .. }
             | Self::FundingRecovered { .. }
+            | Self::FundingState { .. }
             | Self::Execution { .. }
             | Self::LedgerStart { .. } => false,
         }
@@ -335,6 +342,7 @@ impl Record {
             Self::Funding { .. } => kind::FUNDING,
             Self::FundingEvidence { .. } => kind::FUNDING_EVIDENCE,
             Self::FundingRecovered { .. } => kind::FUNDING_RECOVERED,
+            Self::FundingState { .. } => kind::FUNDING_STATE,
             Self::Execution { .. } => kind::EXECUTION,
             Self::LedgerStart { .. } => kind::LEDGER_START,
         }
@@ -566,6 +574,33 @@ impl Record {
                     put_i64(&mut out, amount.0);
                 }
             }
+            Self::FundingState { at, obligations } => {
+                put_i64(&mut out, at.0);
+                put_i64(
+                    &mut out,
+                    i64::try_from(obligations.pending_ms.len())
+                        .expect("funding pending count fits i64"),
+                );
+                for pending in &obligations.pending_ms {
+                    put_i64(&mut out, *pending);
+                }
+                put_i64(
+                    &mut out,
+                    i64::try_from(obligations.schedule_gaps.len())
+                        .expect("funding gap count fits i64"),
+                );
+                for gap in &obligations.schedule_gaps {
+                    put_i64(&mut out, gap.since_ms);
+                    out.push(u8::from(gap.until_ms.is_some()));
+                    if let Some(until) = gap.until_ms {
+                        put_i64(&mut out, until);
+                    }
+                }
+                out.push(u8::from(obligations.problem.is_some()));
+                if let Some(problem) = &obligations.problem {
+                    put_str(&mut out, problem);
+                }
+            }
             Self::Reconciled { at, legs } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(legs.len()).unwrap_or(0));
@@ -725,6 +760,44 @@ impl Record {
                     since_ms,
                     through_ms,
                     lines,
+                }
+            }
+            kind::FUNDING_STATE => {
+                let at = Nanos(take_i64(&mut p)?);
+                let count = usize::try_from(take_i64(&mut p)?).ok()?;
+                if count > p.len() / 8 {
+                    return None;
+                }
+                let mut pending_ms = Vec::with_capacity(count);
+                for _ in 0..count {
+                    pending_ms.push(take_i64(&mut p)?);
+                }
+                let count = usize::try_from(take_i64(&mut p)?).ok()?;
+                if count > p.len() / 9 {
+                    return None;
+                }
+                let mut schedule_gaps = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let since_ms = take_i64(&mut p)?;
+                    let until_ms = match take_u8(&mut p)? {
+                        0 => None,
+                        1 => Some(take_i64(&mut p)?),
+                        _ => return None,
+                    };
+                    schedule_gaps.push(crate::funding::ScheduleGap { since_ms, until_ms });
+                }
+                let problem = match take_u8(&mut p)? {
+                    0 => None,
+                    1 => Some(take_str(&mut p)?),
+                    _ => return None,
+                };
+                Self::FundingState {
+                    at,
+                    obligations: crate::funding::FundingObligations {
+                        pending_ms,
+                        schedule_gaps,
+                        problem,
+                    },
                 }
             }
             kind::EXECUTION => {

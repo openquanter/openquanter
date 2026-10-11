@@ -173,6 +173,7 @@ pub struct Session<E: Execution> {
     sync_decisions: bool,
     /// Why the journal stopped taking records, once it has.
     journal_lost: Option<String>,
+    last_funding_state: Option<crate::funding::FundingObligations>,
     /// Why the kill switch was tripped, from the first halt until a
     /// resume clears it.
     halt_reason: Option<String>,
@@ -256,6 +257,7 @@ impl<E: Execution> Session<E> {
             journal: None,
             sync_decisions: false,
             journal_lost: None,
+            last_funding_state: None,
             halt_reason: None,
             venue,
             gate,
@@ -512,6 +514,24 @@ impl<E: Execution> Session<E> {
                 .map(|line| (line.id, line.time_ms, line.amount))
                 .collect(),
         });
+    }
+
+    /// Persist changed obligations even when no venue cash was recovered.
+    pub fn record_funding_state(
+        &mut self,
+        at: oq_types::Nanos,
+        funding: &crate::funding::FundingWatch,
+    ) {
+        let obligations = funding.obligations();
+        if self.last_funding_state.as_ref() == Some(&obligations) {
+            return;
+        }
+        if self.write(&Record::FundingState {
+            at,
+            obligations: obligations.clone(),
+        }) {
+            self.last_funding_state = Some(obligations);
+        }
     }
 
     /// A fill the venue reported and this process booked.
