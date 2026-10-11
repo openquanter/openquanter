@@ -127,6 +127,10 @@ jobs:
             on { print }
           ' CHANGELOG.md > notes.md
           test -s notes.md || { echo "::error::empty changelog section for $v"; exit 1; }
+          test -s "docs/releases/v$v.zh-CN.md" || { echo "::error::missing Chinese release notes for $v"; exit 1; }
+          mv notes.md changes.md
+          printf '[简体中文](https://github.com/%s/blob/main/docs/releases/v%s.zh-CN.md)\n\n' "$GITHUB_REPOSITORY" "$v" > notes.md
+          cat changes.md >> notes.md
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
