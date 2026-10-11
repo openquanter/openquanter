@@ -527,12 +527,13 @@ window rather than inferring it from the existence of older files.
 |---|---|---|
 | P0 | Full-window execution and account audit | Orders, positions and ledger economics reconciled over the selected interval; missed/duplicate fills and recovery episodes accounted for; live journal replay compared against recorded outputs |
 | P0 | G12 attribution closure | Recover missing funding/fee statements and recompute, or identify uncovered intervals and their effect; independently computed components and numeric residual bound to a `RunManifest` |
-| P0 | L2 input-validity audit | Archive bootstrap snapshots and post-gap reinitialisation reach both the aggregator and matcher; reproduction cases cover disconnects and reconnects, and unusable intervals are labelled |
+| P0 | L2 input-validity audit | Archive bootstrap snapshots and post-gap reinitialisation reach both the aggregator and matcher; queue sampling uses exchange-arrival depth; reproduction cases cover disconnects, reconnects and in-flight depth changes, and unusable intervals are labelled |
 | P1 | Cutover acceptance | Audit earlier evidence against [CUTOVER](CUTOVER.md); complete missing rehearsals, including abort coverage, and record order ownership, position/entry-price agreement and exposure intervals |
 | P1 | Reconciliation race coverage | Deterministic cases for stale REST snapshots racing stream fills, bounded history, unknown submissions, delayed reports and external orders; a missing position report is not interpreted as flat |
 | P1 | Fill and latency calibration | Fill probability, time-to-fill, partial fills and markout compared by liquidity state; feed, entry and response timing kept distinct and tied to the same market as the fills |
 | P1 | Capture quality report | Per-stream gaps, sequence integrity, snapshot coverage, retained-file verification and storage growth; verify daily margin-rule snapshot coverage |
-| P2 | Restart and research reproducibility | Feature/decision convergence at different warm-up lengths; rolling OOS experiments linked to all attempted trials, fidelity reports and deployment manifests |
+| P1 | Restart convergence | Feature values and decisions compared over aligned common intervals at different warm-up lengths; undefined values and decision changes reported separately |
+| P2 | Research reproducibility | Rolling OOS experiments linked to all attempted trials, fidelity reports and deployment manifests through existing manifest and trial-ledger primitives |
 
 Testnet records can close execution, accounting, replay and recovery checks,
 and calibrate testnet behavior. They do not establish production-market
@@ -542,21 +543,60 @@ More elapsed time does not add a missing socket-write measurement for G6.
 
 ### Open-source designs to adapt
 
-These are design references for the validation work, not new exit gates:
+Reviewed against upstream documentation/source and this workspace on
+2026-10-11. These are design references, not new exit gates or dependencies.
+Resolve the accounting/evidence defects in README Status first; adapt the
+smallest extension to existing primitives rather than another framework.
+The reviewed work is tracked in [#356](https://github.com/openquanter/openquanter/issues/356).
 
 - [NautilusTrader reconciliation](https://nautilustrader.io/docs/latest/concepts/execution/reconciliation/):
-  snapshot freshness, bounded-history provenance and unknown command outcomes.
+  extend existing `Unknown`/recovery behavior with report coverage,
+  completeness and snapshot freshness. Distinguish explicit flat from a
+  missing report, and observed venue events from synthetic reconciliation.
+  Synthetic alignment cannot recover historical P&L. Do not import timeout
+  terminalization or silent position repair into fatal-on-unknown semantics.
 - [HftBacktest queue models](https://hftbacktest.readthedocs.io/en/latest/order_fill.html)
   and [latency models](https://hftbacktest.readthedocs.io/en/latest/latency_models.html):
   compare conservative/probabilistic queues against fills and separate feed,
-  entry and response latency. Calibration precedes choosing a richer model.
+  entry and response latency. A market-by-price queue is an estimate, not an
+  observation of the actual FIFO position. Its
+  [probability queue implementation](https://github.com/nkaz001/hftbacktest/blob/master/hftbacktest/src/backtest/models/queue.rs)
+  adjusts expected queue size deterministically, without RNG, and subtracts
+  previously accounted trades from depth decreases to avoid double counting.
+  Adapt the semantics to the fixed-point core. Validate snapshot/gap handling
+  and queue sampling at **exchange arrival**, not submission: `L2Engine::submit`
+  currently captures ahead before L1's entry delay elapses. Preserve a venue
+  view and an arrival-time strategy view; reuse `oq-data`'s arrival-based as-of
+  joins. Timestamp subtraction alone is not calibrated one-way latency when
+  clock offsets are unknown. Replay cannot change the future market path;
+  per-observation taker depletion is not a full market-impact model.
+  Calibration precedes choosing a richer model.
 - [Freqtrade recursive analysis](https://www.freqtrade.io/en/stable/recursive-analysis/):
-  vary warm-up history to measure indicator and decision convergence after restart.
+  upstream compares indicators at the last row, not entry/exit decisions.
+  Reuse `oq-features::consistency`, then extend it with aligned common-window
+  comparisons at different history lengths and actual decision differences,
+  including undefined warm-up values. Do not call indicator convergence a
+  strategy-restart parity result or duplicate the existing lookahead check.
 - [Qlib experiment recording](https://qlib.readthedocs.io/en/latest/component/recorder.html):
   link data versions, every trial, rolling OOS results and deployed artifacts.
+  `RunManifest` and persistent `TrialRegistry` already identify runs and count
+  earlier sweeps/unscored trials. The incremental work is artifact lineage,
+  run status and rolling-OOS orchestration outside the deterministic core;
+  a recorder itself proves neither leakage safety nor overfitting control.
 - [Hummingbot executors](https://hummingbot.org/strategies/v2-strategies/executors/):
-  reusable order-lifecycle components, while preserving this framework's
-  deterministic state machines and shared backtest/live semantics.
+  reusable order-lifecycle components once at least two strategies need the
+  same lifecycle. Adapt cancel/replace and partial-fill behavior into journalled
+  event state machines with injected time, shared by backtest and live; the
+  upstream asynchronous executor runtime is not an implementation to transplant.
+
+Two additional references remain conditional rather than immediate work:
+[LEAN's transaction-model example](https://github.com/QuantConnect/Lean/blob/master/Algorithm.CSharp/CustomModelsAlgorithm.cs)
+suggests explicit, versioned venue-rule profiles over the existing fill/fee/
+margin components, not another accounting engine. Its sample random fill and
+unlimited-buying-power policies are demonstrations, not defaults to import.
+[VeighNa's algorithm execution module](https://github.com/vnpy/vnpy_algotrading)
+provides TWAP/iceberg lifecycle examples; portfolio or multi-leg ownership
+requires a concrete account model and use case before adding another manager.
 
 Public reports use generic reproduction cases and aggregate acceptance
 conclusions. Strategies, parameters, account statements, captured data,
