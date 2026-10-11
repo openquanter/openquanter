@@ -683,6 +683,13 @@ where
     if !no_journal && std::path::Path::new(&journal_path).exists() {
         match crate::recover(&journal_path) {
             Ok(prior) => {
+                if prior.undecodable != 0 {
+                    eprintln!(
+                        "recovery         REFUSING to start: {} records are undecodable; a partial reconstruction is not known state",
+                        prior.undecodable
+                    );
+                    return ExitCode::FAILURE;
+                }
                 if prior.in_flight.is_empty() {
                     println!("recovery         previous run left nothing unresolved");
                 } else {
@@ -760,7 +767,18 @@ where
     // reader rebuilding what this run believes it holds would have come
     // up short by exactly the positions that were migrated.
     let mut session = session;
-    session.record_reconciled(clock.wall(), adopted);
+    session.record_ledger_start(
+        clock.wall(),
+        oq_types::InstrumentId::new(1),
+        contract,
+        starting_balance,
+        if hedged {
+            oq_core::PositionMode::Hedge
+        } else {
+            oq_core::PositionMode::OneWay
+        },
+    );
+    session.record_initial_positions(clock.wall(), adopted);
 
     // Fetched while the session still owns the venue, replayed once the
     // trader exists. A strategy that has not seen its window cannot act,
@@ -1200,7 +1218,7 @@ where
                             // than what arrived: a redelivered fill is
                             // discarded above and must not be recorded
                             // twice, or a replay would count it twice.
-                            trader.record_fill(&fill, &u.client_id);
+                            trader.record_fill(&fill, &u.client_id, u.fee);
                             // And tell the strategy, which is the whole
                             // reason it has an `on_fill`. Until this line
                             // existed a strategy could open a position
@@ -2008,7 +2026,7 @@ trait TraderLike {
     /// Sample what the strategy is waiting for, and record it.
     fn record_waiting(&mut self, at: Nanos);
     /// A fill the books accepted, for the journal.
-    fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str);
+    fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str, fee: oq_types::Fee);
     /// One of this strategy's own fills, replayed. Cannot send.
     fn on_history_fill(&mut self, fill: &oq_types::Fill, ctx: &Context);
     /// One historical observation. Cannot produce intents.
@@ -2068,8 +2086,8 @@ impl<S: Strategy> TraderLike for Trader<S, Box<dyn Account>> {
         self.session_mut().record_waiting(at, entries);
     }
 
-    fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str) {
-        self.session_mut().record_fill(fill, client_id);
+    fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str, fee: oq_types::Fee) {
+        self.session_mut().record_execution(fill, client_id, fee);
     }
 
     fn record_tick(&mut self, tick: &oq_engine::Tick) {
@@ -2804,7 +2822,7 @@ fn book_and_observe(
     fill: &oq_types::Fill,
     fee: oq_types::Fee,
 ) -> crate::books::Booked {
-    let booked = books.on_venue_fill(fill, fee);
+    let booked = books.on_venue_fill(fill, crate::record::venue_fee(fee));
     if matches!(&booked, crate::books::Booked::Applied(_)) {
         shadow.on_venue_fill(fill.order, fill.side, fill.price, fill.qty, fill.stamp.exch);
     }

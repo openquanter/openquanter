@@ -90,6 +90,8 @@ pub struct Belief {
     pub legs: Vec<(String, i64, i64)>,
     /// Records the reader could not decode.
     pub undecodable: u64,
+    /// Grid factors, when the journal declares the full instrument.
+    pub instrument: Option<oq_types::Instrument>,
 }
 
 impl Belief {
@@ -123,6 +125,7 @@ impl Belief {
         // and it is taken once, after the last fill, rather than carried
         // through the replay as a number every fill divides again.
         let mut net = Leg::default();
+        let mut mode = None;
 
         for frame in replay.since(0) {
             match Record::decode(frame.kind, &frame.payload) {
@@ -135,6 +138,17 @@ impl Belief {
                     b.symbol = Some(symbol);
                     b.price_scale = price_scale;
                     b.qty_scale = qty_scale;
+                    b.instrument = None;
+                    mode = None;
+                }
+                Some(Record::LedgerStart {
+                    instrument,
+                    mode: declared,
+                    ..
+                }) => {
+                    b.instrument = Some(instrument);
+                    mode = Some(declared);
+                    b.hedged = declared == oq_core::PositionMode::Hedge;
                 }
                 Some(Record::Reconciled { at, legs: adopted }) => {
                     // The venue's whole position at a process's start, and
@@ -171,7 +185,7 @@ impl Belief {
                             .or_default()
                             .fold(signed, entry);
                     }
-                    b.hedged = longs && shorts;
+                    b.hedged = mode.map_or(longs && shorts, |m| m == oq_core::PositionMode::Hedge);
                 }
                 Some(Record::Submitted {
                     client_id,
@@ -197,6 +211,33 @@ impl Belief {
                     // function whose whole job is unresolved orders.
                     OutcomeTag::Rejected | OutcomeTag::Unknown => {}
                 },
+                Some(Record::Execution {
+                    client_id, fill, ..
+                }) => {
+                    let Some(declared) = mode else {
+                        b.undecodable += 1;
+                        continue;
+                    };
+                    let key = if declared == oq_core::PositionMode::Hedge {
+                        match (fill.side, fill.offset) {
+                            (Side::Buy, oq_types::Offset::Open)
+                            | (Side::Sell, oq_types::Offset::Close) => "LONG",
+                            _ => "SHORT",
+                        }
+                        .to_string()
+                    } else {
+                        "NET".to_string()
+                    };
+                    let signed = if fill.side == Side::Buy {
+                        fill.qty.0
+                    } else {
+                        -fill.qty.0
+                    };
+                    *filled.entry(client_id).or_default() += fill.qty.0;
+                    ordered.push(fill.qty.0);
+                    net.fold(signed, fill.price.0);
+                    legs.entry(key).or_default().fold(signed, fill.price.0);
+                }
                 Some(Record::Fill {
                     client_id,
                     qty,
@@ -298,8 +339,10 @@ impl Belief {
             .map(|(name, lots, entry)| {
                 (
                     name.clone(),
-                    scale(*lots, self.qty_scale),
-                    scale(*entry, self.price_scale),
+                    scale(*lots, self.qty_scale)
+                        * self.instrument.map_or(1.0, |i| i.qty_step as f64),
+                    scale(*entry, self.price_scale)
+                        * self.instrument.map_or(1.0, |i| i.price_tick as f64),
                 )
             })
             .collect();

@@ -442,10 +442,9 @@ impl<E: Execution> Session<E> {
     /// acts, and only the second one has to wait for the writer — which
     /// is why this is a separate call rather than something `adopt` does.
     ///
-    /// Nothing is written when the run has no journal, and nothing is
-    /// written for an empty list: a record saying "took over nothing" and
-    /// no record at all are the same claim, and only one of them can be
-    /// mistaken for a run that forgot to look.
+    /// Legacy adoption helper: an empty list emits nothing. It does not
+    /// establish flat; new accounting producers use `record_initial_positions`
+    /// to distinguish an observed empty position from missing evidence.
     pub fn record_reconciled(
         &mut self,
         at: oq_types::Nanos,
@@ -454,6 +453,15 @@ impl<E: Execution> Session<E> {
         if legs.is_empty() {
             return;
         }
+        self.write(&Record::Reconciled { at, legs });
+    }
+
+    /// Record an explicitly observed initial position, including verified flat.
+    pub fn record_initial_positions(
+        &mut self,
+        at: oq_types::Nanos,
+        legs: Vec<(String, String, i64, i64)>,
+    ) {
         self.write(&Record::Reconciled { at, legs });
     }
 
@@ -503,6 +511,35 @@ impl<E: Execution> Session<E> {
             price: oq_gateway::exec::decimal(fill.price.0, self.instrument.price_scale),
             order: fill.order.0,
             side: format!("{:?}", fill.side),
+        });
+    }
+
+    /// Persist an accepted execution with its complete accounting evidence.
+    /// Unknown commission remains unknown; it is never scheduled as zero.
+    pub fn record_execution(&mut self, fill: &oq_types::Fill, client_id: &str, fee: oq_types::Fee) {
+        self.write(&Record::Execution {
+            client_id: client_id.to_string(),
+            fill: *fill,
+            fee: crate::record::venue_fee(fee),
+        });
+    }
+
+    /// Record what initializes the books, independently of display scales.
+    pub fn record_ledger_start(
+        &mut self,
+        at: oq_types::Nanos,
+        instrument_id: oq_types::InstrumentId,
+        contract: oq_margin::Contract,
+        balance: oq_types::Cash,
+        mode: oq_core::PositionMode,
+    ) {
+        self.write(&Record::LedgerStart {
+            at,
+            instrument_id,
+            instrument: self.instrument,
+            tick_cash: contract.tick_cash,
+            balance,
+            mode,
         });
     }
 

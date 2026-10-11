@@ -28,6 +28,8 @@ USAGE:
 
 OPTIONS:
     --orders     Only the order lifecycle, without the ticks
+    --ledger     Replay recorded accounting; report unknown fees/coverage
+    --require-coverage  With --ledger, return 2 unless fee/funding evidence is complete
     --help
 ";
 
@@ -38,6 +40,9 @@ fn main() -> ExitCode {
         return ExitCode::from(u8::from(args.is_empty()));
     }
     let path = &args[0];
+    if args.iter().any(|a| a == "--ledger") {
+        return render_ledger(path, args.iter().any(|a| a == "--require-coverage"));
+    }
     let orders_only = args.iter().any(|a| a == "--orders");
 
     let reader = match Reader::open(path) {
@@ -97,7 +102,7 @@ fn main() -> ExitCode {
             Record::Outcome { client_id, tag, .. } => {
                 outcomes.insert(client_id.clone(), *tag);
             }
-            Record::Fill { .. } => fills += 1,
+            Record::Fill { .. } | Record::Execution { .. } => fills += 1,
             Record::Refused { .. } => refused += 1,
             Record::Cancelled { .. } => cancelled += 1,
             _ => {}
@@ -152,6 +157,44 @@ fn main() -> ExitCode {
         println!("Each of these was written down and never settled. They may be resting");
         println!("at the venue right now; oq-recon or a restart will say.");
         ExitCode::FAILURE
+    }
+}
+
+fn render_ledger(path: &str, require_coverage: bool) -> ExitCode {
+    let report = match oq_live::ledger::replay(path) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("oq-replay ledger: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cash = |v: oq_types::Cash| oq_gateway::exec::decimal(v.0, 8);
+    println!("ledger symbol      {} {:?}", report.symbol, report.mode);
+    println!("starting balance   {}", cash(report.starting_balance));
+    println!("recorded balance   {}", cash(report.recorded_balance));
+    println!("recorded realized  {}", cash(report.realized));
+    println!("recorded fees      {}", cash(report.recorded_fees));
+    println!("recorded funding   {}", cash(report.funding));
+    println!("executions         {}", report.executions);
+    println!("missing fees       {}", report.missing_fees);
+    println!(
+        "funding coverage   {}",
+        if report.funding_coverage {
+            "declared complete"
+        } else {
+            "unverified (recorded amounts are not coverage evidence)"
+        }
+    );
+    for (leg, qty, entry) in report.legs {
+        println!("leg {leg} {} lots @ {} ticks", qty.0, entry.0);
+    }
+    println!(
+        "scope              recorded executions and settlements, not strategy/margin replay or all venue cash flows"
+    );
+    if report.missing_fees > 0 || require_coverage && !report.funding_coverage {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -226,6 +269,33 @@ fn render(record: &Record) -> String {
         } => format!(
             "fill {}  {client_id} #{order} {side} trade {trade_id} {qty} @ {price}",
             at.0
+        ),
+        Record::Execution {
+            client_id,
+            fill,
+            fee,
+        } => format!(
+            "execution {} seen {} {client_id} #{} {:?} {:?} trade {} {} lots @ {} ticks {:?} fee {fee:?}",
+            fill.stamp.exch.0,
+            fill.stamp.local.0,
+            fill.order.0,
+            fill.side,
+            fill.offset,
+            fill.trade.0,
+            fill.qty.0,
+            fill.price.0,
+            fill.liquidity
+        ),
+        Record::LedgerStart {
+            at,
+            instrument_id,
+            instrument,
+            tick_cash,
+            balance,
+            mode,
+        } => format!(
+            "ledger {} instrument {} {:?} balance {} tick-cash {} {instrument:?}",
+            at.0, instrument_id.0, mode, balance.0, tick_cash
         ),
         Record::Refused { at, breach } => format!("refused {}  {breach}", at.0),
         Record::Operator {

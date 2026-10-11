@@ -142,7 +142,11 @@ impl Books {
         starting_balance: Cash,
         mode: oq_core::PositionMode,
     ) -> Self {
-        let mut state = State::new(instrument, contract, table, starting_balance);
+        // Margin projections belong to the shadow/risk path. A local model
+        // must not fabricate liquidation fills or insurance transfers in
+        // books whose authority is the venue's account stream.
+        let mut state =
+            State::new(instrument, contract, table, starting_balance).without_liquidation();
         // The venue is matching. Not a configuration choice — it is what
         // makes these books the live account's rather than a simulation
         // running alongside it.

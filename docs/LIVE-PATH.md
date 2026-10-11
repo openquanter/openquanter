@@ -507,3 +507,42 @@ cannot predict. It is now also exercised end to end without a venue:
 `oq_live::sim` runs the whole live process against a seeded simulated
 venue that can be told to misbehave, and `tests/dst.rs` holds it to the
 same seed producing the same run.
+
+## Recorded ledger evidence
+
+The live record namespace adds two kinds without changing legacy payloads:
+
+| Kind | Payload |
+|---|---|
+| `EXECUTION` (12) | Length-prefixed client id, u32 little-endian core-payload length, then the canonical `Event::VenueFill` payload: full fill clocks, instrument/order/trade ids, side, offset, liquidity and fee evidence |
+| `LEDGER_START` (13) | Observation time and instrument id (i64 LE), price/quantity scales (u8), contract size, price tick, quantity step, minimum notional, cash-per-tick-lot and starting cash (i64 LE), then mode (0 one-way, 1 hedge) |
+
+These are **live record kinds**, not the core event discriminants. The
+execution contains the core encoding but does not reuse its outer kind.
+Instrument economics must agree with the recorded cash multiplier. New
+producers record initial positions even when the observed list is empty;
+missing evidence is not flat. `Session::record_fill` remains the legacy,
+fee-less interface; `record_execution` and `record_ledger_start` supply the
+accounting path. An absent/unreadable commission cannot fall through to a
+model's zero fee, whereas `Fee::Reported(Cash::ZERO)` is observed zero.
+
+```bash
+oq-replay session.oqj --ledger
+oq-replay session.oqj --ledger --require-coverage
+```
+
+The ledger reader selects the latest session and uses authoritative live
+books. It refuses missing context/adoption, legacy fee-less executions,
+unknown records, duplicate economic identities and torn tails. It prints
+recorded balance, realized P&L, fees, funding and legs. Exit 0 means that
+replay succeeded, not that all venue cash flows were captured; unknown fees
+return 2, and `--require-coverage` also returns 2 without explicit funding
+coverage. An observed funding amount is not evidence that no settlement
+was missed. Strategy decisions, margin projections, transfers and insurance
+adjustments need their own evidence. Old files require separately identified
+enrichment; never rewrite them to erase missing provenance.
+
+Live books do not synthesize liquidation fills or insurance transfers from
+a model mark. They keep confirmed inventory until the account stream closes
+it. The shadow/risk path may project liquidation, but that projection is
+not a venue event.
