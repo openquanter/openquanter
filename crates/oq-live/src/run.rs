@@ -4238,10 +4238,21 @@ fn poll_funding<A: oq_gateway::account::Account + ?Sized>(
     at: Nanos,
 ) -> Vec<crate::funding::Settled> {
     if funding.needs_schedule() {
+        let now_ms = at.0 / 1_000_000;
         funding.rediscover_schedule(
-            at.0 / 1_000_000,
+            now_ms,
             venue.next_funding_ms(symbol).map_err(|e| e.to_string()),
         );
+        if let Some(gap) = funding
+            .schedule_gaps()
+            .last()
+            .filter(|gap| gap.until_ms == Some(now_ms))
+        {
+            eprintln!(
+                "funding          schedule rediscovered; interval {}..{} remains unverified",
+                gap.since_ms, now_ms
+            );
+        }
     }
     let Some(since) = funding.asking_since() else {
         return Vec::new();
