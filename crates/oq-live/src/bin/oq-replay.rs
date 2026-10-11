@@ -175,6 +175,7 @@ fn render_ledger(path: &str, require_coverage: bool) -> ExitCode {
     println!("recorded realized  {}", cash(report.realized));
     println!("recorded fees      {}", cash(report.recorded_fees));
     println!("recorded funding   {}", cash(report.funding));
+    println!("funding identities {}", report.funding_identified_lines);
     println!("executions         {}", report.executions);
     println!("missing fees       {}", report.missing_fees);
     println!(
@@ -316,6 +317,16 @@ fn render(record: &Record) -> String {
             venue,
             model,
             verified,
+        }
+        | Record::FundingEvidence {
+            at,
+            settled_ms,
+            rate,
+            mark,
+            venue,
+            model,
+            verified,
+            ..
         } => format!(
             "funding {}  settlement {settled_ms} rate {rate} mark {mark}: venue {} model {}{}",
             at.0,

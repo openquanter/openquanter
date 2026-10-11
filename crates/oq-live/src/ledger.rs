@@ -30,6 +30,8 @@ pub struct LedgerReport {
     pub legs: Vec<(&'static str, QtyLots, PriceTicks)>,
     /// Funding coverage is separate from the sum of observed amounts.
     pub funding_coverage: bool,
+    /// Original ledger IDs verified in additive funding evidence records.
+    pub funding_identified_lines: usize,
 }
 
 /// Read a checksummed journal through the live books' kernel.
@@ -83,6 +85,7 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
     let mut executions = 0;
     let mut missing = 0;
     let mut funding = BTreeSet::new();
+    let mut funding_ids = BTreeSet::new();
     let mut adopted = false;
     for record in &records[start + 1..] {
         match record {
@@ -163,7 +166,30 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
                 settled_ms,
                 venue,
                 ..
+            }
+            | Record::FundingEvidence {
+                at,
+                settled_ms,
+                venue,
+                ..
             } => {
+                if let Record::FundingEvidence { lines, .. } = record {
+                    let mut total = 0i128;
+                    for (id, time_ms, amount) in lines {
+                        if !funding_ids.insert(*id) {
+                            return Err("duplicate funding ledger identity".into());
+                        }
+                        if i128::from(*time_ms).abs_diff(i128::from(*settled_ms)) > 60_000 {
+                            return Err(
+                                "funding ledger line is outside its settlement window".into()
+                            );
+                        }
+                        total += i128::from(amount.0);
+                    }
+                    if total != i128::from(venue.0) {
+                        return Err("funding ledger lines disagree with recorded amount".into());
+                    }
+                }
                 if !funding.insert(*settled_ms) {
                     return Err("duplicate funding settlement".into());
                 }
@@ -224,5 +250,6 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
         missing_fees: missing,
         legs,
         funding_coverage: false,
+        funding_identified_lines: funding_ids.len(),
     })
 }

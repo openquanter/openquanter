@@ -480,7 +480,7 @@ impl<E: Execution> Session<E> {
     /// A funding settlement, once the venue's figures were in: what it
     /// charged the account, and what the model's positions came to.
     pub fn record_funding(&mut self, at: oq_types::Nanos, s: &crate::funding::Settled) {
-        self.write(&Record::Funding {
+        self.write(&Record::FundingEvidence {
             at,
             settled_ms: s.at_ms,
             rate: s.rate.clone(),
@@ -488,6 +488,11 @@ impl<E: Execution> Session<E> {
             venue: s.venue,
             model: s.model,
             verified: s.verified,
+            lines: s
+                .lines
+                .iter()
+                .map(|line| (line.id, line.time_ms, line.amount))
+                .collect(),
         });
     }
 

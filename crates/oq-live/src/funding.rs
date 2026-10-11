@@ -128,6 +128,8 @@ pub struct Settled {
     pub model: Cash,
     /// Whether [`charge`] on the live positions matched the venue.
     pub verified: bool,
+    /// Original venue ledger identities, retained for independent replay.
+    pub lines: Vec<FundingCharge>,
 }
 
 /// An interval where no next settlement was known. Rediscovery closes
@@ -374,6 +376,7 @@ impl FundingWatch {
                 venue,
                 model,
                 verified,
+                lines: booked.into_iter().cloned().collect(),
             });
         }
         self.pending = still;

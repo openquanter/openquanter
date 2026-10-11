@@ -2,11 +2,13 @@
 
 use oq_core::PositionMode;
 use oq_journal::{SyncPolicy, Writer};
+use oq_live::ledger::{replay, replay_records};
 use oq_live::{Record, ledger};
 use oq_types::{
     Cash, Fee, Fill, Instrument, InstrumentId, Liquidity, Nanos, Offset, OrderId, PriceTicks,
     QtyLots, Side, Stamp, TradeId,
 };
+use std::fs;
 
 fn execution(id: u64, side: Side, offset: Offset, qty: i64, price: i64, fee: Fee) -> Record {
     Record::Execution {
@@ -81,6 +83,95 @@ fn records(mode: PositionMode) -> Vec<Record> {
             Fee::Reported(Cash::from_units(1)),
         ),
     ]
+}
+
+fn identified_funding(settled_ms: i64, lines: Vec<(i64, i64, Cash)>, venue: Cash) -> Record {
+    Record::FundingEvidence {
+        at: Nanos(settled_ms * 1_000_000),
+        settled_ms,
+        rate: "0.0001".into(),
+        mark: "100".into(),
+        venue,
+        model: Cash::ZERO,
+        verified: false,
+        lines,
+    }
+}
+
+#[test]
+fn original_funding_identities_replay_without_claiming_history_coverage() {
+    let mut all = records(PositionMode::OneWay);
+    all.push(identified_funding(
+        7000,
+        vec![(1, 7000, Cash(-8)), (2, 7000, Cash(3))],
+        Cash(-5),
+    ));
+    let report = replay_records(&all).unwrap();
+    assert_eq!(
+        report.funding,
+        Cash::from_units(-3).add(Cash(-5)),
+        "legacy -3 currency units plus identified -5 raw cash, each booked once"
+    );
+    assert_eq!(report.funding_identified_lines, 2);
+    assert!(!report.funding_coverage);
+    let path = write(&all);
+    assert_eq!(replay(&path).unwrap().funding_identified_lines, 2);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn duplicate_funding_ids_wrong_totals_and_wrong_windows_are_refused() {
+    let base = records(PositionMode::OneWay);
+    let mut duplicate = base.clone();
+    duplicate.push(identified_funding(
+        7000,
+        vec![(1, 7000, Cash(-5))],
+        Cash(-5),
+    ));
+    duplicate.push(identified_funding(
+        8000,
+        vec![(1, 7000, Cash(-5))],
+        Cash(-5),
+    ));
+    assert!(
+        replay_records(&duplicate)
+            .unwrap_err()
+            .contains("duplicate funding ledger identity")
+    );
+    let mut wrong_sum = base.clone();
+    wrong_sum.push(identified_funding(
+        7000,
+        vec![(1, 7000, Cash(-4))],
+        Cash(-5),
+    ));
+    assert!(replay_records(&wrong_sum).unwrap_err().contains("disagree"));
+    let mut wrong_time = base;
+    wrong_time.push(identified_funding(
+        7000,
+        vec![(1, 70001, Cash(-5))],
+        Cash(-5),
+    ));
+    assert!(replay_records(&wrong_time).unwrap_err().contains("outside"));
+}
+
+#[test]
+fn identified_funding_payload_rejects_torn_trailing_and_invalid_count() {
+    let record = identified_funding(7000, vec![(1, 7000, Cash(-5))], Cash(-5));
+    let encoded = record.encode();
+    assert_eq!(
+        Record::decode(record.kind(), &encoded),
+        Some(record.clone())
+    );
+    for len in 0..encoded.len() {
+        assert!(Record::decode(record.kind(), &encoded[..len]).is_none());
+    }
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(Record::decode(record.kind(), &trailing).is_none());
+    let mut negative_count = encoded;
+    let count_at = negative_count.len() - 24 - 8;
+    negative_count[count_at..count_at + 8].copy_from_slice(&(-1i64).to_le_bytes());
+    assert!(Record::decode(record.kind(), &negative_count).is_none());
 }
 
 fn write(records: &[Record]) -> std::path::PathBuf {
