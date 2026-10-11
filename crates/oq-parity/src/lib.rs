@@ -21,6 +21,7 @@ pub mod diff;
 pub mod manifest;
 pub mod markout;
 pub mod record;
+pub mod research;
 pub mod wire;
 
 pub use diff::{Difference, FieldDifference, ParityReport, compare};

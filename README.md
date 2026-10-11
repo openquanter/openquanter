@@ -442,8 +442,10 @@ than asserted as an intention. Funding is measured on both sides: the venue's ow
 ledger for the account, and the model's positions charged at the rate and
 mark the venue settled at — a computation checked against the ledger at
 every settlement, which reports funding unavailable, with the reason,
-the moment it fails to reproduce it. **The historical review is complete;
-G12 has not passed because evidence and accounting defects remain.** Missing
+the moment it fails to reproduce it. **The historical review is complete; the covered-residual implementation
+and synthetic checks are in place, but historical G12 acceptance has not
+passed.** The reviewed legacy sessions still need identified, manifest-bound
+covered reports and original historical model inventory. Missing
 funding or fee evidence must be recovered and the report recomputed, or the
 uncovered interval and its effect identified; an unavailable residual is
 not zero and cannot pass the attribution gate. Acceptance binds the replay
@@ -466,6 +468,7 @@ deployment; no account data or operational records are published here.
 | Evidence-enriched kernel accounting replay | Repeated replay is deterministic; quantities, final entries, realized P&L, fees and recovered funding agree after the precise-cost correction in [#353](https://github.com/openquanter/openquanter/issues/353). Synthetic, partial-close and liquidation-boundary tests cover the correction |
 | Shadow/exported venue fills | The runner now forwards only accepted unique executions to shadow, with recovery/stream redelivery and partial-fill tests. Legacy exports with surplus rows must be rebuilt from accepted journal fills under a new manifest: [#354](https://github.com/openquanter/openquanter/issues/354) |
 | Net accounting and G12 | **Historical acceptance not passed.** Native fee/funding recovery, exact closed-window coverage, persistent history evidence and covered final live residuals are implemented, with independent non-zero-gap synthetic tests. Legacy audit sessions still need an identified, manifest-bound covered report and original historical model inventory; recovered cash alone cannot supply it: [#355](https://github.com/openquanter/openquanter/issues/355) |
+| Warm-up and research evidence | Common-window feature/decision sensitivity and identity-bound evidence linked to cumulative trial ledgers are implemented. Undefined or non-finite measurements cannot pass stability; indicator tolerance cannot override changed decisions. This does not certify restart parity |
 
 The accounting replay joins fee statements and venue leg information that
 the original live journal does not fully carry; it is not a self-contained

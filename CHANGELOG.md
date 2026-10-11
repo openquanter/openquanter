@@ -29,6 +29,15 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Warm-up research evidence has immutable lineage.**
+  `oq_parity::research::warmup_study` binds the actual consumed tick slice,
+  code commit, common-window parameters and explicit constructor policy to
+  a `RunManifest`. Every constructed path, including the reference and
+  failed started paths, is appended as unscored to a cumulative
+  `TrialRegistry` with compatible question/sampling basis. Versioned
+  attachments link the exact as-of ledger and checksum the result body.
+  Changed inputs/configuration, unknown-code baselines, foreign ledgers and
+  malformed or altered attachments refuse verification.
 - **Warm-up sensitivity compares features and decisions on a common window.**
   `oq_features::warmup::sensitivity` creates fresh paths for distinct history
   lengths, feeds history separately, and compares each shorter path with

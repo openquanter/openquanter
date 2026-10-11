@@ -506,6 +506,31 @@ vector），`None` 表示决策尚未定义。
 差额，不是零误差。指标可在容差内收敛，而近阈值决策每次都变化。这诊断历史长度
 敏感性；restart parity 还需要原始策略/仓位状态及相同的事件/决策语义。
 
+### 有身份的研究证据
+
+`oq_parity::research::warmup_study` 将公共窗口诊断与 `RunManifest` 及已有累计
+`TrialRegistry` 结合。调用方声明代码身份、研究问题、相容采样 basis，以及完整有效
+的指标/决策构造策略 bytes。策略 bytes 必须提供；仅指标名字不能识别参数。
+
+数据 hash 仅覆盖实际送入任一路径的观测，从 `evaluation_start - longest_warmup`
+到评估终点。每条 tick 在版本化 domain 下规范编码为八个 little-endian i64 字段
+（交易所/本地 stamp、last/high/low/bid/ask、volume）。未使用前缀/后缀变化不改变
+该身份。长度前缀策略 bytes、问题、basis、窗口、排序后的历史长度及容差 bits 构成
+配置身份。已消费输入或有效配置变化使比较失效，已知代码的单独变化仍可比较。
+未知代码可产生证据，但不能验证行为基线。
+
+每次新路径构造将自身配置身份记为 unscored，包含最长参考。构造开始后失败仍保留
+已经发生的尝试，未启动路径不计数。这些决策没有收益序列，因此不虚构 Sharpe。
+既有次数保留，重复尝试仍计数；外来问题/采样 basis 或未声明 basis 的非空 ledger
+在追加前拒绝。跨 study 保留并重载同一问题的 ledger。
+
+`WarmupStudy::artifact_text` 输出 `openquanter-warmup-evidence 1`，包含身份、策略
+hash、消费区间、trial ID、累计 trial 数、精确 registry 快照 hash 及校验后的诊断
+正文。`parse_attachment` 严格检查版本、scope、有序字段、数量、身份及正文完整性。
+将 `registry.to_ledger()` 与附件一同保存；`verify_registry` 要求该 as-of 快照，
+不是后续追加过的 ledger。`verify_baseline` 单独核验实验可比较性。这将实际尝试
+与测量结果关联，同时保留诊断一致与生产验收的区别。
+
 ### 可比较的仓位观测
 
 live 启动及周期对账使用 `Account::positions_observed`。默认不支持，不把旧 vector

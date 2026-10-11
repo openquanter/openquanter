@@ -13,9 +13,9 @@ repository.workspace = true
 oq-data.workspace = true
 oq-hash.workspace = true
 oq-types.workspace = true
-
-[dev-dependencies]
 oq-engine.workspace = true
+oq-features.workspace = true
+oq-stats.workspace = true
 
 [lints]
 workspace = true

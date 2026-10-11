@@ -1071,7 +1071,9 @@ version = "2.0.0"
 dependencies = [
  "oq-data",
  "oq-engine",
+ "oq-features",
  "oq-hash",
+ "oq-stats",
  "oq-types",
 ]
 

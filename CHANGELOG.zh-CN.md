@@ -22,6 +22,11 @@
 
 ### 变更
 
+- **warm-up 研究证据具备不可变关联。** `oq_parity::research::warmup_study` 将实际消费
+  的 tick 切片、代码 commit、公共窗口参数及明确构造策略绑定至 `RunManifest`。每个
+  已构造路径（含参考及已启动后失败的路径）均作为 unscored 追加到问题/采样 basis
+  相容的累计 `TrialRegistry`。版本化附件关联精确 as-of ledger 并校验结果正文。
+  输入/配置改变、未知代码基线、外来 ledger、格式错误或被修改的附件均拒绝验证。
 - **warm-up 敏感性在公共窗口比较指标和决策。** `oq_features::warmup::sensitivity`
   为不同历史长度创建新路径，单独输入历史，仅在声明的评估区间将较短路径与最长路径
   比较。复用已有指标 consistency，分别统计 undefined/非有限指标、undefined 决策及

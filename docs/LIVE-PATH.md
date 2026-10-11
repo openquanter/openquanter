@@ -699,6 +699,43 @@ changes every time. This diagnoses history-length sensitivity; restart
 parity additionally needs original strategy/inventory state and the same
 event/decision semantics.
 
+### Identified research evidence
+
+`oq_parity::research::warmup_study` combines the common-window diagnostic
+with `RunManifest` and the existing cumulative `TrialRegistry`. The caller
+declares code identity, research question, compatible sampling basis and
+the complete effective feature/decision constructor policy bytes. Policy
+bytes are mandatory; a feature name alone does not identify its parameters.
+
+The data hash covers only observations actually fed to any path: from
+`evaluation_start - longest_warmup` through the evaluation end. Each tick
+is canonically encoded as eight little-endian i64 fields (exchange/local
+stamp, last/high/low/bid/ask, volume), under a versioned domain. Unused
+prefix/suffix changes do not move this identity. Length-prefixed policy
+bytes, question, basis, window, sorted history lengths and tolerance bits
+form the configuration identity. Changed consumed input or effective
+configuration invalidates comparison; known code-only changes remain
+comparable. An unknown code can produce evidence but cannot verify a
+behavior baseline.
+
+Every fresh path construction records its own configuration identity as
+unscored, including the longest reference. A failure after construction
+begins retains the attempts already made; paths not started are not counted.
+These decisions provide no return series and therefore no invented Sharpe
+ratio. Existing counts are preserved, repeated attempts count, and foreign
+question/sampling basis or an undeclared non-empty ledger is refused before
+appending. Retain and reload the same question's ledger across studies.
+
+`WarmupStudy::artifact_text` writes `openquanter-warmup-evidence 1` with
+identity, policy hash, consumed range, trial IDs, cumulative trial count,
+the exact registry snapshot hash and checksummed diagnostic body.
+`parse_attachment` strictly checks version, scope, ordered fields, counts,
+identities and body integrity. Store `registry.to_ledger()` beside the
+attachment; `verify_registry` requires that as-of snapshot, not a ledger
+with later appends. `verify_baseline` checks experiment comparability
+separately. This links what was tried to what was measured, while preserving
+the distinction between diagnostic agreement and production acceptance.
+
 ### Comparable position observations
 
 Live startup and periodic reconciliation use `Account::positions_observed`.
