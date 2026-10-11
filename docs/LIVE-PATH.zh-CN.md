@@ -489,6 +489,23 @@ instrument、来源不在未来、重复不冲突。返佣与明确报告的零�
 数量描述已接收 fill，不代表完整交易所历史。不改写过去风控/现金曲线。重启状态
 恢复及完整覆盖仍须独立证据。
 
+### warm-up 敏感性与决策一致性
+
+`oq_features::warmup::sensitivity` 以不同预评估历史长度运行 `WarmupPath` factory。
+每条路径从新状态开始，最长历史为参考。全部比较使用相同的半开观测区间
+`[evaluation_start, evaluation_end)`，历史须完整可用；区间终点之后的输入不进入路径。
+
+`WarmupPath::on_history` 更新历史状态，不执行假设订单；`on_evaluation` 为每条观测
+返回一个指标值及规范决策。`FeatureDecisions` adapter 仅预热指标，在评估期调用
+rule。有状态策略 wrapper 自行实现历史回调。已定义的无动作是 `Some`（如空 intent
+vector），`None` 表示决策尚未定义。
+
+报告复用指标 `consistency`，统计数字配对、undefined/非有限值、决策变化及定义性
+不一致。首次差异下标相对评估窗口，render 显示对应输入下标。`stable` 同时要求整窗
+有限指标在容差内一致，以及完整且相同的决策。两条全 undefined 路径没有可测数字
+差额，不是零误差。指标可在容差内收敛，而近阈值决策每次都变化。这诊断历史长度
+敏感性；restart parity 还需要原始策略/仓位状态及相同的事件/决策语义。
+
 ### 可比较的仓位观测
 
 live 启动及周期对账使用 `Account::positions_observed`。默认不支持，不把旧 vector

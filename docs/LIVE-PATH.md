@@ -673,6 +673,32 @@ to the host's pending inventory, and its count describes accepted fills,
 not complete venue history. No past risk/cash curve is rewritten. Restart
 state restoration and complete coverage require separate evidence.
 
+### Warm-up sensitivity and decision consistency
+
+`oq_features::warmup::sensitivity` evaluates a `WarmupPath` factory over
+distinct pre-evaluation history lengths. Each path begins fresh; the
+longest history is the reference. All comparisons use the same half-open
+`[evaluation_start, evaluation_end)` observation interval, and histories
+must be fully available. Nothing after that end is fed to a path.
+
+`WarmupPath::on_history` updates history state without executing hypothetical
+orders; `on_evaluation` returns one feature value and one canonical decision
+per observation. The `FeatureDecisions` adapter warms the feature only and
+calls its rule during evaluation. Stateful strategy wrappers implement the
+history callback themselves. A defined no-action choice is `Some` (for
+example an empty intent vector); `None` means a decision is not defined.
+
+The report reuses feature `consistency` and counts numeric pairs, undefined
+and non-finite values, decision changes and definedness mismatches. First
+divergence indices are relative to the evaluation window; rendering shows
+the corresponding input index. Full-window finite feature agreement within
+tolerance and complete, identical decisions are both required for `stable`.
+Two all-undefined paths have no measured numeric difference, not zero error.
+Features can converge within tolerance while a near-threshold decision
+changes every time. This diagnoses history-length sensitivity; restart
+parity additionally needs original strategy/inventory state and the same
+event/decision semantics.
+
 ### Comparable position observations
 
 Live startup and periodic reconciliation use `Account::positions_observed`.
