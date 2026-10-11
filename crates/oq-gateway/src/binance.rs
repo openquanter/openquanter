@@ -798,6 +798,40 @@ fn settlement_commission(symbol: &str, trades: &[Trade]) -> Result<oq_types::Cas
         .fold(oq_types::Cash::ZERO, |sum, t| sum.add(t.commission)))
 }
 
+fn execution_commissions(
+    symbol: &str,
+    trades: Vec<Trade>,
+) -> Result<Vec<crate::account::ExecutionFee>, VenueError> {
+    settlement_commission(symbol, &trades)?;
+    trades
+        .into_iter()
+        .map(|trade| {
+            if trade.symbol != symbol || trade.commission_asset.is_empty() || trade.id <= 0 {
+                return Err(VenueError::Malformed {
+                    what: "execution commission lacks symbol, asset or stable identity",
+                    body: trade.id.to_string(),
+                });
+            }
+            let side = match trade.side.to_ascii_uppercase().as_str() {
+                "BUY" => Side::Buy,
+                "SELL" => Side::Sell,
+                _ => {
+                    return Err(VenueError::Malformed {
+                        what: "execution commission has unknown side",
+                        body: trade.id.to_string(),
+                    });
+                }
+            };
+            Ok(crate::account::ExecutionFee {
+                trade_id: trade.id.unsigned_abs(),
+                side,
+                time_ms: trade.time_ms,
+                amount: trade.commission,
+            })
+        })
+        .collect()
+}
+
 /// Build the full signed URL.
 ///
 /// Pure, and separate from the request, so the one invariant that matters
@@ -1485,34 +1519,85 @@ impl crate::account::Account for Binance {
         symbol: &str,
         since_ms: i64,
     ) -> Result<Option<Vec<crate::account::ExecutionFee>>, VenueError> {
-        let trades = self.my_trades(symbol, Some(since_ms))?;
-        settlement_commission(symbol, &trades)?;
-        let mut out = Vec::with_capacity(trades.len());
-        for trade in trades {
-            if trade.symbol != symbol || trade.commission_asset.is_empty() || trade.id <= 0 {
-                return Err(VenueError::Malformed {
-                    what: "execution commission lacks symbol, asset or stable identity",
-                    body: trade.id.to_string(),
-                });
-            }
-            let side = match trade.side.to_ascii_uppercase().as_str() {
-                "BUY" => Side::Buy,
-                "SELL" => Side::Sell,
-                _ => {
-                    return Err(VenueError::Malformed {
-                        what: "execution commission has unknown side",
-                        body: trade.id.to_string(),
-                    });
-                }
-            };
-            out.push(crate::account::ExecutionFee {
-                trade_id: trade.id.unsigned_abs(),
-                side,
-                time_ms: trade.time_ms,
-                amount: trade.commission,
-            });
+        execution_commissions(symbol, self.my_trades(symbol, Some(since_ms))?).map(Some)
+    }
+
+    fn execution_fees_between(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+        through_ms: i64,
+    ) -> Result<Option<crate::account::BoundedHistory<crate::account::ExecutionFee>>, VenueError>
+    {
+        // A shared wire dialect does not establish the other venue's
+        // retention contract.
+        if self.dialect != Dialect::Binance {
+            return Ok(None);
         }
-        Ok(Some(out))
+        let trades = bounded_time_history(
+            since_ms,
+            through_ms,
+            self.venue_time_ms(),
+            |from, through| {
+                let body = self.get_signed(
+                    self.dialect.wire().user_trades,
+                    &history_query(symbol, "", from, through),
+                )?;
+                history_array(&body)?;
+                let rows = parse_trades(&body)?;
+                let full = crate::json::objects(&body).len() >= 1000;
+                Ok((rows, full))
+            },
+            |trade| trade.id,
+            |trade| trade.time_ms,
+        )?;
+        let rows = execution_commissions(symbol, trades)?;
+        let observed_ms = self.venue_time_ms();
+        recent_history_bounds(since_ms, through_ms, observed_ms)?;
+        Ok(Some(crate::account::BoundedHistory {
+            symbol: symbol.into(),
+            since_ms,
+            through_ms,
+            observed_ms,
+            rows,
+        }))
+    }
+
+    fn funding_charged_between(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+        through_ms: i64,
+    ) -> Result<Option<crate::account::BoundedHistory<crate::account::FundingCharge>>, VenueError>
+    {
+        if self.dialect != Dialect::Binance {
+            return Ok(None);
+        }
+        let rows = bounded_time_history(
+            since_ms,
+            through_ms,
+            self.venue_time_ms(),
+            |from, through| {
+                let body = self.get_signed(
+                    self.dialect.wire().income,
+                    &history_query(symbol, "&incomeType=FUNDING_FEE", from, through),
+                )?;
+                let rows = bounded_funding_income(&body, symbol)?;
+                let full = crate::json::objects(&body).len() >= 1000;
+                Ok((rows, full))
+            },
+            |row| row.id,
+            |row| row.time_ms,
+        )?;
+        let observed_ms = self.venue_time_ms();
+        recent_history_bounds(since_ms, through_ms, observed_ms)?;
+        Ok(Some(crate::account::BoundedHistory {
+            symbol: symbol.into(),
+            since_ms,
+            through_ms,
+            observed_ms,
+            rows,
+        }))
     }
 
     /// Seven days, the furthest one `startTime` reaches, paged.
@@ -1792,6 +1877,111 @@ fn time_paged_history<T: PartialEq>(
     })
 }
 
+fn history_query(symbol: &str, kind: &str, since_ms: i64, through_ms: i64) -> String {
+    format!("symbol={symbol}{kind}&startTime={since_ms}&endTime={through_ms}&limit=1000")
+}
+
+fn bounded_funding_income(
+    body: &str,
+    symbol: &str,
+) -> Result<Vec<crate::account::FundingCharge>, VenueError> {
+    history_array(body)?;
+    // The legacy parser filters unrelated rows. A bounded answer must
+    // refuse an ignored scope instead of certifying an empty history.
+    for object in crate::json::objects(body) {
+        let asset = crate::json::need_str(&object, "asset")?;
+        if crate::json::field_str(&object, "symbol").as_deref() != Some(symbol)
+            || crate::json::field_str(&object, "incomeType").as_deref() != Some("FUNDING_FEE")
+            || asset.is_empty()
+            || !symbol.ends_with(&asset)
+        {
+            return Err(crate::json::malformed(
+                "bounded funding history ignored symbol, type or settlement asset",
+                &object,
+            ));
+        }
+    }
+    parse_funding_income(body, symbol)
+}
+
+fn history_array(body: &str) -> Result<(), VenueError> {
+    let body = body.trim();
+    if !body.starts_with('[') || !body.ends_with(']') {
+        return Err(crate::json::malformed(
+            "history response is not an array",
+            body,
+        ));
+    }
+    let objects = crate::json::objects(body);
+    let mut rest = body[1..body.len() - 1].trim();
+    for (index, object) in objects.iter().enumerate() {
+        rest = rest
+            .strip_prefix(object)
+            .ok_or_else(|| {
+                crate::json::malformed("history array contains unreadable entries", body)
+            })?
+            .trim_start();
+        if index + 1 < objects.len() {
+            rest = rest
+                .strip_prefix(',')
+                .ok_or_else(|| crate::json::malformed("history array separator is missing", body))?
+                .trim_start();
+        }
+    }
+    if !rest.is_empty() {
+        return Err(crate::json::malformed(
+            "history response contains unreadable entries",
+            body,
+        ));
+    }
+    Ok(())
+}
+
+fn recent_history_bounds(
+    since_ms: i64,
+    through_ms: i64,
+    observed_ms: i64,
+) -> Result<(), VenueError> {
+    const WEEK_MS: i64 = 7 * 24 * 3_600_000;
+    if since_ms < 0
+        || since_ms > through_ms
+        || through_ms > observed_ms
+        || since_ms < observed_ms.saturating_sub(WEEK_MS)
+    {
+        return Err(VenueError::Malformed {
+            what: "bounded history requires a retained closed interval in the last seven days",
+            body: format!("{since_ms}..={through_ms} observed {observed_ms}"),
+        });
+    }
+    Ok(())
+}
+
+fn bounded_time_history<T: PartialEq>(
+    since_ms: i64,
+    through_ms: i64,
+    observed_ms: i64,
+    mut fetch: impl FnMut(i64, i64) -> Result<(Vec<T>, bool), VenueError>,
+    id: impl Fn(&T) -> i64,
+    time: impl Fn(&T) -> i64,
+) -> Result<Vec<T>, VenueError> {
+    recent_history_bounds(since_ms, through_ms, observed_ms)?;
+    time_paged_history(
+        since_ms,
+        |from| {
+            let (rows, full) = fetch(from, through_ms)?;
+            if rows.iter().any(|row| time(row) > through_ms) {
+                return Err(VenueError::Malformed {
+                    what: "history ignored the fixed upper bound",
+                    body: through_ms.to_string(),
+                });
+            }
+            Ok((rows, full))
+        },
+        id,
+        &time,
+    )
+}
+
 #[cfg(test)]
 mod history_paging_tests {
     use super::*;
@@ -1894,6 +2084,158 @@ mod history_paging_tests {
             |row| row.1,
         );
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_history_tests {
+    use super::*;
+    use crate::account::Account;
+
+    #[test]
+    fn upper_bound_is_fixed_while_inclusive_pages_advance() {
+        let mut pages = [
+            (vec![(1, 10), (2, 20)], true),
+            (vec![(2, 20), (3, 30)], false),
+        ]
+        .into_iter();
+        let mut ranges = Vec::new();
+        let rows = bounded_time_history(
+            10,
+            30,
+            40,
+            |from, through| {
+                ranges.push((from, through));
+                Ok(pages.next().unwrap())
+            },
+            |row| row.0,
+            |row| row.1,
+        )
+        .unwrap();
+        assert_eq!(ranges, vec![(10, 30), (20, 30)]);
+        assert_eq!(rows, vec![(1, 10), (2, 20), (3, 30)]);
+        assert_eq!(
+            history_query("SYNTH", "", 10, 30),
+            "symbol=SYNTH&startTime=10&endTime=30&limit=1000"
+        );
+        assert_eq!(
+            history_query("SYNTH", "&incomeType=FUNDING_FEE", 20, 30),
+            "symbol=SYNTH&incomeType=FUNDING_FEE&startTime=20&endTime=30&limit=1000"
+        );
+    }
+
+    #[test]
+    fn ignored_upper_bound_and_failed_tail_never_return_a_prefix() {
+        assert!(
+            bounded_time_history(
+                10,
+                30,
+                40,
+                |_, _| Ok((vec![(1, 31)], false)),
+                |row| row.0,
+                |row| row.1
+            )
+            .is_err()
+        );
+        let mut calls = 0;
+        let failed = bounded_time_history(
+            10,
+            30,
+            40,
+            |_, _| {
+                calls += 1;
+                if calls == 1 {
+                    Ok((vec![(1, 20)], true))
+                } else {
+                    Err(VenueError::Malformed {
+                        what: "synthetic failed tail",
+                        body: String::new(),
+                    })
+                }
+            },
+            |row| row.0,
+            |row| row.1,
+        );
+        assert!(failed.is_err());
+        assert_eq!(calls, 2);
+        assert!(
+            bounded_time_history(
+                10,
+                30,
+                40,
+                |_, _| Ok((vec![(1, 10)], true)),
+                |row| row.0,
+                |row| row.1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retention_and_future_range_fail_before_fetching() {
+        const WEEK: i64 = 7 * 24 * 3_600_000;
+        for (since, through, observed) in [(-1, 0, 0), (2, 1, 3), (0, 4, 3), (0, 1, WEEK + 1)] {
+            let result = bounded_time_history::<(i64, i64)>(
+                since,
+                through,
+                observed,
+                |_, _| panic!("invalid interval reached transport"),
+                |row| row.0,
+                |row| row.1,
+            );
+            assert!(result.is_err());
+        }
+        assert!(recent_history_bounds(0, WEEK, WEEK).is_ok());
+        assert!(recent_history_bounds(1, 1, 1).is_ok());
+    }
+
+    #[test]
+    fn unreadable_rows_are_not_an_empty_complete_array() {
+        for body in [
+            "garbage",
+            "{}",
+            "[null]",
+            "[{},null]",
+            "[{},]",
+            "[{} {}]",
+            "[[{}]]",
+        ] {
+            assert!(history_array(body).is_err(), "{body}");
+        }
+        assert!(history_array("[]").is_ok());
+        assert!(history_array("[ ]").is_ok());
+        assert!(history_array(r#"[ {"a":"comma, brace }"}, {"b":2} ]"#).is_ok());
+    }
+
+    #[test]
+    fn bounded_funding_refuses_filtered_or_wrong_asset_rows() {
+        let body = r#"[{"symbol":"SYNTHUSDT","incomeType":"FUNDING_FEE","asset":"USDT","income":"-0.01","time":20,"tranId":7}]"#;
+        assert_eq!(bounded_funding_income(body, "SYNTHUSDT").unwrap().len(), 1);
+        for changed in [
+            body.replace("SYNTHUSDT", "OTHERUSDT"),
+            body.replace("FUNDING_FEE", "TRANSFER"),
+            body.replace(r#""asset":"USDT""#, r#""asset":"BTC""#),
+        ] {
+            assert!(bounded_funding_income(&changed, "SYNTHUSDT").is_err());
+        }
+        assert!(
+            bounded_funding_income("[]", "SYNTHUSDT")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shared_wire_dialect_does_not_inherit_a_retention_claim() {
+        let account: Box<dyn Account> = Box::new(Binance::aster(
+            Endpoint::Testnet,
+            Credentials::new("fixture", "fixture"),
+        ));
+        assert_eq!(account.execution_fees_between("SYNTH", 0, 0).unwrap(), None);
+        assert_eq!(
+            account.funding_charged_between("SYNTH", 0, 0).unwrap(),
+            None
+        );
     }
 }
 

@@ -163,6 +163,18 @@ pub trait Account: Execution {
         Ok(None)
     }
 
+    /// A retained closed interval, with terminal pagination established.
+    /// `None` means the adapter cannot certify this contract. Legacy
+    /// vector queries must never be promoted to it by a default method.
+    fn execution_fees_between(
+        &self,
+        _symbol: &str,
+        _since_ms: i64,
+        _through_ms: i64,
+    ) -> Result<Option<BoundedHistory<ExecutionFee>>, VenueError> {
+        Ok(None)
+    }
+
     /// The account's own trades on a symbol over the venue's recent
     /// history, oldest first.
     ///
@@ -195,6 +207,16 @@ pub trait Account: Execution {
         _symbol: &str,
         _since_ms: i64,
     ) -> Result<Option<Vec<FundingCharge>>, VenueError> {
+        Ok(None)
+    }
+
+    /// The same closed-window contract for original funding ledger rows.
+    fn funding_charged_between(
+        &self,
+        _symbol: &str,
+        _since_ms: i64,
+        _through_ms: i64,
+    ) -> Result<Option<BoundedHistory<FundingCharge>>, VenueError> {
         Ok(None)
     }
 
@@ -293,6 +315,19 @@ pub struct ExecutionFee {
     pub side: oq_types::Side,
     pub time_ms: i64,
     pub amount: Cash,
+}
+
+/// Rows in an explicitly requested, retained closed interval. The adapter
+/// establishes terminal pagination and records its observation boundary.
+/// This is an as-observed response, not a guarantee against later venue
+/// corrections, and does not authenticate an external account-scope hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedHistory<T> {
+    pub symbol: String,
+    pub since_ms: i64,
+    pub through_ms: i64,
+    pub observed_ms: i64,
+    pub rows: Vec<T>,
 }
 
 /// A settled funding rate: the rate and mark price the venue charged
@@ -397,6 +432,22 @@ impl Account for Box<dyn Account> {
     }
     fn trade_history(&self, symbol: &str) -> Result<Option<Vec<AccountTrade>>, VenueError> {
         (**self).trade_history(symbol)
+    }
+    fn execution_fees_between(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+        through_ms: i64,
+    ) -> Result<Option<BoundedHistory<ExecutionFee>>, VenueError> {
+        (**self).execution_fees_between(symbol, since_ms, through_ms)
+    }
+    fn funding_charged_between(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+        through_ms: i64,
+    ) -> Result<Option<BoundedHistory<FundingCharge>>, VenueError> {
+        (**self).funding_charged_between(symbol, since_ms, through_ms)
     }
     fn funding_charged(
         &self,

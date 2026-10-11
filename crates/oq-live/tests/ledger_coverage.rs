@@ -138,6 +138,26 @@ fn exact_identity_sets_accept_rebates_and_stable_overlapping_pages() {
 }
 
 #[test]
+fn bounded_account_response_retains_its_declared_window_and_source_boundary() {
+    let (records, native, mut evidence) = fixture();
+    let source = evidence.fees.clone();
+    evidence.fees = HistoryWindow::from_bounded(
+        oq_gateway::account::BoundedHistory {
+            symbol: source.symbol.clone(),
+            since_ms: source.since_ms,
+            through_ms: source.through_ms,
+            observed_ms: source.observed_ms,
+            rows: source.rows.clone(),
+        },
+        source.account_scope_hash.clone(),
+    );
+    assert_eq!(evidence.fees, source);
+    assert!(verify(&records, &native, &evidence).is_ok());
+    evidence.fees.observed_ms = evidence.evaluated_ms + 1;
+    assert!(verify(&records, &native, &evidence).is_err());
+}
+
+#[test]
 fn missing_surplus_and_same_sum_different_identity_are_not_coverage() {
     let (records, native, evidence) = fixture();
     let mut missing = evidence.clone();
