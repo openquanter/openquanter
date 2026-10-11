@@ -29,6 +29,15 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Confirmed funding during unknown schedules can recover venue cash.**
+  The host keeps polling recorded schedule gaps even after rediscovery,
+  reads ledger rows independently of rate availability, and books unseen
+  identities inside those gaps without inventing historical model positions
+  or a zero model charge. Known pending settlements retain their captured
+  inventory and are not stolen by recovery. Additive `FUNDING_RECOVERED`
+  (15) persists receive time, queried time range and original rows. Ledger
+  replay checks ranges and shared identities and reports unmodelled lines;
+  attribution and complete funding coverage remain unavailable.
 - **Funding journals retain original venue ledger identities.** Additive
   `FUNDING_EVIDENCE` (14) stores each `(id, time_ms, amount)` line beside the
   settlement's rate, mark, venue/model totals and verification result.

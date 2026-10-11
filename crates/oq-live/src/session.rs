@@ -496,6 +496,24 @@ impl<E: Execution> Session<E> {
         });
     }
 
+    /// Confirmed venue rows whose historical model positions are unknown.
+    pub fn record_recovered_funding(
+        &mut self,
+        at: oq_types::Nanos,
+        recovered: &crate::funding::RecoveredFunding,
+    ) {
+        self.write(&Record::FundingRecovered {
+            at,
+            since_ms: recovered.since_ms,
+            through_ms: recovered.through_ms,
+            lines: recovered
+                .lines
+                .iter()
+                .map(|line| (line.id, line.time_ms, line.amount))
+                .collect(),
+        });
+    }
+
     /// A fill the venue reported and this process booked.
     ///
     /// Written after the books accept it, so the journal contains what

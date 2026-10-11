@@ -178,6 +178,57 @@ fn write(records: &[Record]) -> std::path::PathBuf {
     write_with_tail(records, None)
 }
 
+#[test]
+fn recovered_cash_is_replayable_but_has_no_invented_model_amount_or_coverage() {
+    let mut all = records(PositionMode::OneWay);
+    let recovered = Record::FundingRecovered {
+        at: Nanos(10_000_000_000),
+        since_ms: 7000,
+        through_ms: 9000,
+        lines: vec![(1, 8000, Cash(-10)), (2, 8500, Cash(3))],
+    };
+    assert_eq!(
+        Record::decode(recovered.kind(), &recovered.encode()),
+        Some(recovered.clone())
+    );
+    all.push(recovered.clone());
+    let report = replay_records(&all).unwrap();
+    assert_eq!(report.funding, Cash::from_units(-3).add(Cash(-7)));
+    assert_eq!(report.funding_identified_lines, 2);
+    assert_eq!(report.funding_unmodelled_lines, 2);
+    assert!(!report.funding_coverage);
+    all.push(identified_funding(
+        9000,
+        vec![(1, 8000, Cash(-10))],
+        Cash(-10),
+    ));
+    assert!(replay_records(&all).unwrap_err().contains("duplicate"));
+    let bytes = recovered.encode();
+    for len in 0..bytes.len() {
+        assert!(Record::decode(recovered.kind(), &bytes[..len]).is_none());
+    }
+    let mut trailing = bytes;
+    trailing.push(0);
+    assert!(Record::decode(recovered.kind(), &trailing).is_none());
+}
+
+#[test]
+fn recovery_ranges_and_receipt_boundaries_are_checked() {
+    let base = records(PositionMode::OneWay);
+    for (since_ms, through_ms, time_ms) in
+        [(9000, 7000, 8000), (7000, 11000, 8000), (7000, 9000, 9500)]
+    {
+        let mut all = base.clone();
+        all.push(Record::FundingRecovered {
+            at: Nanos(10_000_000_000),
+            since_ms,
+            through_ms,
+            lines: vec![(1, time_ms, Cash(-10))],
+        });
+        assert!(replay_records(&all).is_err());
+    }
+}
+
 fn write_with_tail(records: &[Record], tail: Option<(u16, &[u8])>) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);

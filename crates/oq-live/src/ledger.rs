@@ -32,6 +32,8 @@ pub struct LedgerReport {
     pub funding_coverage: bool,
     /// Original ledger IDs verified in additive funding evidence records.
     pub funding_identified_lines: usize,
+    /// Venue lines booked without a historical model amount.
+    pub funding_unmodelled_lines: usize,
 }
 
 /// Read a checksummed journal through the live books' kernel.
@@ -86,6 +88,7 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
     let mut missing = 0;
     let mut funding = BTreeSet::new();
     let mut funding_ids = BTreeSet::new();
+    let mut funding_unmodelled_lines = 0;
     let mut adopted = false;
     for record in &records[start + 1..] {
         match record {
@@ -221,6 +224,32 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
                     });
                 }
             }
+            Record::FundingRecovered {
+                at,
+                since_ms,
+                through_ms,
+                lines,
+            } => {
+                if !adopted {
+                    return Err("recovered funding precedes explicit initial positions".into());
+                }
+                if since_ms > through_ms || *through_ms > at.0 / 1_000_000 {
+                    return Err("funding recovery range is invalid or lies after receipt".into());
+                }
+                let b = books
+                    .as_mut()
+                    .ok_or("funding recovery precedes ledger context")?;
+                for (id, time_ms, amount) in lines {
+                    if !funding_ids.insert(*id) {
+                        return Err("duplicate funding ledger identity".into());
+                    }
+                    if time_ms < since_ms || time_ms > through_ms {
+                        return Err("recovered funding line is outside its history range".into());
+                    }
+                    b.on_funding_charged(*amount, *at);
+                    funding_unmodelled_lines += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -251,5 +280,6 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
         legs,
         funding_coverage: false,
         funding_identified_lines: funding_ids.len(),
+        funding_unmodelled_lines,
     })
 }

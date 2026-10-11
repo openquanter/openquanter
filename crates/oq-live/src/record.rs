@@ -74,6 +74,8 @@ pub mod kind {
     /// Funding with original venue ledger identities, added independently
     /// of the legacy aggregate record's unchanged payload.
     pub const FUNDING_EVIDENCE: u16 = 14;
+    /// Recovered venue cash without an observed historical model position.
+    pub const FUNDING_RECOVERED: u16 = 15;
 }
 
 /// How a submitted order turned out.
@@ -259,6 +261,14 @@ pub enum Record {
         verified: bool,
         lines: Vec<(i64, i64, Cash)>,
     },
+    /// Receive boundary and history request range, not a coverage proof.
+    /// The absence of a model field is intentional, never a zero estimate.
+    FundingRecovered {
+        at: Nanos,
+        since_ms: i64,
+        through_ms: i64,
+        lines: Vec<(i64, i64, Cash)>,
+    },
     /// Uses the core's canonical venue-fill payload instead of a second
     /// encoder for offset, liquidity, clocks and reported commission.
     Execution {
@@ -302,6 +312,7 @@ impl Record {
             | Self::Operator { .. }
             | Self::Funding { .. }
             | Self::FundingEvidence { .. }
+            | Self::FundingRecovered { .. }
             | Self::Execution { .. }
             | Self::LedgerStart { .. } => false,
         }
@@ -323,6 +334,7 @@ impl Record {
             Self::Operator { .. } => kind::OPERATOR,
             Self::Funding { .. } => kind::FUNDING,
             Self::FundingEvidence { .. } => kind::FUNDING_EVIDENCE,
+            Self::FundingRecovered { .. } => kind::FUNDING_RECOVERED,
             Self::Execution { .. } => kind::EXECUTION,
             Self::LedgerStart { .. } => kind::LEDGER_START,
         }
@@ -535,6 +547,25 @@ impl Record {
                     put_i64(&mut out, amount.0);
                 }
             }
+            Self::FundingRecovered {
+                at,
+                since_ms,
+                through_ms,
+                lines,
+            } => {
+                put_i64(&mut out, at.0);
+                put_i64(&mut out, *since_ms);
+                put_i64(&mut out, *through_ms);
+                put_i64(
+                    &mut out,
+                    i64::try_from(lines.len()).expect("funding line count fits i64"),
+                );
+                for (id, time_ms, amount) in lines {
+                    put_i64(&mut out, *id);
+                    put_i64(&mut out, *time_ms);
+                    put_i64(&mut out, amount.0);
+                }
+            }
             Self::Reconciled { at, legs } => {
                 put_i64(&mut out, at.0);
                 put_i64(&mut out, i64::try_from(legs.len()).unwrap_or(0));
@@ -670,6 +701,29 @@ impl Record {
                     venue,
                     model,
                     verified,
+                    lines,
+                }
+            }
+            kind::FUNDING_RECOVERED => {
+                let at = Nanos(take_i64(&mut p)?);
+                let since_ms = take_i64(&mut p)?;
+                let through_ms = take_i64(&mut p)?;
+                let count = usize::try_from(take_i64(&mut p)?).ok()?;
+                if count.checked_mul(24)? != p.len() {
+                    return None;
+                }
+                let mut lines = Vec::with_capacity(count);
+                for _ in 0..count {
+                    lines.push((
+                        take_i64(&mut p)?,
+                        take_i64(&mut p)?,
+                        Cash(take_i64(&mut p)?),
+                    ));
+                }
+                Self::FundingRecovered {
+                    at,
+                    since_ms,
+                    through_ms,
                     lines,
                 }
             }
