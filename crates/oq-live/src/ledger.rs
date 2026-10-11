@@ -100,7 +100,15 @@ pub fn replay_bound(
     expected: Option<&RunManifest>,
 ) -> Result<BoundLedgerReport, String> {
     let reader = Reader::open(path).map_err(|e| e.to_string())?;
-    let records = decode_snapshot(&reader)?;
+    bound_snapshot(&reader, code_commit, expected)
+}
+
+fn bound_snapshot(
+    reader: &Reader,
+    code_commit: &str,
+    expected: Option<&RunManifest>,
+) -> Result<BoundLedgerReport, String> {
+    let records = decode_snapshot(reader)?;
     let accounting = replay_records(&records)?;
     let start = records
         .iter()
@@ -146,6 +154,30 @@ pub fn replay_bound(
         manifest,
         baseline,
     })
+}
+
+/// Recorded accounting plus independent, closed-window fee/funding evidence.
+/// Coverage does not supply model inventory or certify a G12 residual.
+#[derive(Debug)]
+pub struct CoveredLedgerReport {
+    pub native: BoundLedgerReport,
+    pub coverage: crate::ledger_coverage::VerifiedCoverage,
+}
+
+/// Bind native replay and coverage to the same immutable reader snapshot.
+/// The evidence producer must explicitly establish account scope, retention
+/// and complete pagination; legacy history vectors cannot do this alone.
+pub fn replay_with_history(
+    path: impl AsRef<Path>,
+    code_commit: &str,
+    evidence: &crate::ledger_coverage::CoverageEvidence,
+) -> Result<CoveredLedgerReport, String> {
+    let reader = Reader::open(path).map_err(|e| e.to_string())?;
+    let mut native = bound_snapshot(&reader, code_commit, None)?;
+    let coverage =
+        crate::ledger_coverage::verify(&decode_snapshot(&reader)?, &native.manifest, evidence)?;
+    native.accounting.funding_coverage = true;
+    Ok(CoveredLedgerReport { native, coverage })
 }
 
 /// A strict, scope-named sidecar for the existing RunManifest identity.

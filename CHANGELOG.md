@@ -29,6 +29,16 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Closed-window native fee/funding coverage is checked by exact identity.**
+  `ledger::replay_with_history` binds independent `HistoryWindow` evidence
+  to the same immutable journal snapshot, requiring explicit account scope,
+  retention/pagination completeness, interval and freshness. Missing,
+  surplus, conflicting or timestamp/amount-mismatched rows refuse coverage;
+  legacy funding aggregates and unknown commissions remain insufficient.
+  Coverage gets its own manifest, including source rows and boundaries.
+  Producers must establish source completeness externally: legacy history
+  vectors and the plain ledger CLI do not make that assertion. Model
+  reconstruction and a G12 numeric residual remain independent requirements.
 - **Shadow fee attribution requires a stated model policy.** An absent
   policy or stale model total leaves the fee component unavailable and
   prevents a numeric residual. `oq-trade --model-maker-fee-ppm N

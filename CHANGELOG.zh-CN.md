@@ -22,6 +22,12 @@
 
 ### 变更
 
+- **原生费用/资金费闭区间覆盖按完整身份集合核验。** `ledger::replay_with_history`
+  将独立 `HistoryWindow` 证据绑定至同一份不可变 journal 快照，要求明确账户 scope、
+  保留期/分页完整性、区间及新鲜度。缺失、多余、冲突及时间戳/金额不符的行拒绝覆盖；
+  legacy 资金费合计及未知手续费仍不足。覆盖有独立 manifest，包含来源行及边界。
+  producer 必须在外部建立来源完整性；旧历史 vector 接口及普通账本 CLI 不自动作出
+  该声明。模型重建及 G12 数值残差仍须独立满足。
 - **Shadow 费用归因要求明确声明模型费率。** 未声明费率或模型合计过期时，费用分量
   保持不可用，不输出数值残差。`oq-trade --model-maker-fee-ppm N
   --model-taker-fee-ppm N` 声明两个有符号费率，支持显式零及 maker 返佣。库调用方
