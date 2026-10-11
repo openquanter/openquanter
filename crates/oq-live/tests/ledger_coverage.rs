@@ -258,6 +258,11 @@ fn file_replay_binds_coverage_to_the_actual_immutable_snapshot() {
     evidence.journal_data_hash = native.manifest.data_hash;
     let covered = ledger::replay_with_history(&path, &"a".repeat(40), &evidence).unwrap();
     assert!(covered.native.accounting.funding_coverage);
+    assert_eq!(
+        covered.verify_baseline(&covered.coverage.manifest).unwrap(),
+        BaselineStatus::Comparable
+    );
+    assert!(covered.verify_baseline(&covered.native.manifest).is_err());
     assert_eq!(covered.native.accounting.recorded_fees, Cash(-7));
     evidence.journal_data_hash = "0".repeat(64);
     assert!(ledger::replay_with_history(&path, &"a".repeat(40), &evidence).is_err());

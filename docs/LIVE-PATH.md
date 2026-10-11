@@ -701,7 +701,9 @@ The reader snapshot supplies both the native identity and deterministic
 fold. The returned coverage manifest has scope `openquanter native-ledger
 coverage v1` and binds journal/context hashes, all canonical source rows,
 source metadata and evaluation policy. Changing the evidence invalidates
-its baseline; a code-only change stays distinguishable. Plain native replay
+its baseline; a code-only change stays distinguishable. Use the covered
+report's `verify_baseline` to verify this complete evidence identity; it
+refuses native-only manifests and unknown code. Plain native replay
 continues to report funding coverage as false; a successful covered replay
 reports fee/funding coverage for the declared interval only. The CLI does
 not yet ingest these external windows. Coverage does not reconstruct model

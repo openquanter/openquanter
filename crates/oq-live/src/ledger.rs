@@ -164,6 +164,14 @@ pub struct CoveredLedgerReport {
     pub coverage: crate::ledger_coverage::VerifiedCoverage,
 }
 
+impl CoveredLedgerReport {
+    /// Verify the complete report against a coverage baseline, including
+    /// source rows and policy. A native-only manifest is insufficient.
+    pub fn verify_baseline(&self, expected: &RunManifest) -> Result<BaselineStatus, String> {
+        self.coverage.verify_baseline(expected)
+    }
+}
+
 /// Bind native replay and coverage to the same immutable reader snapshot.
 /// The evidence producer must explicitly establish account scope, retention
 /// and complete pagination; legacy history vectors cannot do this alone.

@@ -507,7 +507,8 @@ producer 负责建立该声明。现有 `Account` 历史 vector 接口不自动�
 
 同一 Reader 快照同时供给原生身份及确定性 fold。返回的覆盖 manifest scope 为
 `openquanter native-ledger coverage v1`，绑定 journal/上下文 hash、全部规范排序
-来源行、来源元数据及评估策略。证据变化使基线失效；仅代码变化仍可区分。普通原生
+来源行、来源元数据及评估策略。证据变化使基线失效；仅代码变化仍可区分。通过覆盖
+报告的 `verify_baseline` 验证完整证据身份；仅原生 manifest 及未知代码被拒绝。普通原生
 重放继续报告 funding coverage 为 false；覆盖重放成功仅证明声明区间的费用/资金费。
 CLI 尚不读取这些外部 window。覆盖不重建调度缺口中的模型仓位、不认证其他账户
 转账、不恢复策略，也不提供 G12 数值残差。
