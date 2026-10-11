@@ -84,6 +84,10 @@ fn records(mode: PositionMode) -> Vec<Record> {
 }
 
 fn write(records: &[Record]) -> std::path::PathBuf {
+    write_with_tail(records, None)
+}
+
+fn write_with_tail(records: &[Record], tail: Option<(u16, &[u8])>) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -94,6 +98,9 @@ fn write(records: &[Record]) -> std::path::PathBuf {
     let mut writer = Writer::open(&path, SyncPolicy::EveryRecordNoFsync).unwrap();
     for record in records {
         writer.append(record.kind(), &record.encode()).unwrap();
+    }
+    if let Some((kind, payload)) = tail {
+        writer.append(kind, payload).unwrap();
     }
     writer.flush().unwrap();
     path
@@ -226,12 +233,9 @@ fn latest_session_resets_economics_but_unknown_records_are_not_skipped() {
     let report = ledger::replay_records(&all).unwrap();
     assert_eq!(report.mode, PositionMode::Hedge);
     assert_eq!(report.executions, 3);
-    let path = write(&all);
-    {
-        let mut writer = Writer::open(&path, SyncPolicy::EveryRecordNoFsync).unwrap();
-        writer.append(65_000, b"unknown economic state").unwrap();
-        writer.flush().unwrap();
-    }
+    // Build the undecodable tail under one writer. This test exercises replay,
+    // not immediate lock reacquisition while another test spawns a CLI child.
+    let path = write_with_tail(&all, Some((65_000, b"unknown economic state")));
     assert!(ledger::replay(&path).unwrap_err().contains("undecodable"));
     std::fs::remove_file(path).unwrap();
 }

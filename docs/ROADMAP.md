@@ -564,8 +564,9 @@ The reviewed work is tracked in [#356](https://github.com/openquanter/openquante
   adjusts expected queue size deterministically, without RNG, and subtracts
   previously accounted trades from depth decreases to avoid double counting.
   Adapt the semantics to the fixed-point core. Validate snapshot/gap handling
-  and queue sampling at **exchange arrival**, not submission: `L2Engine::submit`
-  currently captures ahead before L1's entry delay elapses. Preserve a venue
+  and queue sampling at **exchange arrival**, not submission. L2 seals the
+  due reading before a later depth update and does not spend pre-arrival
+  volume; matching between observation boundaries remains approximate. Preserve a venue
   view and an arrival-time strategy view; reuse `oq-data`'s arrival-based as-of
   joins. Timestamp subtraction alone is not calibrated one-way latency when
   clock offsets are unknown. Replay cannot change the future market path;
