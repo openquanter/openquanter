@@ -23,12 +23,35 @@ use oq_types::{
 const SEC: i64 = 1_000_000_000;
 
 fn shadow() -> Shadow {
-    Shadow::new(
-        InstrumentId::new(1),
+    Shadow::from_state(
+        oq_core::State::new(
+            InstrumentId::new(1),
+            Contract::new(10_000),
+            TierTable::example_btcusdt(),
+            Cash::from_units(100_000),
+        )
+        .with_fees(oq_core::Fees::none()),
+    )
+}
+
+#[test]
+fn a_session_without_a_model_fee_policy_cannot_claim_a_residual() {
+    let s = Shadow::new(
+        InstrumentId(1),
         Contract::new(10_000),
         TierTable::example_btcusdt(),
         Cash::from_units(100_000),
-    )
+    );
+    let report = attribute(
+        manifest(),
+        &instrument(),
+        Cash(0),
+        Cash(0),
+        &s.evidence(Ok((Cash(0), Cash(0))), Some((Cash(0), Cash(0)))),
+    );
+    assert_eq!(report.residual, None);
+    assert!(!report.is_complete());
+    assert!(report.render().contains("stated model fee policy"));
 }
 
 /// One tick on one lot is one cash unit, so the report's figures can be

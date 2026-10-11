@@ -48,6 +48,12 @@ impl UserEvents for UserStreamReader {
 pub trait Environment {
     fn clock(&self) -> &dyn Clock;
 
+    /// An explicitly stated model policy. `None` is unknown, distinct
+    /// from a deliberate zero maker/taker schedule.
+    fn model_fees(&self) -> Option<oq_core::Fees> {
+        None
+    }
+
     /// Depth and trades for `symbol`, and the adapter that reads them.
     ///
     /// # Errors
@@ -129,12 +135,19 @@ pub trait Environment {
 #[derive(Debug, Default)]
 pub struct Production {
     clock: SystemClock,
+    model_fees: Option<oq_core::Fees>,
 }
 
 impl Production {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_model_fees(mut self, fees: oq_core::Fees) -> Self {
+        self.model_fees = Some(fees);
+        self
     }
 }
 
@@ -149,6 +162,9 @@ impl Production {
 pub const USER_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 impl Environment for Production {
+    fn model_fees(&self) -> Option<oq_core::Fees> {
+        self.model_fees
+    }
     fn clock(&self) -> &dyn Clock {
         &self.clock
     }

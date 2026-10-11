@@ -465,6 +465,14 @@ session 在资金费捕获和轮询之后写状态，即使交易所未返回行
 没有这个记录的旧 journal 义务未知。持久化使进程退出后的义务可检查；自动重启恢复
 和完整覆盖证明仍是独立恢复工作。
 
+Shadow 归因还要求明确声明模型费率。production 环境默认为未知；通过
+`Production::with_model_fees` 配置，或在库调用方覆盖 `Environment::model_fees`。
+CLI 要求同时提供 `--model-maker-fee-ppm N` 与 `--model-taker-fee-ppm N`（有符号整数
+ppm，含显式零及负 maker 返佣）。缺少配对选项、重复选项或费率溢出会被拒绝。
+有效费率、warm-up 长度及观测窗口纳入 run 配置 hash。未声明费率或传入的模型费用
+合计与 shadow 当前合计不符时，费用归因不可用，不输出数值残差。交易所手续费覆盖
+仍须独立证明；声明模型费率不能恢复缺失的交易所经济记录。
+
 已接收成交的费用无法读取时，原始逐成交手续费历史可追加原生账本证据。账户查询
 限定同一 symbol，adapter 验证结算资产；binder 检查稳定 trade ID 加方向、单一
 instrument、来源不在未来、重复不冲突。返佣与明确报告的零仍是测量值；未匹配 fill

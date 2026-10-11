@@ -42,7 +42,7 @@ use oq_gateway::binance::Binance;
 use oq_gateway::exec::Endpoint;
 use oq_gateway::okx::Okx;
 use oq_l2feed::venue::Deployment;
-use oq_live::run::{RunConfig, run, smallest_allowed};
+use oq_live::run::{RunConfig, run_on, smallest_allowed};
 use oq_risk::Limits;
 use oq_strategy::{Context, Intent, Strategy};
 use oq_types::{Cash, Instrument, Nanos, Offset, OrderId, PriceTicks, QtyLots, Ratio, Side};
@@ -65,6 +65,8 @@ OPTIONS:
     --minutes <N>          Stop after this long; 0 runs until a signal
                            arrives [default: 5]
     --warm-minutes <N>     Replay this much history first [default: 0]
+    --model-maker-fee-ppm <N>  Stated shadow maker fee, signed integer ppm
+    --model-taker-fee-ppm <N>  Stated shadow taker fee; both rates required
     --max-qty <LOTS>       Largest single order [default: 1]
                            One lot is below the minimum notional on most
                            contracts, so the gate refuses every order at the
@@ -250,11 +252,54 @@ impl Strategy for Probe {
     }
 }
 
+fn model_fee_policy(args: &[String]) -> Result<Option<oq_core::Fees>, String> {
+    let read = |name: &str| -> Result<Option<Ratio>, String> {
+        let positions: Vec<_> = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, arg)| (arg == name).then_some(i))
+            .collect();
+        match positions.as_slice() {
+            [] => Ok(None),
+            [i] => {
+                let ppm = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("{name} needs integer ppm"))?
+                    .parse::<i64>()
+                    .map_err(|_| format!("{name} needs integer ppm"))?;
+                Ok(Some(Ratio(ppm.checked_mul(1000).ok_or_else(|| {
+                    format!("{name} is outside ratio precision")
+                })?)))
+            }
+            _ => Err(format!("{name} was repeated")),
+        }
+    };
+    match (
+        read("--model-maker-fee-ppm")?,
+        read("--model-taker-fee-ppm")?,
+    ) {
+        (None, None) => Ok(None),
+        (Some(maker), Some(taker)) => Ok(Some(oq_core::Fees { maker, taker })),
+        _ => Err("model maker and taker fees must both be stated".into()),
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
+    }
+    let model_fees = match model_fee_policy(&args) {
+        Ok(fees) => fees,
+        Err(why) => {
+            eprintln!("oq-trade: {why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut environment = oq_live::env::Production::new();
+    if let Some(fees) = model_fees {
+        environment = environment.with_model_fees(fees);
     }
     let value = |flag: &str| -> Option<String> {
         args.iter()
@@ -348,8 +393,8 @@ fn main() -> ExitCode {
     println!("venue            {} ({deployment:?})", venue.id());
 
     match strategy_name.as_str() {
-        "observe" => run(venue, |_| Observe { ticks: 0 }, &cfg),
-        "probe" => run(
+        "observe" => run_on(venue, |_| Observe { ticks: 0 }, &cfg, &environment),
+        "probe" => run_on(
             venue,
             |instrument| Probe {
                 confirmed: false,
@@ -364,6 +409,7 @@ fn main() -> ExitCode {
                 instrument: *instrument,
             },
             &cfg,
+            &environment,
         ),
         other => {
             eprintln!(
@@ -373,6 +419,48 @@ fn main() -> ExitCode {
                  of about thirty lines."
             );
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(words: &[&str]) -> Result<Option<oq_core::Fees>, String> {
+        model_fee_policy(
+            &words
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn model_fee_policy_distinguishes_unknown_zero_and_rebate() {
+        assert_eq!(policy(&[]).unwrap(), None);
+        assert_eq!(
+            policy(&["--model-maker-fee-ppm", "0", "--model-taker-fee-ppm", "0"]).unwrap(),
+            Some(oq_core::Fees::none())
+        );
+        let fees = policy(&[
+            "--model-maker-fee-ppm",
+            "-100",
+            "--model-taker-fee-ppm",
+            "500",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(fees.maker, Ratio::from_ppm(-100));
+        assert_eq!(fees.taker, Ratio::from_ppm(500));
+        for words in [
+            vec!["--model-maker-fee-ppm", "1"],
+            vec!["--model-taker-fee-ppm"],
+            vec!["--model-maker-fee-ppm", "x"],
+            vec!["--model-maker-fee-ppm", "9223372036854775807"],
+            vec!["--model-maker-fee-ppm", "0", "--model-maker-fee-ppm", "0"],
+        ] {
+            assert!(policy(&words).is_err(), "{words:?}");
         }
     }
 }

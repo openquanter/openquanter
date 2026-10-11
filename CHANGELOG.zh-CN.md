@@ -22,6 +22,11 @@
 
 ### 变更
 
+- **Shadow 费用归因要求明确声明模型费率。** 未声明费率或模型合计过期时，费用分量
+  保持不可用，不输出数值残差。`oq-trade --model-maker-fee-ppm N
+  --model-taker-fee-ppm N` 声明两个有符号费率，支持显式零及 maker 返佣。库调用方
+  通过 `Environment::model_fees` 提供配置。有效费率、warm-up 长度及窗口共同进入
+  run 配置 hash。声明模型费率不证明交易所费用历史覆盖。
 - **原生账本报告绑定代码、journal 字节和有效上下文。** `oq-replay --ledger` 复用
   `RunManifest`：SHA-256 覆盖重放实际解码的同一份 Reader 不可变快照，配置 hash 覆盖
   scope 与实际 `LEDGER_START` 上下文。`--write-manifest FILE` 创建严格版本化 sidecar，

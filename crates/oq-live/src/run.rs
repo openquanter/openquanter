@@ -287,6 +287,7 @@ where
     F: FnOnce(&Instrument) -> S,
 {
     let clock = env.clock();
+    let model_fee_policy = env.model_fees();
     // Bound locally so the body below is the code that was in `main`,
     // unchanged. Rewriting every use to `cfg.x` would have edited eight
     // hundred lines to move them, and a move that edits is not a move.
@@ -660,28 +661,31 @@ where
         eprintln!("shadow           FAILED: initial inventory repeats a leg");
         return ExitCode::FAILURE;
     }
-    let mut shadow = match crate::shadow::Shadow::with_initial_legs(
+    // Seed the same contract and observed legs as the live books, while
+    // keeping an absent model fee policy distinct from a stated zero.
+    let mut model_state = match oq_core::State::new(
         oq_types::InstrumentId::new(1),
-        // The contract the books use, from the venue's own figures. A
-        // literal here was the constant this file's own comments call a
-        // mistake, and it priced the model's fills at another size.
         contract,
         oq_margin::TierTable::example_btcusdt(),
         starting_balance,
-        if hedged {
-            oq_core::PositionMode::Hedge
-        } else {
-            oq_core::PositionMode::OneWay
-        },
-        long,
-        short,
-    ) {
-        Ok(shadow) => shadow,
+    )
+    .with_mode(if hedged {
+        oq_core::PositionMode::Hedge
+    } else {
+        oq_core::PositionMode::OneWay
+    })
+    .with_initial_legs(long, short)
+    {
+        Ok(state) => state,
         Err(why) => {
             eprintln!("shadow           FAILED: {why}");
             return ExitCode::FAILURE;
         }
     };
+    if let Some(fees) = model_fee_policy {
+        model_state = model_state.with_fees(fees);
+    }
+    let mut shadow = crate::shadow::Shadow::from_state(model_state);
     // Kept so the adoption can be recorded once the journal exists.
     // Adopting is an in-memory act and has to happen here, before the
     // startup check; recording it has to happen after the writer opens.
@@ -984,7 +988,7 @@ where
     // beside the journal and rewritten on a schedule and at the end.
     let artifacts = (!no_journal).then(|| Artifacts {
         stem: std::path::Path::new(&journal_path).with_extension(""),
-        manifest: run_manifest(cfg, &symbol),
+        manifest: run_manifest(cfg, &symbol, model_fee_policy),
         symbol: symbol.clone(),
     });
     let mut observed: std::collections::VecDeque<oq_engine::Tick> =
@@ -1484,7 +1488,7 @@ where
                     crate::control::Command::Orders => orders_reply(&trader),
                     crate::control::Command::Attribution => {
                         let a = oq_parity::attribution::attribute(
-                            run_manifest(cfg, &symbol),
+                            run_manifest(cfg, &symbol, model_fee_policy),
                             &instrument,
                             books.realized_net(),
                             shadow.model_pnl(),
@@ -1951,7 +1955,7 @@ where
         // mistaken for one from a different build or contract. The
         // limits are in the config hash because a limit that fired is
         // part of why the two arms differ.
-        run_manifest(cfg, &symbol),
+        run_manifest(cfg, &symbol, model_fee_policy),
         &instrument,
         books.realized_net(),
         shadow.model_pnl(),
@@ -4429,13 +4433,81 @@ const MAX_OBSERVED: usize = 7 * 24 * 3600;
 /// Identified by what this run was, so a report cannot be mistaken for
 /// one from a different build or contract. The limits are in the config
 /// hash because a limit that fired is part of why the two arms differ.
-fn run_manifest(cfg: &RunConfig, symbol: &str) -> oq_parity::RunManifest {
+fn run_manifest(
+    cfg: &RunConfig,
+    symbol: &str,
+    model_fees: Option<oq_core::Fees>,
+) -> oq_parity::RunManifest {
     oq_parity::RunManifest::from_content(
         option_env!("GIT_COMMIT").unwrap_or("unknown"),
         symbol.as_bytes(),
-        format!("{:?}", cfg.limits).as_bytes(),
+        format!(
+            "limits={:?};model_fees={model_fees:?};warm_minutes={};window_ms={}",
+            cfg.limits, cfg.warm_minutes, cfg.window_ms
+        )
+        .as_bytes(),
         format!("{}-{symbol}", cfg.strategy_name),
     )
+}
+
+#[cfg(test)]
+mod manifest_fee_policy {
+    use super::*;
+
+    #[test]
+    fn rates_and_warmup_invalidate_run_identity() {
+        let mut cfg = RunConfig {
+            symbol: "BTCUSDT".into(),
+            strategy_name: "observe".into(),
+            deployment: Deployment::Testnet,
+            minutes: 1,
+            warm_minutes: 0,
+            window_ms: 1000,
+            id_prefix: "oq".into(),
+            adopt_existing: false,
+            journal: None,
+            broker_code: None,
+            control_allow_resume: false,
+            limits: Limits {
+                max_order_qty: QtyLots(1),
+                max_position_qty: QtyLots(1),
+                max_order_notional: Cash::from_units(200),
+                price_band: oq_types::Ratio::from_ppm(300_000),
+                max_working: 4,
+                max_rate: 10,
+                rate_window: Nanos(60_000_000_000),
+            },
+        };
+        let unknown = run_manifest(&cfg, &cfg.symbol, None);
+        let zero = run_manifest(&cfg, &cfg.symbol, Some(oq_core::Fees::none()));
+        assert_ne!(unknown.config_hash, zero.config_hash);
+        let rated = run_manifest(
+            &cfg,
+            &cfg.symbol,
+            Some(oq_core::Fees::flat(oq_types::Ratio::from_ppm(500))),
+        );
+        assert_ne!(zero.config_hash, rated.config_hash);
+        assert_eq!(
+            rated.config_hash,
+            run_manifest(
+                &cfg,
+                &cfg.symbol,
+                Some(oq_core::Fees::flat(oq_types::Ratio::from_ppm(500)))
+            )
+            .config_hash
+        );
+        cfg.warm_minutes = 10;
+        assert_ne!(
+            unknown.config_hash,
+            run_manifest(&cfg, &cfg.symbol, None).config_hash
+        );
+        cfg.warm_minutes = 0;
+        cfg.window_ms = 2000;
+        assert_ne!(
+            unknown.config_hash,
+            run_manifest(&cfg, &cfg.symbol, None).config_hash
+        );
+    }
 }
 
 /// The files a console reads beside a run's journal.
