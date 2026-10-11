@@ -1480,6 +1480,41 @@ impl crate::account::Account for Binance {
         Ok(Some(settlement_commission(symbol, &trades)?))
     }
 
+    fn execution_fees(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<crate::account::ExecutionFee>>, VenueError> {
+        let trades = self.my_trades(symbol, Some(since_ms))?;
+        settlement_commission(symbol, &trades)?;
+        let mut out = Vec::with_capacity(trades.len());
+        for trade in trades {
+            if trade.symbol != symbol || trade.commission_asset.is_empty() || trade.id <= 0 {
+                return Err(VenueError::Malformed {
+                    what: "execution commission lacks symbol, asset or stable identity",
+                    body: trade.id.to_string(),
+                });
+            }
+            let side = match trade.side.to_ascii_uppercase().as_str() {
+                "BUY" => Side::Buy,
+                "SELL" => Side::Sell,
+                _ => {
+                    return Err(VenueError::Malformed {
+                        what: "execution commission has unknown side",
+                        body: trade.id.to_string(),
+                    });
+                }
+            };
+            out.push(crate::account::ExecutionFee {
+                trade_id: trade.id.unsigned_abs(),
+                side,
+                time_ms: trade.time_ms,
+                amount: trade.commission,
+            });
+        }
+        Ok(Some(out))
+    }
+
     /// Seven days, the furthest one `startTime` reaches, paged.
     fn trade_history(
         &self,

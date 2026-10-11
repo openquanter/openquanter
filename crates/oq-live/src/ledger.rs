@@ -27,6 +27,8 @@ pub struct LedgerReport {
     pub funding: Cash,
     pub executions: usize,
     pub missing_fees: usize,
+    /// Unknown-fee executions whose original commission was recovered.
+    pub recovered_fee_executions: usize,
     pub legs: Vec<(&'static str, QtyLots, PriceTicks)>,
     /// Funding coverage is separate from the sum of observed amounts.
     pub funding_coverage: bool,
@@ -93,7 +95,38 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
     let mut funding_unmodelled_lines = 0;
     let mut funding_state: Option<(oq_types::Nanos, crate::funding::FundingObligations)> = None;
     let mut adopted = false;
-    for record in &records[start + 1..] {
+    let session = &records[start + 1..];
+    let mut recovered_fees = std::collections::BTreeMap::new();
+    for (i, record) in session.iter().enumerate() {
+        if let Record::FeeEvidence {
+            at,
+            source_ms,
+            fill,
+            amount,
+        } = record
+        {
+            if *at < fill.stamp.local || *source_ms > at.0 / 1_000_000 {
+                return Err(
+                    "fee evidence precedes execution receipt or comes from the future".into(),
+                );
+            }
+            let Some(index) = session[..i].iter().position(
+                |r| matches!(r, Record::Execution { fill: original, .. } if original == fill),
+            ) else {
+                return Err("fee evidence does not bind a prior complete execution".into());
+            };
+            let Record::Execution { fee, .. } = &session[index] else {
+                unreachable!()
+            };
+            if venue_fee(*fee) != Fee::Unreadable {
+                return Err("fee evidence cannot overwrite an already reported commission".into());
+            }
+            if recovered_fees.insert(index, *amount).is_some() {
+                return Err("duplicate fee recovery for one execution".into());
+            }
+        }
+    }
+    for (record_index, record) in session.iter().enumerate() {
         match record {
             Record::LedgerStart {
                 instrument_id: id,
@@ -152,7 +185,9 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
                     return Err("execution instrument, price or quantity is invalid".into());
                 }
                 let b = books.as_mut().ok_or("execution precedes ledger context")?;
-                let evidence = venue_fee(*fee);
+                let evidence = recovered_fees
+                    .get(&record_index)
+                    .map_or_else(|| venue_fee(*fee), |amount| Fee::Reported(*amount));
                 if evidence == Fee::Unreadable {
                     missing += 1;
                 }
@@ -337,6 +372,7 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
         funding,
         executions,
         missing_fees: missing,
+        recovered_fee_executions: recovered_fees.len(),
         legs,
         funding_coverage: false,
         funding_identified_lines: funding_ids.len(),

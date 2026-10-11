@@ -125,6 +125,7 @@ pub struct Books {
     /// whose size falls whenever old entries are pruned: a count of
     /// booked trades that went down would read as trades unbooked.
     booked: u64,
+    unpriced_fills: Vec<Fill>,
 }
 
 impl Books {
@@ -164,6 +165,7 @@ impl Books {
             instrument,
             seen: TradeWindow::default(),
             booked: 0,
+            unpriced_fills: Vec::new(),
         }
     }
 
@@ -252,11 +254,22 @@ impl Books {
             Seen::Duplicate => return Booked::Duplicate,
             Seen::Stale => return Booked::Stale,
         }
+        let fee = crate::record::venue_fee(fee);
+        if fee == oq_types::Fee::Unreadable {
+            self.unpriced_fills.push(*fill);
+        }
         Booked::Applied(
             self.kernel
                 .apply(&Event::VenueFill { fill: *fill, fee })
                 .to_vec(),
         )
+    }
+
+    /// Accepted executions whose commission was not observed. This list
+    /// is evidence for later native-ledger enrichment, not a zero fee.
+    #[must_use]
+    pub fn unpriced_fills(&self) -> &[Fill] {
+        &self.unpriced_fills
     }
 
     /// A hedge close beyond the held leg cannot be represented by the

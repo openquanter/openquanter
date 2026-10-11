@@ -534,6 +534,22 @@ impl<E: Execution> Session<E> {
         }
     }
 
+    /// Native-ledger enrichment, not a second execution or strategy input.
+    pub fn record_fee_evidence(
+        &mut self,
+        at: oq_types::Nanos,
+        source_ms: i64,
+        fill: oq_types::Fill,
+        amount: oq_types::Cash,
+    ) {
+        self.write(&Record::FeeEvidence {
+            at,
+            source_ms,
+            fill,
+            amount,
+        });
+    }
+
     /// A fill the venue reported and this process booked.
     ///
     /// Written after the books accept it, so the journal contains what

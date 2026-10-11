@@ -636,3 +636,22 @@ tape if a later state write was interrupted. Legacy journals without this
 record have unknown obligations. Persistence makes them inspectable across
 process exit; automatic restart restoration and complete coverage proof are
 separate recovery work.
+
+For an accepted execution whose fee was unreadable, original per-trade
+commission history can append native-ledger evidence. The account query
+is scoped to the same symbol; the adapter validates settlement asset and
+the binder checks stable trade ID plus direction, one instrument, no future
+source and no conflicting duplicates. A rebate and an explicitly reported
+zero remain measurements. Unmatched fills retain unknown fees.
+
+`FEE_EVIDENCE` (17) encodes receive ns and source ms (i64 LE), a u32 LE
+canonical payload length, and the original core `VenueFill` payload with
+`Fee::Reported(amount)`. Native replay requires a prior equivalent typed
+execution with an unknown fee, and refuses replacement of known commission
+or duplicate recovery. It recomputes final account economics with the
+recovered commission and unchanged inventory/realized P&L. The original
+execution is preserved; fee evidence is not a second fill. The run-end
+query currently enriches the journal rather than modifying the live
+projection's past risk or exporting a reconstructed intraday cash curve.
+Restart/live incremental fee recovery, complete coverage and manifest-bound
+evidence remain separate work.

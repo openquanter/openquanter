@@ -1924,6 +1924,43 @@ where
     trader
         .session_mut()
         .record_funding_state(clock.wall(), &funding);
+    // Preserve original missing-fee executions and append independent
+    // venue evidence. Native accounting can then recompute final cash;
+    // this does not replay strategy decisions or silently mutate live risk.
+    if let Some(since) = books
+        .unpriced_fills()
+        .iter()
+        .map(|fill| fill.stamp.exch.0 / 1_000_000)
+        .min()
+    {
+        match trader
+            .venue()
+            .execution_fees(&symbol, since.saturating_sub(60_000))
+        {
+            Ok(Some(rows)) => {
+                let received = clock.wall();
+                match crate::fee_history::bind(books.unpriced_fills(), &rows, received) {
+                    Ok(evidence) => {
+                        println!(
+                            "fees             recovered evidence for {} of {} unknown executions; native ledger enrichment",
+                            evidence.len(),
+                            books.unpriced_fills().len()
+                        );
+                        for (fill, source_ms, amount) in evidence {
+                            trader
+                                .session_mut()
+                                .record_fee_evidence(received, source_ms, fill, amount);
+                        }
+                    }
+                    Err(why) => eprintln!("fees             enrichment refused: {why}"),
+                }
+            }
+            Ok(None) => {
+                eprintln!("fees             per-execution history unavailable; unknown fees remain")
+            }
+            Err(why) => eprintln!("fees             history could not be read: {why}"),
+        }
+    }
     if let Some(why) = funding.problem() {
         println!("funding          unavailable: {why}");
     }

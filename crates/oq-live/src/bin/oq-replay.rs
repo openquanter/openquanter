@@ -201,6 +201,10 @@ fn render_ledger(path: &str, require_coverage: bool) -> ExitCode {
     }
     println!("missing fees       {}", report.missing_fees);
     println!(
+        "recovered fees     {} executions",
+        report.recovered_fee_executions
+    );
+    println!(
         "funding coverage   {}",
         if report.funding_coverage {
             "declared complete"
@@ -330,6 +334,15 @@ fn render(record: &Record) -> String {
         } => format!(
             "operator {}  {command} by {origin}: {reason} -> {outcome}",
             at.0
+        ),
+        Record::FeeEvidence {
+            at,
+            source_ms,
+            fill,
+            amount,
+        } => format!(
+            "fee evidence {}  source ms {} trade {} {:?}: commission {}",
+            at.0, source_ms, fill.trade.0, fill.side, amount.0
         ),
         Record::FundingState { at, obligations } => format!(
             "funding state {}  {} pending, {} schedule gap(s), uncertainty {:?}",
