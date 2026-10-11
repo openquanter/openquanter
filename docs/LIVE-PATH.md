@@ -688,6 +688,22 @@ an account statement or infer source completeness from a short/empty page;
 the producer is responsible for that assertion. Existing `Account` vector
 history APIs do not establish it automatically.
 
+`Account::execution_fees_between(symbol, since, through)` and
+`funding_charged_between` provide an optional producer contract returning
+`BoundedHistory`. Their defaults are unsupported and do not wrap legacy
+vectors. Binance pins `startTime/endTime` on every page and limits this
+contract conservatively to a closed interval in the last seven days.
+Terminal pagination, stable identities, both bounds and settlement assets
+are checked; full pages that cannot advance or exceed the paging bound
+refuse the whole query. Wrong-scope funding rows are refused rather than
+filtered into a plausible empty history. Shared-wire dialects remain
+unsupported until their own retention contract is established. Convert
+these responses with `HistoryWindow::from_bounded(response, scope_hash)`;
+the consumer still establishes the account-scope hash externally. Source
+observation time describes the reported history as read, not a guarantee
+against delayed venue corrections. A later query with changed rows needs
+a new evidence identity.
+
 Every execution must have a reported or valid recovered fee, and its stable
 trade ID, side, exchange millisecond and amount must match the history.
 Every funding line must match its original ledger ID, time and amount.

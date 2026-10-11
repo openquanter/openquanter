@@ -499,6 +499,16 @@ instrument、来源不在未来、重复不冲突。返佣与明确报告的零�
 未来观测及截断区间均拒绝验证。契约不认证账户声明，也不从短页/空页推断来源完整性；
 producer 负责建立该声明。现有 `Account` 历史 vector 接口不自动满足它。
 
+`Account::execution_fees_between(symbol, since, through)` 与
+`funding_charged_between` 提供可选 producer 契约，返回 `BoundedHistory`。默认不支持，
+不包装旧 vector。Binance 每页固定 `startTime/endTime`，保守地仅支持最近七天内的
+闭区间。检查终止分页、稳定身份、上下界及结算资产；满页无法推进或超过分页上限时
+拒绝整次查询。scope 错误的资金费行被拒绝，不过滤成似乎可信的空历史。共用 wire
+的 dialect 在建立自身保留期契约前仍不支持。通过
+`HistoryWindow::from_bounded(response, scope_hash)` 转换响应；账户 scope hash 仍由
+调用方在外部建立。来源观测时刻描述读取时报告的历史，不保证交易所没有延迟修订。
+后续查询行发生变化时需要新的证据身份。
+
 每笔 execution 必须具有已报告或有效恢复的手续费，其稳定 trade ID、方向、交易所
 毫秒时间及金额须与历史匹配。每条资金费须按原始 ledger ID、时间及金额匹配。多余
 行（含零）、缺失行、冲突及相同合计但身份不同均失败；稳定重叠行去重。legacy

@@ -36,6 +36,27 @@ pub struct HistoryWindow<T> {
     pub rows: Vec<T>,
 }
 
+impl<T> HistoryWindow<T> {
+    /// Attach a producer-certified retained interval to an externally
+    /// established account scope. This hash is supplied by the consumer,
+    /// not authenticated by the adapter's row response.
+    #[must_use]
+    pub fn from_bounded(
+        history: oq_gateway::account::BoundedHistory<T>,
+        account_scope_hash: String,
+    ) -> Self {
+        Self {
+            account_scope_hash,
+            symbol: history.symbol,
+            since_ms: history.since_ms,
+            through_ms: history.through_ms,
+            observed_ms: history.observed_ms,
+            completeness: Completeness::Complete,
+            rows: history.rows,
+        }
+    }
+}
+
 /// Evidence attachment to one immutable native journal snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageEvidence {

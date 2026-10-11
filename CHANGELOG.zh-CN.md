@@ -22,6 +22,13 @@
 
 ### 变更
 
+- **账户历史可明确固定的近期区间。** 新增可选 `execution_fees_between` /
+  `funding_charged_between` 返回 `BoundedHistory`，保留精确 symbol、边界及观测时刻。
+  Binance 每个 inclusive-time 分页均固定 `endTime`，保守地仅支持最近七天内的区间；
+  非法/过旧/未来范围、停滞/超限分页、忽略边界及不可读/外来行均失败，不返回成功前缀。
+  共用 wire 的 dialect 不继承该保留期声明。live 覆盖调用方通过
+  `HistoryWindow::from_bounded` 附加外部建立的 scope。响应描述来源在观测时的报告，
+  不承诺交易所未来不会修订，也不提供 G12 残差。
 - **原生费用/资金费闭区间覆盖按完整身份集合核验。** `ledger::replay_with_history`
   将独立 `HistoryWindow` 证据绑定至同一份不可变 journal 快照，要求明确账户 scope、
   保留期/分页完整性、区间及新鲜度。缺失、多余、冲突及时间戳/金额不符的行拒绝覆盖；

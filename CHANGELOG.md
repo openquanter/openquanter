@@ -29,6 +29,16 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Account history can certify a fixed recent interval.** New optional
+  `execution_fees_between` / `funding_charged_between` return `BoundedHistory`
+  with exact symbol, bounds and observation time. Binance pins `endTime` on
+  every inclusive-time page and conservatively supports only intervals in
+  the last seven days; invalid/older/future ranges, stalled/full pagination,
+  ignored bounds and unreadable/foreign rows fail without a successful prefix.
+  Shared-wire dialects do not inherit this retention claim. Live coverage
+  consumers attach an externally established scope with `HistoryWindow::from_bounded`.
+  Responses describe what the source reported at observation, not finality
+  against future venue corrections or a G12 residual.
 - **Closed-window native fee/funding coverage is checked by exact identity.**
   `ledger::replay_with_history` binds independent `HistoryWindow` evidence
   to the same immutable journal snapshot, requiring explicit account scope,
