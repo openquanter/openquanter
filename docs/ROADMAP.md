@@ -2,6 +2,7 @@
 
 > Status: **Draft for review** · [中文版](ROADMAP.zh-CN.md)
 > Companion documents: [Why this exists](WHY.md) · [Requirements](REQUIREMENTS.md) · [Implementation Plan](IMPLEMENTATION.md)
+> Acceptance review: 2026-10-11. Gate definitions follow [Requirements §5](REQUIREMENTS.md#5-measurable-acceptance-goals).
 
 **What every milestone is ultimately for:** every cent between a backtest and
 the live run, accounted for. [Why that is the goal](WHY.md), and what the
@@ -45,23 +46,18 @@ commitments.
 |---|---|---|---|
 | **M0** | Foundations: repository, capture, statistics | 3–6 pw | Mostly landed |
 | **M1** | Deterministic core, L0 engine, margin skeleton → first preview release | 15–27 pw | Largely landed |
-| **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | **Mostly built. G3 and G7's parity half have now been measured rather than blocked — neither passed, both by a stated margin. G11 was withdrawn** |
-| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | **Mostly built, entry triggers unmet** |
-| **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Triggered, and further along than "a first L1 exists": L1 is built with latency as distributions, L2 measures both the queue and the taker's walk from a reconstructed book, and a backtest reaches it from a captured archive. What is left is calibration against recorded fills, which is blocked on the fills M3's trigger asks for, and the probabilistic queue model that the stated order puts after it. Its depth requirement was a bare "6 months" with no argument behind it; now stated by what the data is for |
+| **M2** | Python tier, margin fidelity reporting, research workflow → beta | 24–41 pw | Acceptance open: G3 needs the workload defined in Requirements; G7's batching trade-off is measured, not waived; G11 was withdrawn |
+| **M3** | Live trading: gateways, risk gate, reconciliation | 39–62 pw | Historical review completed; G12 not passed. Resolve the specific accounting/evidence defects; cutover, G6 and adoption gates remain separate |
+| **M4** | HFT fidelity: L1 queue/latency, L2 book reconstruction | 54–83 pw | Calibration and input-validity work next; audit available records before asking for new samples, and distinguish testnet execution validation from production-market calibration |
 | **M5** | AI extensions: inference, RL environments, feature layer | 62–97 pw | Triggered |
 | **API stability** | API stabilization and semantic versioning | — | After M3 + external adoption |
 
-"Largely landed" on M0 and M1 means most of the scope is built and tested,
-not that the exit gate has passed. As of the latest revision: the
-deterministic core, L0 matching, the margin overlay, the backtest host, the
-parity harness, the capture toolkit and the overfitting statistics are in
-and green, and `criterion` benchmarks now exist with a throughput floor
-enforced in CI. Still open on M1's gate is trade-by-trade parity against a
-reference implementation run — close, but not passed, and a gate that is
-nearly met is not met. Capture has since run continuously for over a
-day across 23 streams on two venues with zero archive failures, which is
-past a trial and short of the exit gate: that asks for a *measured* gap
-rate and documented storage growth, and what exists is an uptime figure. See the README for the built/not-built split.
+"Largely landed" does not mean the exit gate has passed. The built/not-built
+split and available operating evidence live in the [README Status section](../README.md#status).
+This roadmap tracks what must be done with that evidence. M0 needs measured
+gap rates and storage growth, not an uptime figure. M1's G2 is run-equivalence
+tooling, not a promise of equality with an unrelated engine; its definition
+has changed in Requirements and applies here too.
 
 One M1 item was deliberately built smaller than planned. The benchmark job
 asserts a **floor**, not a tracked baseline: shared CI runners vary by
@@ -72,30 +68,13 @@ Comparing two versions precisely is a local `cargo bench` job on one
 machine. This is a change to the plan, recorded rather than quietly
 dropped.
 
-**M3 has been built to most of its scope with none of its four entry
-triggers met, and that is a departure from this document's own discipline
-rather than a revision of it.** The gateway speaks order entry and the user
-stream, the risk gate exists with a kill switch and a fatal startup check,
-and `oq-live` assembles them into a process that has placed and cancelled a
-real order on a testnet and seen both confirmed on the account stream. None
-of M3's four conditions — six months of public release, an attributed
-shadow run, two rehearsed cutovers, one outside user — has happened.
-
-Recorded because principle 4 at the top of this page says trigger, don't
-schedule, the expensive parts, and this is what it looks like when that is
-not followed. The work is not wasted and none of it is being reverted; the
-cost is that the ordering was the thing meant to ensure the expensive half
-got built against evidence, and it was built against enthusiasm instead.
-
-When this was first recorded M3 was half built, and the unbuilt half was
-listed so that "half" was a number rather than a feeling: snapshot
-recovery and graceful restart in `oq-live`, the connector conformance
-suite, a second execution venue, observability of any kind, the
-live/backtest attribution, `oq-sim`, and the cutover playbook. Every one
-of those has since landed, and the M3 table below says how far — graceful
-restart is partial, and the cutover playbook is written but has never
-been rehearsed. What is left of M3 is its entry triggers, its exit gate,
-and G6's far boundary, below.
+**M3 implementation preceded its original entry conditions; this review
+does not retroactively waive them.** Its next validation step is to audit
+existing records, not to restart a generic long-run waiting period. A
+point-in-time account match does not establish historical agreement, and
+elapsed runtime does not establish complete attribution. Cutover evidence,
+release age, external adoption and G6's measurement boundary remain separate
+requirements.
 
 **G6 is partly measured, and what is missing is the end of the interval
 rather than the beginning.** It asks for p99 latency from journal write
@@ -118,8 +97,11 @@ that condition is met.
 Broken down from theme to feature. **"Built" means the thing exists in the
 repository with tests, not that the milestone's exit gate has passed** — the
 gates are a separate matter and live in each milestone's own section.
-**"Blocked" and "not built" are different facts**: the first is waiting on an
-input this project cannot reach, the second has not been written.
+**"Blocked", "pending audit" and "not built" are different facts**: the first
+names an unavailable input, the second means records exist but verification
+has not been completed, and the third means code has not been written. A
+failed audit names the defect or uncovered interval; it does not become
+"waiting for a longer run" without a specific sample requirement.
 
 ### M0 — Foundations
 
@@ -171,8 +153,8 @@ input this project cannot reach, the second has not been written.
 | Fidelity | Fidelity report and participation-rate flag | Built |
 | Adoption | Quickstart, eleven examples in `oq-examples`, goldens | Built |
 | Adoption | **Classic-strategy catalogue** (RSI, MACD, Bollinger, Donchian, grid, dual-thrust) | Built — teaching references, each one documenting where it breaks rather than claiming an edge |
-| Gate | **G3 throughput ≥8× the interpreted baseline** | **Measured, not met — 7.13× against a target of 8×.** No longer blocked: run on one machine, over 608 days of BTCUSDT trades (2024-09-01 to 2026-04-30, 149,546,989 observations), with both engines given the identical observation count and the same rule — vnpy's `DoubleMaStrategy`, whose two copies were checked byte-identical rather than assumed so. The predecessor took 647.4 s; this engine took 128.4 s per tick (5.04×) and 90.8 s at its best batch (7.13×). Take the predecessor's data-decode phase out of its time and the comparison is 5.67×, which is the fairer number for *engine* throughput and the lower one. Three things the figure hides are recorded with it: the baseline is Cython-compiled rather than interpreted, so the bar is higher than the goal's wording suggests; batching stops helping after 512, and splitting that run three ways says why — 36.7% is the engine plus building one Python object per observation, 5.7% is reading one attribute, and **57.6% is the strategy's own arithmetic in Python**, which both sides pay alike. So the ceiling on anything done at the language boundary is about a third, and 7.13× is a fact about this engine *and this rule* rather than about the engine: a rule that computes less would pass the gate with nothing changed, which is why G3 now names the load it is measured on; and the batch that produced 7.13× also dropped fills from 6,045,548 to 292,083, so the speed is quoted against a strategy that has stopped trading |
-| Gate | **G7 re-passing parity after conversion** | **Half met, half answered in the negative.** The mode half is met and tested. The parity half no longer shares G3's blocker, and running it produced a result rather than a pass: a batch large enough to reach G3's throughput does not preserve the fill sequence, because orders from a batch are submitted at its end. `compare_modes` reports the divergence rather than asserting there is none, which is the right shape for it — but it means the goal as written asks for two things that trade against each other, and the trade should be stated in the goal instead of discovered by running it |
+| Gate | **G3 throughput ≥8× the interpreted/Cython baseline** | **Current-workload verification pending.** Historical same-machine measurement on the public `DoubleMaStrategy` over public exchange archives: 5.04× per tick, 7.13× at the best batch, or 5.67× excluding baseline decode. Strategy arithmetic was 57.6% of the cost; the fastest batch changed the fill sequence. Requirements now calls for negligible strategy arithmetic and a representative workload alongside; this historical result does not pass that revised gate |
+| Gate | **G7 strategy portability and mode comparison** | **Acceptance open.** Compatibility and `batch=1` equality are tested. For larger batches, `compare_modes` measures changed decision timing and fills; report that difference through G2 rather than promise equality. G3's current-workload benchmark remains required |
 | Gate | ~~**G11 external cold start ≤ 30 minutes**~~ | **Withdrawn** — the reason is in [REQUIREMENTS](REQUIREMENTS.md). It did leave one real finding behind before it went: the quickstart's first instruction was `cargo install oq-cli`, and every published `oq-*` is a `0.0.1` name placeholder, so anyone following it failed in their first minute for a reason that had nothing to do with them. That was found by asking what an outsider would hit, and fixed as a bug — which is the form this kind of thing should take |
 
 ### M3 — Live trading
@@ -203,7 +185,7 @@ input this project cannot reach, the second has not been written.
 | Cutover | Position-carrying playbook | **Written, never rehearsed**; its §6 lists what is missing before one can be |
 | Cutover | Account record/compare tooling (a rehearsal precondition) | Built — both halves: `oq-recon` compares the **venue** against a record, `oq-belief` compares the **new process's own journal** against the same one |
 | Entry trigger | 1. Core released ≥ 6 months, no open P0/P1 | **Not met** |
-| Entry trigger | 2. Shadow run with every divergence attributed | **Not met** (the instrument is ready; no long run yet) |
+| Entry trigger | 2. Shadow run with every divergence attributed | **Not passed after historical review** — close the accounting and evidence defects listed in README Status; runtime alone does not close attribution |
 | Entry trigger | 3. Two successful testnet cutover rehearsals | **Not met** |
 | Entry trigger | 4. At least one real third-party user | **Not met** |
 
@@ -218,7 +200,7 @@ input this project cannot reach, the second has not been written.
 | L1 | **Probabilistic queue model** | Not built — by the stated order, only after calibration |
 | L1 | **Latency as distributions rather than constants** | Built — `Delay::Measured` takes p50/p90/p99/p999, which is what a latency measurement produces; nearest-rank and never interpolated, drawn deterministically from the order id so a replay from a snapshot fills the same way |
 | L1 | **Feed latency** | Deliberately not in the engine — it belongs to the event producer |
-| L1 | **Calibration against recorded fills** | **Blocked** — needs the recorded fills M4's entry trigger asks for |
+| L1 | **Calibration against recorded fills** | **Pending evidence audit and calibration** — use available fills where their market, timing and depth provenance match; name any missing coverage before collecting more |
 | L2 | Book reconstruction, snapshot reconciliation, gap handling | Reconstruction is built and now **measured on a real archive**: 133,910 depth updates, 0 sequence errors, 0 gaps, 0 crossed books, 10,286 levels deep — `RECONSTRUCTS CLEANLY`. **Both sides are now measured from it.** `L2Engine` reads the displayed size at the level an order joins, replacing L1's assumed `QueueAhead`, and walks the levels for taker fills, replacing L1's square-root penalty. Each measurement displaces the policy rather than compounding with it, a fill the book cannot reach keeps the policy, and `swept` / `unswept` report which priced a run. Several takers in one observation deplete one working copy of the depth, so size is not free for the second. Where book and tick disagree the worse price wins, which keeps the ladder monotone. No MBP feed can tell a cancellation ahead of you from one behind, so the queue depletes on trades only and is conservative by construction. **A backtest can now reach it**: `RunConfig::at_tier` selects the tier and `run_observations` takes ticks and depth on one stream, with `book_tiers` as the comparison — an L2 given no depth reproduces L0 exactly, an L1 told to assume 64 lots agrees to the fill with an L2 shown 64, and between 16 ahead and 64 most of a maker strategy stops existing. The two gaps this row used to name — converting an archive into that stream, and depth in the journal — are both closed; see the next two L2 rows |
 | Validation | Stylized-facts test set | Built for the generated markets **and now measured on a real one**. `oq-data` reports the four facts for any tick file, so the comparison is a command rather than a study: four days of captured BTCUSDT (5,759 one-minute returns from 15.9M trades) hold three of four per day at excess kurtosis 8–11, against the fixtures' 0.03 / 0.07 / −0.05. The finding that matters is how little it takes to move that — pooled, kurtosis is 951 and ρ(1) fails; drop **two** of the 5,759 returns (one 4.1% minute on 251× median volume, and its rebound) and it is 24.6 with ρ(1) holding. A short sample's verdict is its largest event's verdict, which is why this stays a measurement and not a gate. **Order-flow autocorrelation is built**, and the order flow turned out to be in the archive already — the venue publishes which side crossed, and no adapter had read it. `oq-trade-check` reports it, `conformance` requires every adapter to parse it, and the measurement forced a distinction: over raw **trades** the lag-1 coefficient on an hour of BTCUSDT is 0.83 with a longest same-side run of 3,335 — which spans 14 milliseconds and is one order crossing three thousand resting ones, not three thousand decisions. Collapsed to **orders** (`as_orders`), 179,547 trades become 39,019 and lag-1 is **0.19**, decaying slowly and matching the published figure. Both are reported: the raw series is what a queue faces, the collapsed one is what the literature means |
 | L2 | **An archive converted into a run's input** | Built — `fold_into_observations` interleaves ticks and depth in the order the venue produced them, and `oq-tiers` is the command: one strategy, one archive, two tiers. Over ten hours spread across four days of captured BTCUSDT — 1.3M depth updates, **none refused** — a bid resting at the touch filled 13,972 times at L0 and 3,140 at L2. **77.5% of the backtest's fills are trades the queue never reached**, and no hour kept more than 44.6% or fewer than 12.5%. The book is bootstrapped from the first update rather than a REST snapshot, which the archive does not hold, so early queues read shorter than they were |
@@ -316,8 +298,10 @@ depends on the invariants established here.
 **Exit gate.**
 
 - **G1** — journal replay reproduces outputs exactly.
-- **G2** — parity harness demonstrates trade-by-trade equality with relative
-  P&L error ≤ 1e-6 against a reference implementation run.
+- **G2** — run-equivalence tooling compares two runs trade by trade and
+  attributes differences. An equality result means identical time, price,
+  quantity and side, with relative P&L error ≤ 1e-6. Equality with a different
+  engine is a migration check, not the framework's acceptance promise.
 - Property test suite green, including margin invariants.
 - **First public release** — a `vX.Y.Z` tag, with sample data and one example
   strategy.
@@ -376,8 +360,10 @@ depends on the invariants established here.
   CI by `cargo run --release -p oq-examples --example sweep_100`: 100
   configurations over 600,000 ticks each, with DSR and PBO, in 2.65 s of a
   1,800 s budget on a development machine. G3 has been measured on one
-  machine against the predecessor, and is **not met** — 7.13× against a
-  target of 8×; see below.
+  machine on a representative strategy at 7.13× against a target of 8×.
+  That is a historical workload result, not acceptance under the current
+  G3 definition: negligible strategy arithmetic, plus a representative
+  workload reported alongside. The gate remains open; see below.
 - **G5** margin fidelity verified; tail-divergence methodology published.
   **Met.** [MARGIN-FIDELITY.md](MARGIN-FIDELITY.md), with the instrument in
   `oq_backtest::fidelity` and the study in `examples/margin_fidelity`.
@@ -386,9 +372,10 @@ depends on the invariants established here.
   is done and tested: a strategy with no framework in it runs in
   compatibility mode, converting it to throughput mode is a change to one
   method, and `compare_modes` asserts `batch=1` produces an identical run
-  rather than the documentation asserting it. Re-passing *parity* means
-  against a predecessor baseline; that run has happened and came back with
-  an answer in the negative, below.
+  rather than the documentation asserting it. For `batch > 1`, G2 produces
+  a comparison and attribution; it does not promise equality. G7 still
+  requires its throughput and portability evidence, and the measured
+  timing/accuracy trade-off must accompany any batching recommendation.
 - ~~**G11** initial verification~~ — **withdrawn**, not deferred. A
   stopwatch on a first backtest measures the wrong thing: a tool worth
   using is worth more than thirty minutes, and one that is not is not
@@ -400,31 +387,13 @@ depends on the invariants established here.
   to fix when found, not a gate to fail.
 - **Beta release** with documented, if still unstable, APIs.
 
-**The two open gates have now been run, and neither came back a pass.** Both
-G3 and G7's parity half needed a same-machine run of the closed-source
-predecessor over a multi-year window. That run happened, so both moved from
-blocked to measured:
-
-- G3 is **7.13× against a target of 8×** — short by 12%. Where the gap is
-  was measured too: batching stops improving past 512 and is slower at
-  4096, so what remains is not the cost of crossing into Python but
-  something inside the engine. That is more useful than "blocked", because
-  it names the place to look.
-- G7's parity half came back with **an answer in the negative** rather than
-  no answer. A batch's orders are submitted at the end of the batch, so a
-  batch large enough to reach G3's throughput necessarily changes the fill
-  sequence. The goal asks for two things that pull against each other, and
-  that belongs in the goal.
-- The predecessor's fifteen-day parity baseline still lives on the two
-  production hosts, which are running live trading and are not to be
-  touched. The 229/229 result recorded earlier is therefore still
-  **historical**: it was real, and nothing currently reproduces it. The
-  throughput run above did not need those hosts, because it did not need
-  that strategy — a public one on public exchange archives answers a
-  throughput question just as well, and can be quoted.
-- The capture this project has made for itself is still seven calendar days
-  — 2026-08-15 to 2026-08-21, of which five are complete. The measurement
-  above did not use it.
+**Historical measurements are not silently promoted to current gates.**
+The representative-strategy run measured 7.13×, with 57.6% of its cost in
+strategy arithmetic. It motivates G3's current workload definition; a new
+same-machine measurement must use that definition. G7's batching comparison
+shows a changed fill sequence because orders are submitted at batch end.
+That is an attributed semantic difference, not an equality pass. Neither
+result is waiting for additional testnet trading data.
 
 What *is* measured, and reported under its own name rather than G3's: the
 Python tier's throughput mode runs at up to about 7x its compatibility mode
@@ -529,8 +498,70 @@ not in the matching kernel.
 
 - **G6** latency target met at the defined boundary.
 - Shadow-run agreement rate at target, with every divergence attributed.
+- **G12** — replay the live journal through the same kernel and produce
+  a cause-by-cause attribution report with a numeric unexplained residual
+  alongside its bound `RunManifest`. A missing component prevents this
+  gate from passing; the residual threshold remains unset until measured,
+  as specified in Requirements.
 - Full scenario catalogue passing under fuzzing.
 - Staged rollout stable for ≥ 2 weeks.
+
+## Evidence-led validation
+
+The first historical review has completed; its scoped outcomes and issue
+links live in [README Status](../README.md#historical-validation-review--2026-10-11).
+Execution checks and evidence-enriched accounting replay have been run.
+Remaining work now names accounting precision, shadow fill deduplication
+and fee/funding provenance, rather than an unspecified lack of runtime.
+
+Use the records described in [README Status](../README.md#status) before
+asking for another run. Each audit ends in **pass**, **fail**, or **specific
+missing evidence**, with the interval, build identity, data/config hashes,
+command and comparison criteria recorded. A deployed build is not assumed
+to be the current public release. Existing restart records count as cutover
+evidence only if they establish the playbook's required outcomes; ordinary
+uptime cannot substitute for a rehearsal. Verify the two-week staged-rollout
+window rather than inferring it from the existence of older files.
+
+| Priority | Deliverable | Completion evidence |
+|---|---|---|
+| P0 | Full-window execution and account audit | Orders, positions and ledger economics reconciled over the selected interval; missed/duplicate fills and recovery episodes accounted for; live journal replay compared against recorded outputs |
+| P0 | G12 attribution closure | Recover missing funding/fee statements and recompute, or identify uncovered intervals and their effect; independently computed components and numeric residual bound to a `RunManifest` |
+| P0 | L2 input-validity audit | Archive bootstrap snapshots and post-gap reinitialisation reach both the aggregator and matcher; reproduction cases cover disconnects and reconnects, and unusable intervals are labelled |
+| P1 | Cutover acceptance | Audit earlier evidence against [CUTOVER](CUTOVER.md); complete missing rehearsals, including abort coverage, and record order ownership, position/entry-price agreement and exposure intervals |
+| P1 | Reconciliation race coverage | Deterministic cases for stale REST snapshots racing stream fills, bounded history, unknown submissions, delayed reports and external orders; a missing position report is not interpreted as flat |
+| P1 | Fill and latency calibration | Fill probability, time-to-fill, partial fills and markout compared by liquidity state; feed, entry and response timing kept distinct and tied to the same market as the fills |
+| P1 | Capture quality report | Per-stream gaps, sequence integrity, snapshot coverage, retained-file verification and storage growth; verify daily margin-rule snapshot coverage |
+| P2 | Restart and research reproducibility | Feature/decision convergence at different warm-up lengths; rolling OOS experiments linked to all attempted trials, fidelity reports and deployment manifests |
+
+Testnet records can close execution, accounting, replay and recovery checks,
+and calibrate testnet behavior. They do not establish production-market
+maker queue fidelity. Before requesting new calibration samples, list the
+specific missing market, liquidity state, timestamp or snapshot coverage.
+More elapsed time does not add a missing socket-write measurement for G6.
+
+### Open-source designs to adapt
+
+These are design references for the validation work, not new exit gates:
+
+- [NautilusTrader reconciliation](https://nautilustrader.io/docs/latest/concepts/execution/reconciliation/):
+  snapshot freshness, bounded-history provenance and unknown command outcomes.
+- [HftBacktest queue models](https://hftbacktest.readthedocs.io/en/latest/order_fill.html)
+  and [latency models](https://hftbacktest.readthedocs.io/en/latest/latency_models.html):
+  compare conservative/probabilistic queues against fills and separate feed,
+  entry and response latency. Calibration precedes choosing a richer model.
+- [Freqtrade recursive analysis](https://www.freqtrade.io/en/stable/recursive-analysis/):
+  vary warm-up history to measure indicator and decision convergence after restart.
+- [Qlib experiment recording](https://qlib.readthedocs.io/en/latest/component/recorder.html):
+  link data versions, every trial, rolling OOS results and deployed artifacts.
+- [Hummingbot executors](https://hummingbot.org/strategies/v2-strategies/executors/):
+  reusable order-lifecycle components, while preserving this framework's
+  deterministic state machines and shared backtest/live semantics.
+
+Public reports use generic reproduction cases and aggregate acceptance
+conclusions. Strategies, parameters, account statements, captured data,
+deployment details and operational incident records stay outside this
+repository, as required by [the boundary policy](REQUIREMENTS.md#8-repository-boundary-policy).
 
 ---
 
@@ -553,11 +584,9 @@ not in the matching kernel.
    | Does a maker strategy's edge survive? | months | this is where a multi-month window is actually the argument |
    | Is the result statistically significant? | longer still | and this project's position is that one run is not evidence |
 
-   Only the third row was ever six months. The first two are reachable
-   now, and were unreachable for a different reason until the archive
-   pull was deployed — the staging bucket expires after seven days, so
-   the retained window had a hard ceiling regardless of how long capture
-   ran.
+   Assess the retained archive against these questions, not the original
+   trial's duration. A longer window is useful only after its gaps,
+   snapshots and sequence integrity have been audited.
 
 **Scope.**
 
@@ -567,7 +596,8 @@ not in the matching kernel.
   remains is the calibration this milestone is actually about: the model takes
   a `Policy` of assumptions, because the tick format carries neither book depth
   nor this deployment's real latency, and turning those assumptions into
-  measurements needs the recorded fills the entry trigger asks for. Latency as
+  measurements starts with an audit of the available fills and their matching
+  market data; missing coverage is stated explicitly. Latency as
   *distributions* rather than constants is built — `Delay::Measured` takes
   four quantiles. Two further pieces are not built: a probabilistic queue model
   (the shipped one is the conservative one, which is the stated order), and
@@ -577,7 +607,13 @@ not in the matching kernel.
 - **L2**: order book reconstruction from incremental depth, matching against
   the reconstructed book, snapshot reconciliation and gap handling. Built:
   reconstruction, the measured queue, and the taker's walk up the levels.
-  What remains is reaction — the book here is what the venue displayed, and
+  Validate the entire snapshot/gap path before calibration: the aggregator
+  resets on capture gaps, but `fold_into_observations` does not emit a gap
+  invalidation to the matcher. Snapshot installation exists, while the
+  archive path bootstraps from an incremental update. These input-validity
+  gaps need reproductions and explicit reinitialisation, not a longer
+  capture window. Beyond them remains reaction — the book is what the venue
+  displayed, and
   how the rest of the market answers a trade of ours is a claim nothing in
   it measures.
 - Stylized-facts test set in CI (fat tails, volatility clustering, order flow
