@@ -180,12 +180,86 @@ pub fn replay_with_history(
     code_commit: &str,
     evidence: &crate::ledger_coverage::CoverageEvidence,
 ) -> Result<CoveredLedgerReport, String> {
+    replay_with_history_bound(path, code_commit, evidence, None)
+}
+
+/// Covered replay with optional verification of the native baseline.
+/// A coverage baseline is verified separately on the returned report.
+pub fn replay_with_history_bound(
+    path: impl AsRef<Path>,
+    code_commit: &str,
+    evidence: &crate::ledger_coverage::CoverageEvidence,
+    expected: Option<&RunManifest>,
+) -> Result<CoveredLedgerReport, String> {
     let reader = Reader::open(path).map_err(|e| e.to_string())?;
-    let mut native = bound_snapshot(&reader, code_commit, None)?;
+    let mut native = bound_snapshot(&reader, code_commit, expected)?;
     let coverage =
         crate::ledger_coverage::verify(&decode_snapshot(&reader)?, &native.manifest, evidence)?;
     native.accounting.funding_coverage = true;
     Ok(CoveredLedgerReport { native, coverage })
+}
+
+/// Query original histories for one immutable native snapshot and verify
+/// exact closed-window coverage. Unsupported queries return an error, never
+/// an empty window. The caller establishes the opaque account scope.
+pub fn capture_history(
+    path: impl AsRef<Path>,
+    code_commit: &str,
+    account: &dyn oq_gateway::Account,
+    account_scope_hash: &str,
+    through_ms: i64,
+    clock: &dyn crate::clock::Clock,
+    max_age_ms: i64,
+) -> Result<
+    (
+        CoveredLedgerReport,
+        crate::ledger_coverage::CoverageEvidence,
+    ),
+    String,
+> {
+    if account_scope_hash.len() != 64 || !account_scope_hash.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err("coverage needs an externally established account-scope hash".into());
+    }
+    let reader = Reader::open(path).map_err(|e| e.to_string())?;
+    let records = decode_snapshot(&reader)?;
+    let mut native = bound_snapshot(&reader, code_commit, None)?;
+    let start = records
+        .iter()
+        .rposition(|r| matches!(r, Record::SessionStart { .. }))
+        .ok_or("missing session")?;
+    let since_ms = records[start + 1..]
+        .iter()
+        .find_map(|r| match r {
+            Record::LedgerStart { at, .. } => Some(at.0 / 1_000_000),
+            _ => None,
+        })
+        .ok_or("missing ledger context")?;
+    let symbol = &native.accounting.symbol;
+    let fees = account
+        .execution_fees_between(symbol, since_ms, through_ms)
+        .map_err(|e| e.to_string())?
+        .ok_or("closed-window commission history is unsupported")?;
+    let funding = account
+        .funding_charged_between(symbol, since_ms, through_ms)
+        .map_err(|e| e.to_string())?
+        .ok_or("closed-window funding history is unsupported")?;
+    let evidence = crate::ledger_coverage::CoverageEvidence {
+        journal_data_hash: native.manifest.data_hash.clone(),
+        account_scope_hash: account_scope_hash.into(),
+        since_ms,
+        through_ms,
+        evaluated_ms: clock.wall().0 / 1_000_000,
+        max_age_ms,
+        fees: crate::ledger_coverage::HistoryWindow::from_bounded(fees, account_scope_hash.into()),
+        funding: crate::ledger_coverage::HistoryWindow::from_bounded(
+            funding,
+            account_scope_hash.into(),
+        ),
+    };
+    let coverage = crate::ledger_coverage::verify(&records, &native.manifest, &evidence)?;
+    native.accounting.funding_coverage = true;
+    Ok((CoveredLedgerReport { native, coverage }, evidence))
 }
 
 /// A strict, scope-named sidecar for the existing RunManifest identity.

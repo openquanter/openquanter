@@ -22,6 +22,12 @@
 
 ### 变更
 
+- **覆盖历史可捕获并离线重放。** `ledger::capture_history` 从原生账本边界查询两个
+  bounded 来源，并针对同一份不可变 journal 快照验证。严格版本化证据文本持久化
+  原始行、账户 scope、来源边界/观测时刻及评估策略；exclusive 创建拒绝覆盖。
+  `oq-replay --ledger --coverage-evidence FILE` 核验这些历史，可满足声明区间的
+  `--require-coverage`。格式错误、过期、不匹配或不支持的证据均拒绝。原生 manifest
+  验证与覆盖 manifest 仍独立；这不补充历史模型仓位，也不提供 G12 残差。
 - **账户历史可明确固定的近期区间。** 新增可选 `execution_fees_between` /
   `funding_charged_between` 返回 `BoundedHistory`，保留精确 symbol、边界及观测时刻。
   Binance 每个 inclusive-time 分页均固定 `endTime`，保守地仅支持最近七天内的区间；

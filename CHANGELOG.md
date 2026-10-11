@@ -29,6 +29,16 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Coverage histories can be captured and replayed offline.**
+  `ledger::capture_history` queries both bounded sources for the native
+  ledger boundary and verifies them against one immutable journal snapshot.
+  Strict versioned evidence text persists original rows, account scope,
+  source bounds/observations and evaluation policy; exclusive creation
+  refuses overwrites. `oq-replay --ledger --coverage-evidence FILE` checks
+  these histories and can satisfy `--require-coverage` for that interval.
+  Malformed, stale, mismatched or unsupported evidence fails closed. Native
+  manifest verification remains distinct from the coverage manifest. This
+  does not supply historical model inventory or a G12 residual.
 - **Account history can certify a fixed recent interval.** New optional
   `execution_fees_between` / `funding_charged_between` return `BoundedHistory`
   with exact symbol, bounds and observation time. Binance pins `endTime` on
