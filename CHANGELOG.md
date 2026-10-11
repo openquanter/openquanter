@@ -29,6 +29,17 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Final live residuals require independently covered native economics.**
+  After the last funding/fee recovery, the host verifies and persists closed
+  histories when `--account-scope-hash SHA256` (or the environment equivalent)
+  is established. Native net P&L must agree with Books; shadow initial
+  contract, balance, mode, legs and canonical venue fills must agree too.
+  Model funding requires known obligations, verified original settlements
+  and current independent totals. Unknown policy, gaps, source failure or
+  attachment failure leaves no numeric residual. Interim reports remain
+  incomplete until final coverage. Covered attribution binds source identity
+  and effective model seed/config; a synthetic non-zero P&L gap tests a
+  measured zero residual without substituting a component sum for actual P&L.
 - **Coverage histories can be captured and replayed offline.**
   `ledger::capture_history` queries both bounded sources for the native
   ledger boundary and verifies them against one immutable journal snapshot.

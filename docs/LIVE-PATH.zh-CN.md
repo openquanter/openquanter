@@ -543,6 +543,29 @@ CLI 打印来源区间、账户 scope、行数及覆盖数据/策略 hash。错�
 身份；覆盖身份通过覆盖报告的 `verify_baseline` 验证。离线读取重放附件的历史评估
 时刻，不以当前墙钟替换它。
 
+### 最终 live 覆盖归因
+
+production host 接受 `--account-scope-hash SHA256`；库调用方提供
+`Environment::account_scope_hash`（production builder 为 `with_account_scope_hash`）。
+这是外部建立的不透明 scope，不是对任意文本求 hash 就获得认证。最后一次资金费及
+手续费恢复后，要求健康的原生 journal 和两个 bounded 来源。验证后的历史 exclusive
+保存为 `<stem>.<coverage-data-hash>.<coverage-policy-hash>.history-evidence`。
+来源或附件失败时最终拆解保持不完整；运行中的 control 报告在最终闭区间证据建立前
+也不提供数值残差。
+
+`ledger::attribute_with_history` 核验同一份不可变原生快照，将其已实现减手续费加
+资金费的结果与 Books 比较，同时检查 shadow 干净的初始 instrument/合约、余额、
+持仓模式、观测仓位腿及规范交易所成交序列。实际盈亏来自 fold，不来自已解释分量
+之和；模型盈亏来自独立 shadow。模型费率须明确声明。未建模的恢复行、未验证结算、
+缺失/未决/有缺口的义务或过期/矛盾的资金费合计均使模型资金费不可用。不虚构历史
+模型仓位来把已知现金行变成已建模结算。
+
+报告 scope 为 `openquanter covered live attribution v1`。数据 hash 绑定完整来源覆盖，
+配置 hash 绑定原生上下文、run 策略配置及有效模型初态；完整数据/配置 hash 随报告
+打印。仅代码变化与输入/配置变化仍可区分。合成 round-trip 以独立 fold 的非零盈亏
+差额验证完整可测的零残差，并验证外来初态、成交、费用或合计会被拒绝。历史生产
+验收仍须有其明确构建身份、原始模型仓位及覆盖报告。
+
 ### 身份绑定的原生账本报告
 
 ```sh

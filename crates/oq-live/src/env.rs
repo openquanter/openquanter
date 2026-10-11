@@ -54,6 +54,12 @@ pub trait Environment {
         None
     }
 
+    /// Externally established opaque venue/account scope for economic
+    /// history evidence. Absent scope cannot certify complete coverage.
+    fn account_scope_hash(&self) -> Option<&str> {
+        None
+    }
+
     /// Depth and trades for `symbol`, and the adapter that reads them.
     ///
     /// # Errors
@@ -136,6 +142,7 @@ pub trait Environment {
 pub struct Production {
     clock: SystemClock,
     model_fees: Option<oq_core::Fees>,
+    account_scope_hash: Option<String>,
 }
 
 impl Production {
@@ -147,6 +154,12 @@ impl Production {
     #[must_use]
     pub fn with_model_fees(mut self, fees: oq_core::Fees) -> Self {
         self.model_fees = Some(fees);
+        self
+    }
+
+    #[must_use]
+    pub fn with_account_scope_hash(mut self, hash: String) -> Self {
+        self.account_scope_hash = Some(hash);
         self
     }
 }
@@ -162,6 +175,9 @@ impl Production {
 pub const USER_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 impl Environment for Production {
+    fn account_scope_hash(&self) -> Option<&str> {
+        self.account_scope_hash.as_deref()
+    }
     fn model_fees(&self) -> Option<oq_core::Fees> {
         self.model_fees
     }

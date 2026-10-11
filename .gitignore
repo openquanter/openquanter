@@ -17,6 +17,7 @@ dist/
 
 # Local data & secrets — never commit market data, configs with keys, or credentials
 /data/
+*.history-evidence
 *.local.toml
 .env
 

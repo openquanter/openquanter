@@ -262,6 +262,167 @@ pub fn capture_history(
     Ok((CoveredLedgerReport { native, coverage }, evidence))
 }
 
+/// Attribute an independently folded native net result against a finalized
+/// shadow, only after exact fee/funding coverage and seed/fill agreement.
+/// Model funding remains unavailable when historical positions are unknown.
+pub fn attribute_with_history(
+    path: impl AsRef<Path>,
+    code_commit: &str,
+    evidence: &crate::ledger_coverage::CoverageEvidence,
+    shadow: &mut crate::shadow::Shadow,
+    funding: Result<(Cash, Cash), String>,
+    policy: &RunManifest,
+    live_net: Cash,
+) -> Result<oq_parity::attribution::Attribution, String> {
+    let reader = Reader::open(path).map_err(|e| e.to_string())?;
+    let records = decode_snapshot(&reader)?;
+    let native = bound_snapshot(&reader, code_commit, None)?;
+    let coverage = crate::ledger_coverage::verify(&records, &native.manifest, evidence)?;
+    let accounting = &native.accounting;
+    let net = accounting
+        .realized
+        .0
+        .checked_sub(accounting.recorded_fees.0)
+        .and_then(|amount| amount.checked_add(accounting.funding.0))
+        .map(Cash)
+        .ok_or("native net result overflow")?;
+    if net != live_net {
+        return Err("live books and native replay net results differ".into());
+    }
+    let start = records
+        .iter()
+        .rposition(|r| matches!(r, Record::SessionStart { .. }))
+        .ok_or("missing session")?;
+    let session = &records[start + 1..];
+    let (instrument_id, tick_cash, instrument) = session
+        .iter()
+        .find_map(|r| match r {
+            Record::LedgerStart {
+                instrument_id,
+                tick_cash,
+                instrument,
+                ..
+            } => Some((*instrument_id, *tick_cash, *instrument)),
+            _ => None,
+        })
+        .ok_or("missing ledger seed")?;
+    let initial = session
+        .iter()
+        .find_map(|r| match r {
+            Record::Reconciled { legs, .. } => Some(legs),
+            _ => None,
+        })
+        .ok_or("missing explicit initial positions")?;
+    let mut legs = Vec::new();
+    for (_, side, qty, entry) in initial {
+        if *qty == 0 {
+            continue;
+        }
+        let side = match side.as_str() {
+            "LONG" => Side::Buy,
+            "SHORT" => Side::Sell,
+            "BOTH" => {
+                if *qty > 0 {
+                    Side::Buy
+                } else {
+                    Side::Sell
+                }
+            }
+            _ => return Err("unknown initial leg".into()),
+        };
+        legs.push((side, QtyLots(qty.saturating_abs()), PriceTicks(*entry)));
+    }
+    legs.sort_by_key(|(side, _, _)| *side == Side::Sell);
+    if !shadow.seed_matches(
+        instrument_id,
+        tick_cash,
+        accounting.starting_balance,
+        accounting.mode,
+        &legs,
+    ) {
+        return Err("shadow and native ledger do not share the same clean initial seed".into());
+    }
+    let recorded: Vec<_> = session
+        .iter()
+        .filter_map(|r| match r {
+            Record::Execution { fill, .. } => Some(
+                oq_parity::Fill::new(
+                    fill.stamp.exch.0,
+                    &accounting.symbol,
+                    fill.side,
+                    fill.price.0,
+                    fill.qty.0,
+                )
+                .with_tag(fill.order.0.to_string()),
+            ),
+            _ => None,
+        })
+        .collect();
+    if shadow.fills(&accounting.symbol).0 != recorded {
+        return Err("shadow venue fills differ from canonical native executions".into());
+    }
+    if !shadow.pairing_valid() {
+        return Err(
+            "matched shadow/venue sides or quantities differ; pairing is incomplete".into(),
+        );
+    }
+    shadow.finish(oq_types::Nanos(
+        evidence.evaluated_ms.saturating_mul(1_000_000),
+    ));
+    let mut model_total = Cash::ZERO;
+    let mut model_known = accounting.funding_unmodelled_lines == 0;
+    for record in session {
+        if let Record::FundingEvidence {
+            model, verified, ..
+        } = record
+        {
+            model_known &= *verified;
+            model_total = Cash(
+                model_total
+                    .0
+                    .checked_add(model.0)
+                    .ok_or("model funding total overflow")?,
+            );
+        }
+    }
+    model_known &= accounting
+        .funding_obligations
+        .as_ref()
+        .is_some_and(|state| {
+            state.pending_ms.is_empty() && state.schedule_gaps.is_empty() && state.problem.is_none()
+        });
+    let funding = match funding {
+        Ok((venue, model)) if model_known && venue == accounting.funding && model == model_total && model == shadow.model_funding() => Ok((venue, model)),
+        Ok(_) => Err("funding model inventory, obligations or independent totals are unknown or inconsistent".into()),
+        Err(why) => Err(why),
+    };
+    let config = format!(
+        "policy={};native={};model_seed={}",
+        policy.config_hash,
+        native.manifest.config_hash,
+        shadow.seed_identity()
+    );
+    let manifest = RunManifest::from_content(
+        code_commit,
+        coverage.manifest.data_hash.as_bytes(),
+        config.as_bytes(),
+        "openquanter covered live attribution v1",
+    );
+    Ok(oq_parity::attribution::attribute(
+        manifest,
+        &instrument,
+        net,
+        shadow.model_pnl(),
+        &shadow.evidence(
+            funding,
+            Some(crate::run::fee_evidence(
+                accounting.recorded_fees,
+                shadow.model_fees(),
+            )),
+        ),
+    ))
+}
+
 /// A strict, scope-named sidecar for the existing RunManifest identity.
 pub fn manifest_text(manifest: &RunManifest) -> Result<String, String> {
     if manifest.label != MANIFEST_SCOPE

@@ -997,7 +997,6 @@ where
     // The venue's fee statement, asked for when the files are written and
     // kept for an attribution asked for in between. `None` until asked,
     // and after an adapter that does not report fees.
-    let mut fee_pair: Option<(Cash, Cash)> = None;
     // The last position check: when, and whether the books agreed.
     let mut last_reconcile: Option<(Nanos, bool)> = None;
     let mut reported_unresolved = 0_u64;
@@ -1492,7 +1491,12 @@ where
                             &instrument,
                             books.realized_net(),
                             shadow.model_pnl(),
-                            &shadow.evidence(funding.evidence(), fee_pair),
+                            &shadow.evidence(
+                                funding.evidence().and(Err(
+                                    "final closed-window history coverage is pending".into(),
+                                )),
+                                None,
+                            ),
                         );
                         attribution_reply(&a, shadow.evidence_counts())
                     }
@@ -1740,12 +1744,6 @@ where
             && clock.elapsed().saturating_sub(last_artifacts) >= ARTIFACTS_EVERY
         {
             last_artifacts = clock.elapsed();
-            fee_pair = trader
-                .venue()
-                .fees_charged(&symbol, started_ms)
-                .ok()
-                .flatten()
-                .map(|v| fee_evidence(v, shadow.model_fees()));
             if let Err(e) = a.write(&shadow, books.realized_net(), &observed) {
                 eprintln!("artifacts        could not be written: {e}");
             }
@@ -1848,75 +1846,6 @@ where
 
     println!("ticks            {ticks}");
 
-    // What the model would have done with the same observations, and
-    // where it differs. Printed even when nothing traded: "no divergence
-    // because no trade" is a different statement from "no divergence",
-    // and only one of them is evidence.
-    // Asked once, at the end, over the window this run covered. A
-    // failure is reported and not fatal: the run is over, and refusing
-    // to print the rest of the report because one component could not be
-    // read would lose the components that could.
-    let shadow_fees = shadow.model_fees();
-    let venue_fees = match trader.venue().fees_charged(&symbol, started_ms) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("fees             could not be read: {e}");
-            None
-        }
-    };
-    // Two readings of one fact, taken where both are final: the venue's
-    // own trade records, and the commission it stated on each fill as
-    // that fill arrived. Funding is checked the same way at every
-    // settlement, and for the same reason — a component the ledger does
-    // not confirm is a number nobody can check, and saying so beats
-    // publishing it.
-    //
-    // The books' own total is the venue's here because a live run is
-    // built without a fee schedule: every unit in it came from a fill.
-    let venue_fees = match venue_fees {
-        Some(rest) if !books.fees_known() => {
-            eprintln!(
-                "fees             the venue's records say {} but this run could not read the fee \
-                 on every fill; the component is unreadable rather than a difference with a hole \
-                 in it",
-                rest.as_f64()
-            );
-            None
-        }
-        Some(rest) => {
-            let stated = books.realized_parts().1;
-            if stated == rest {
-                Some(rest)
-            } else {
-                eprintln!(
-                    "fees             the venue's records say {} and the fills it sent said {}; \
-                     the component is unreadable rather than either",
-                    rest.as_f64(),
-                    stated.as_f64()
-                );
-                None
-            }
-        }
-        None => None,
-    };
-    shadow.finish(clock.wall());
-    println!();
-    let divergences = shadow.divergences();
-    let flattering = shadow.flattering();
-    println!(
-        "shadow           {} divergence(s), {flattering} of them flattering the model",
-        divergences.len()
-    );
-    // Every one, not a sample. A divergence that was summarised away is
-    // one nobody attributed, and the count above is the thing this run
-    // exists to produce.
-    for d in divergences {
-        println!(
-            "  {}{}",
-            if d.flatters_the_model() { "! " } else { "  " },
-            d.summary_line()
-        );
-    }
     // A settlement crossed just before the end is asked about once more,
     // so a run that stops soon after one can still account for it.
     if funding.needs_poll() {
@@ -1950,26 +1879,87 @@ where
     if let Some(why) = funding.problem() {
         println!("funding          unavailable: {why}");
     }
-    let attribution = oq_parity::attribution::attribute(
-        // Identified by what this run was, so a report cannot be
-        // mistaken for one from a different build or contract. The
-        // limits are in the config hash because a limit that fired is
-        // part of why the two arms differ.
-        run_manifest(cfg, &symbol, model_fee_policy),
-        &instrument,
-        books.realized_net(),
-        shadow.model_pnl(),
-        // Funding from the watch: the venue's ledger against the model's
-        // positions, or `None` with a reason. Fees are asked for, and an
-        // adapter that does not report them says so rather than
-        // answering zero — either way `attribution` renders the
-        // component honestly and the residual carries what is missing.
-        &shadow.evidence(
-            funding.evidence(),
-            venue_fees.map(|v| fee_evidence(v, shadow_fees)),
-        ),
+    shadow.finish(clock.wall());
+    println!();
+    let divergences = shadow.divergences();
+    let flattering = shadow.flattering();
+    println!(
+        "shadow           {} divergence(s), {flattering} of them flattering the model",
+        divergences.len()
     );
+    // Every one, not a sample. A divergence that was summarised away is
+    // one nobody attributed, and the count above is the thing this run
+    // exists to produce.
+    for d in divergences {
+        println!(
+            "  {}{}",
+            if d.flatters_the_model() { "! " } else { "  " },
+            d.summary_line()
+        );
+    }
+    // Final recovery has completed. A numeric residual now requires
+    // exact closed-window native economics, not a matching aggregate.
+    let policy = run_manifest(cfg, &symbol, model_fee_policy);
+    let code = option_env!("GIT_COMMIT")
+        .or(option_env!("GITHUB_SHA"))
+        .unwrap_or("unknown");
+    let covered = (|| -> Result<oq_parity::attribution::Attribution, String> {
+        if no_journal || trader.session().journal_lost().is_some() {
+            return Err("complete coverage requires a healthy native journal".into());
+        }
+        let scope = env
+            .account_scope_hash()
+            .ok_or("account scope was not established for history coverage")?;
+        let through_ms = clock.wall().0 / 1_000_000;
+        let (report, evidence) = crate::ledger::capture_history(
+            &journal_path,
+            code,
+            trader.venue(),
+            scope,
+            through_ms,
+            clock,
+            60_000,
+        )?;
+        let attachment = std::path::Path::new(&journal_path).with_extension(format!(
+            "{}.{}.history-evidence",
+            report.coverage.manifest.data_hash, report.coverage.manifest.config_hash,
+        ));
+        crate::ledger_coverage::write_evidence(&attachment, &evidence)?;
+        println!("coverage evidence {}", attachment.display());
+        crate::ledger::attribute_with_history(
+            &journal_path,
+            code,
+            &evidence,
+            &mut shadow,
+            funding.evidence(),
+            &policy,
+            books.realized_net(),
+        )
+    })();
+    let attribution = match covered {
+        Ok(report) => report,
+        Err(why) => {
+            eprintln!("coverage         unavailable: {why}");
+            oq_parity::attribution::attribute(
+                policy,
+                &instrument,
+                books.realized_net(),
+                shadow.model_pnl(),
+                &shadow.evidence(
+                    funding
+                        .evidence()
+                        .and(Err(format!("complete history coverage unavailable: {why}"))),
+                    None,
+                ),
+            )
+        }
+    };
     print!("{}", attribution.render());
+    println!("attribution data hash {}", attribution.manifest.data_hash);
+    println!(
+        "attribution config hash {}",
+        attribution.manifest.config_hash
+    );
     if let Some(a) = &artifacts {
         match a.write(&shadow, books.realized_net(), &observed) {
             Ok(()) => println!(
@@ -2280,7 +2270,7 @@ fn act<T: TraderLike>(action: &Action, trader: &mut T, symbol: &str) {
 /// the kernel's fee total are positive. Passed as they were, a venue that
 /// charged ten more than the model showed a fee line of +10 and a
 /// residual of −20 where both should have said −10 and zero.
-fn fee_evidence(venue_charged: Cash, model_charged: Cash) -> (Cash, Cash) {
+pub(crate) fn fee_evidence(venue_charged: Cash, model_charged: Cash) -> (Cash, Cash) {
     (Cash(-venue_charged.0), Cash(-model_charged.0))
 }
 
