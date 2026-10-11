@@ -226,6 +226,13 @@ OpenQuanter 1.x 是一个**闭源的交易平台，已经实盘运行数年**。
 到达前的成交量。已提供快照中的空档位是明确状态；没快照则未知，使用声明的 L1
 政策。这仍是观测边界模型，不代表记录之间的连续时间执行。
 
+捕获 gap 和序列拒绝会使 L2 盘口失效，直到快照恢复前暂停新成交。
+`Observation::SnapshotAt` 保留捕获快照的边界；`snapshot` 归档源或 OKX 原生快照同时
+传到聚合器与 matcher。恢复跳过首个混合 bar，保留订单，并保守重估 ahead。报告提供
+`depth_gaps` 与 `depth_invalid_ticks`；只有 seq 的标记不是盘口。旧 `oq-tiers` 的空盘口
+bootstrap 明确是近似，gap 后不自动重建；捕获程序尚不自动归档 REST 快照。精确复现
+须保留包括快照、gap 在内的完整观测流，仅 `Event::Depth` 不足以复现。
+
 **「AI 一等公民」已建成一部分。** 强化学习环境已建成——`oq-env` 提供 `Env` 与
 `VecEnv`，种子一路贯穿，动作是一个目标仓位而不是一张订单，而复现测试之所以成立，
 是因为步进本身没有并发；`cargo run --release -p oq-examples --example rl_rollout`

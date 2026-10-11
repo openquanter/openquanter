@@ -29,6 +29,19 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **L2 invalid intervals suspend execution until a snapshot.** Capture gaps
+  reach the matcher as observations; refused depth also invalidates the
+  stale book. Existing orders survive, already-executed delayed responses
+  still release, and recovery skips the first potentially mixed bar rather
+  than spending gap volume or interpolating a price path through it. A
+  queued order retains at least the larger of its old ahead and newly
+  displayed ahead; its historical priority is not recoverable from MBP.
+  `SnapshotAt` retains reconnect placement, separate `snapshot` sources and
+  native OKX snapshots reach both projection and matcher, and seq-only
+  capture markers do not supply levels. Reports count declared gaps and
+  suspended ticks. Legacy `oq-tiers` empty bootstrap remains explicitly
+  approximate; it does not recreate a book after a gap. Capture does not
+  automatically fetch or archive REST snapshots.
 - **L2 queue entry is sampled at exchange arrival (matching semantics).**
   The last book state before a later depth event seals the due reading;
   market depth at the exact same timestamp has priority before sampling.

@@ -1373,6 +1373,25 @@ impl Kernel {
         self.state.holding_mut().engine.on_depth(update)
     }
 
+    /// Invalidate the matcher's depth input at a captured discontinuity.
+    pub fn apply_depth_gap(&mut self) -> bool {
+        self.state.holding_mut().engine.on_gap()
+    }
+
+    /// A snapshot at a receive boundary rather than a timeless seed.
+    pub fn install_snapshot_at(
+        &mut self,
+        at: Nanos,
+        update_id: u64,
+        bids: &[oq_engine::Level],
+        asks: &[oq_engine::Level],
+    ) -> bool {
+        self.state
+            .holding_mut()
+            .engine
+            .install_snapshot_at(at, update_id, bids, asks)
+    }
+
     /// The same update as an event, for a host that journals what it
     /// applies.
     ///

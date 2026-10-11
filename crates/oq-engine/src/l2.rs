@@ -90,6 +90,9 @@ pub struct L2Engine {
     inner: L1Engine,
     venue: VenueBook,
     has_snapshot: bool,
+    invalid: bool,
+    recovery_bar: bool,
+    invalid_ticks: u64,
     /// Depth updates the book refused, in sequence order.
     ///
     /// Counted rather than absorbed. A book that quietly accepted an
@@ -116,6 +119,9 @@ impl L2Engine {
             inner,
             venue: VenueBook::new(),
             has_snapshot: false,
+            invalid: false,
+            recovery_bar: false,
+            invalid_ticks: 0,
             refused: 0,
             swept: 0,
             unswept: 0,
@@ -137,13 +143,52 @@ impl L2Engine {
     ) {
         self.venue.install_snapshot(update_id, bids, asks);
         self.has_snapshot = true;
+        if self.invalid {
+            self.recovery_bar = true;
+            let venue = &self.venue;
+            self.inner
+                .resume_depth(|side, price| Self::displayed_from(venue, side, price));
+        }
+        self.invalid = false;
+    }
+
+    /// Forget stale depth and suspend execution until a fresh snapshot.
+    pub fn on_gap(&mut self) {
+        self.venue = VenueBook::new();
+        self.has_snapshot = false;
+        self.invalid = true;
+        self.inner.invalidate_depth();
+    }
+
+    /// Preserve arrivals strictly before a captured snapshot boundary.
+    pub fn install_snapshot_at(
+        &mut self,
+        at: Nanos,
+        update_id: u64,
+        bids: &[oq_book::Level],
+        asks: &[oq_book::Level],
+    ) {
+        if !self.invalid {
+            let venue = &self.venue;
+            let known = self.has_snapshot;
+            self.inner
+                .sample_arrivals(Nanos(at.0.saturating_sub(1)), |side, price| {
+                    Self::queue_from(venue, known, side, price)
+                });
+        }
+        self.install_snapshot(update_id, bids, asks);
+    }
+
+    #[must_use]
+    pub const fn invalid_ticks(&self) -> u64 {
+        self.invalid_ticks
     }
 
     /// Apply one incremental depth update.
     ///
     /// # Errors
     /// The sequencing rule it broke. The update is not applied and the
-    /// book is left as it was.
+    /// book is invalidated until a fresh snapshot arrives.
     pub fn on_depth(&mut self, update: &DepthUpdate) -> Result<(), SequenceError> {
         let before = Nanos(update.event_ms.saturating_mul(1_000_000).saturating_sub(1));
         let venue = &self.venue;
@@ -155,6 +200,7 @@ impl L2Engine {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.refused += 1;
+                self.on_gap();
                 Err(e)
             }
         }
@@ -168,6 +214,10 @@ impl L2Engine {
     /// a reading and not an absence, and is why it is not `None`. A book
     /// with no snapshot is unknown and uses the stated L1 fallback.
     pub fn submit(&mut self, order: Working, now: Nanos) {
+        if self.invalid {
+            self.inner.submit_while_depth_invalid(order, now);
+            return;
+        }
         let ahead = order
             .price()
             .and_then(|p| Self::queue_from(&self.venue, self.has_snapshot, order.side(), p));
@@ -199,6 +249,11 @@ impl L2Engine {
     /// levels that happen to be present would put the least trustworthy
     /// number on the largest order.
     pub fn on_tick(&mut self, tick: &Tick) -> &[L0Fill] {
+        if self.invalid || self.recovery_bar {
+            self.recovery_bar = false;
+            self.invalid_ticks += 1;
+            return self.inner.on_invalid_tick(tick);
+        }
         let (mut swept, mut unswept) = (0_u64, 0_u64);
         {
             let venue = &self.venue;
@@ -528,8 +583,8 @@ mod tests {
         assert_eq!(e.refused(), 1);
         assert_eq!(
             e.displayed_at(Side::Buy, PriceTicks(99)),
-            250,
-            "a refused update must not have moved the book"
+            0,
+            "stale depth must no longer be available for measurement"
         );
     }
 
@@ -713,6 +768,121 @@ mod tests {
             e.inner().queued(),
             1,
             "unknown book falls back to the stated L1 policy"
+        );
+    }
+
+    #[test]
+    fn a_gap_suspends_resting_and_in_flight_orders_until_snapshot() {
+        let mut e = delayed_queue(100);
+        e.on_gap();
+        e.submit(market(2, Side::Buy, 1), Nanos(10_000_000));
+        assert!(e.on_tick(&timed(25, 500)).is_empty());
+        assert_eq!(e.inner().shadowed(), 2);
+        assert!(!e.ready());
+        e.install_snapshot_at(Nanos(30_000_000), 200, &[at(99, 100)], &[at(101, 100)]);
+        assert!(
+            e.on_tick(&timed(31, 1000)).is_empty(),
+            "the recovery bar may contain gap volume and extremes"
+        );
+        assert_eq!(
+            e.on_tick(&timed(32, 1003)).len(),
+            1,
+            "only the market order fills"
+        );
+        assert_eq!(e.inner().queued(), 1);
+        assert_eq!(e.invalid_ticks(), 2);
+    }
+
+    #[test]
+    fn recovery_does_not_keep_old_queue_priority_or_spend_gap_volume() {
+        let mut e = delayed_queue(2);
+        e.on_tick(&timed(10, 0));
+        e.on_gap();
+        e.on_tick(&timed(20, 500));
+        e.install_snapshot_at(Nanos(30_000_000), 200, &[at(99, 100)], &[at(101, 100)]);
+        e.on_tick(&timed(31, 1000));
+        assert!(e.on_tick(&timed(32, 1003)).is_empty());
+        assert_eq!(
+            e.inner().queued(),
+            1,
+            "new displayed queue exceeds old priority"
+        );
+        e.on_tick(&timed(33, 1100));
+        assert_eq!(e.inner().queued(), 0);
+    }
+
+    #[test]
+    fn an_undeclared_sequence_break_also_suspends_matching() {
+        let mut e = delayed_queue(2);
+        assert!(e.on_depth(&depth_change(5, 500, 1)).is_err());
+        assert!(e.on_tick(&timed(20, 1000)).is_empty());
+        assert_eq!(e.invalid_ticks(), 1);
+        assert_eq!(e.refused(), 1);
+    }
+
+    #[test]
+    fn a_later_snapshot_cannot_change_a_sealed_arrival() {
+        let mut e = delayed_queue(100);
+        e.install_snapshot_at(Nanos(12_000_000), 200, &[at(99, 1)], &[at(101, 100)]);
+        e.on_tick(&timed(15, 0));
+        assert!(e.on_tick(&timed(16, 3)).is_empty());
+        assert_eq!(e.inner().queued(), 1);
+    }
+
+    #[test]
+    fn a_gap_does_not_erase_already_executed_delayed_responses() {
+        let mut e = L2Engine::new(L1Engine::new(
+            oq_types::InstrumentId(1),
+            Policy {
+                queue: QueueAhead::None,
+                latency: Latency {
+                    entry: Delay::Fixed(Nanos(0)),
+                    response: Delay::Fixed(Nanos(10_000_000)),
+                },
+                impact: Impact { coefficient: 0 },
+            },
+        ));
+        e.install_snapshot(100, &[at(99, 100)], &[at(101, 100)]);
+        e.on_tick(&timed(0, 0));
+        e.submit(market(1, Side::Buy, 1), Nanos(0));
+        assert!(e.on_tick(&timed(1, 0)).is_empty());
+        e.on_gap();
+        assert!(e.on_tick(&timed(10, 0)).is_empty());
+        let released = e.on_tick(&timed(11, 0));
+        assert_eq!(released.len(), 1);
+        assert_eq!(
+            released[0].fill.stamp.exch,
+            Nanos(1_000_000),
+            "release retains execution time"
+        );
+        assert!(e.on_tick(&timed(12, 0)).is_empty(), "release happens once");
+    }
+
+    #[test]
+    fn zero_latency_orders_in_a_gap_and_formerly_unqueued_orders_join_recovery_depth() {
+        let mut e = engine(QueueAhead::None);
+        e.install_snapshot(100, &[at(98, 100)], &[at(101, 100)]);
+        e.on_tick(&timed(0, 0));
+        e.submit(limit(1, Side::Buy, 99, 1), Nanos(0));
+        assert_eq!(
+            e.inner().book().iter().count(),
+            1,
+            "the old level was empty"
+        );
+        e.on_gap();
+        e.submit(limit(2, Side::Buy, 99, 1), Nanos(1_000_000));
+        assert_eq!(
+            e.inner().shadowed(),
+            1,
+            "gap submission cannot read zero ahead"
+        );
+        e.install_snapshot_at(Nanos(10_000_000), 200, &[at(99, 100)], &[at(101, 100)]);
+        e.on_tick(&timed(11, 1000));
+        assert!(e.on_tick(&timed(12, 1003)).is_empty());
+        assert_eq!(
+            e.inner().queued(),
+            2,
+            "both orders now wait behind observed depth"
         );
     }
 

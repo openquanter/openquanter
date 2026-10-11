@@ -232,6 +232,41 @@ impl Matcher {
         }
     }
 
+    /// A discontinuity is meaningful only at the tier that reads depth.
+    pub fn on_gap(&mut self) -> bool {
+        match self {
+            Self::L2(e) => {
+                e.on_gap();
+                true
+            }
+            Self::L0(_) | Self::L1(_) => false,
+        }
+    }
+
+    #[must_use]
+    pub fn invalid_depth_ticks(&self) -> u64 {
+        match self {
+            Self::L2(e) => e.invalid_ticks(),
+            Self::L0(_) | Self::L1(_) => 0,
+        }
+    }
+
+    pub fn install_snapshot_at(
+        &mut self,
+        at: oq_types::Nanos,
+        update_id: u64,
+        bids: &[oq_engine::Level],
+        asks: &[oq_engine::Level],
+    ) -> bool {
+        match self {
+            Self::L2(e) => {
+                e.install_snapshot_at(at, update_id, bids, asks);
+                true
+            }
+            Self::L0(_) | Self::L1(_) => false,
+        }
+    }
+
     /// Seed the venue book from a snapshot, if this tier keeps one.
     ///
     /// An incremental depth stream is meaningless without one: the

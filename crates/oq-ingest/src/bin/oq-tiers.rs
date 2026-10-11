@@ -234,6 +234,7 @@ fn main() -> ExitCode {
     let mut report = Report::default();
     let mut stream: Vec<Observation> = Vec::new();
     let mut seeded = false;
+    let mut approximate_start = false;
     for hour in &hours {
         let loaded = match load_hour(&archive, &day, hour) {
             Ok(l) => l,
@@ -253,6 +254,12 @@ fn main() -> ExitCode {
             })
             .collect();
         for obs in fold_into_observations(venue.as_ref(), &sources, scales, &mut agg, &mut report) {
+            if matches!(
+                obs,
+                Observation::SnapshotAt { .. } | Observation::Snapshot { .. }
+            ) {
+                seeded = true;
+            }
             // Seed the book from the first update that can be placed.
             //
             // The archive holds no REST snapshot -- capture records the
@@ -271,6 +278,7 @@ fn main() -> ExitCode {
                     asks: Vec::new(),
                 });
                 seeded = true;
+                approximate_start = true;
             }
             stream.push(obs);
         }
@@ -345,16 +353,21 @@ fn main() -> ExitCode {
             l0.misrouted_orders, l2.misrouted_orders
         );
     }
-    println!(
-        "  the book was bootstrapped from the first update, not a REST \
+    if approximate_start {
+        println!(
+            "  the book was bootstrapped from the first update, not a REST \
          snapshot, so levels resting before the capture began are absent \
          and the queue reads shorter than it was early on"
+        );
+    }
+    println!(
+        "  declared depth gaps: {}; suspended L2 ticks: {}",
+        l2.depth_gaps, l2.depth_invalid_ticks
     );
     if l2.depth_refused > 0 {
         println!(
             "  refusals are sequence breaks: messages were lost, and the book \
-             was left as it was rather than guessing. A queue measured after \
-             one reads shorter than it was."
+             is invalidated. Matching waits for a fresh captured snapshot."
         );
     }
 

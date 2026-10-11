@@ -188,6 +188,7 @@ pub fn fold_into(
             EventKind::Gap => agg.on_gap(event.at, event.local),
             EventKind::Depth(update) => agg.on_depth(event.at, event.local, update),
             EventKind::Trade(t) => agg.on_trade(event.at, event.local, t),
+            EventKind::Snapshot(s) => agg.on_snapshot(event.at, event.local, s),
         };
         ticks.extend(closed);
     }
@@ -221,14 +222,32 @@ fn collect(
                 continue;
             }
             match source.stream {
-                "depth" => match venue.parse_depth(&record.payload, scales) {
-                    Ok(update) => events.push(Event {
-                        at: record.day_ts(),
+                "snapshot" => match venue.parse_depth_snapshot(&record.payload, scales) {
+                    Ok(snapshot) => events.push(Event {
+                        at: record.local_ts,
                         local: record.local_ts,
-                        kind: EventKind::Depth(Box::new(update)),
+                        kind: EventKind::Snapshot(Box::new(snapshot)),
                     }),
                     Err(_) => report.unparseable += 1,
                 },
+                "depth" => {
+                    let parsed = venue
+                        .parse_depth_snapshot(&record.payload, scales)
+                        .map(|s| EventKind::Snapshot(Box::new(s)))
+                        .or_else(|_| {
+                            venue
+                                .parse_depth(&record.payload, scales)
+                                .map(|u| EventKind::Depth(Box::new(u)))
+                        });
+                    match parsed {
+                        Ok(kind) => events.push(Event {
+                            at: record.day_ts(),
+                            local: record.local_ts,
+                            kind,
+                        }),
+                        Err(_) => report.unparseable += 1,
+                    }
+                }
                 "trade" => match venue.parse_trade(&record.payload, scales) {
                     Some(t) => events.push(Event {
                         at: record.day_ts(),
@@ -301,6 +320,7 @@ pub fn fold_into_observations(
             EventKind::Gap => agg.on_gap(event.at, event.local),
             EventKind::Depth(update) => agg.on_depth(event.at, event.local, update),
             EventKind::Trade(t) => agg.on_trade(event.at, event.local, t),
+            EventKind::Snapshot(s) => agg.on_snapshot(event.at, event.local, s),
         };
         out.extend(closed.into_iter().map(Observation::Tick));
 
@@ -309,8 +329,18 @@ pub fn fold_into_observations(
         // before that window's tick -- which is also correct, and is
         // the same rule seen from the other side: the book moves when
         // it moved.
-        if let EventKind::Depth(update) = &event.kind {
-            out.push(Observation::Depth(update.clone()));
+        match &event.kind {
+            EventKind::Depth(update) => out.push(Observation::Depth(update.clone())),
+            EventKind::Gap => out.push(Observation::Gap {
+                at: oq_types::Nanos(event.at),
+            }),
+            EventKind::Snapshot(s) => out.push(Observation::SnapshotAt {
+                at: oq_types::Nanos(event.at),
+                update_id: s.last_update_id,
+                bids: s.bids.clone(),
+                asks: s.asks.clone(),
+            }),
+            EventKind::Trade(_) => {}
         }
     }
     out
@@ -323,6 +353,7 @@ struct Event {
 }
 
 enum EventKind {
+    Snapshot(Box<oq_l2feed::depth::DepthSnapshot>),
     Depth(Box<oq_l2feed::depth::DepthUpdate>),
     Trade(oq_l2feed::venue::Trade),
     Gap,
