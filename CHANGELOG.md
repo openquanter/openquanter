@@ -29,6 +29,14 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Funding history pagination refuses an incomplete prefix.** Binance
+  funding ledger and rate history use a bounded inclusive-time walk with
+  stable-identity deduplication and conflict detection. A full page that
+  cannot advance is an error, not completion; the boundary is never skipped
+  by adding one millisecond and potentially losing another hedge leg.
+  Rate history continues beyond its former single 1,000-row page. Request
+  failure and the 50-page bound return no accumulated prefix as success.
+  This protects reads, not proof of venue retention or persisted coverage.
 - **Funding schedule discovery retries after a temporary failure.** The
   host's 60-second funding poll retries missing next-settlement discovery
   even when no settlement is pending. The deterministic watch records

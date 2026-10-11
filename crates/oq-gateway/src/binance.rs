@@ -1519,33 +1519,20 @@ impl crate::account::Account for Binance {
         since_ms: i64,
     ) -> Result<Option<Vec<crate::account::FundingCharge>>, VenueError> {
         const PAGE: usize = 1000;
-        const MAX_PAGES: usize = 50;
-        let mut out: Vec<crate::account::FundingCharge> = Vec::new();
-        let mut from = since_ms;
-        for _ in 0..MAX_PAGES {
-            let query =
-                format!("symbol={symbol}&incomeType=FUNDING_FEE&startTime={from}&limit={PAGE}");
-            let body = self.get_signed(self.dialect.wire().income, &query)?;
-            let page = parse_funding_income(&body, symbol)?;
-            let full = crate::json::objects(&body).len() >= PAGE;
-            let last = page.iter().map(|c| c.time_ms).max();
-            for c in page {
-                if !out.contains(&c) {
-                    out.push(c);
-                }
-            }
-            match (full, last) {
-                (true, Some(t)) if t > from => from = t,
-                _ => {
-                    out.sort_by_key(|c| (c.time_ms, c.id));
-                    return Ok(Some(out));
-                }
-            }
-        }
-        Err(VenueError::Malformed {
-            what: "funding history longer than the paging bound",
-            body: format!("{} entries read and more remain", out.len()),
-        })
+        time_paged_history(
+            since_ms,
+            |from| {
+                let query =
+                    format!("symbol={symbol}&incomeType=FUNDING_FEE&startTime={from}&limit={PAGE}");
+                let body = self.get_signed(self.dialect.wire().income, &query)?;
+                let page = parse_funding_income(&body, symbol)?;
+                let full = crate::json::objects(&body).len() >= PAGE;
+                Ok((page, full))
+            },
+            |line| line.id,
+            |line| line.time_ms,
+        )
+        .map(Some)
     }
 
     fn funding_rates(
@@ -1553,13 +1540,21 @@ impl crate::account::Account for Binance {
         symbol: &str,
         since_ms: i64,
     ) -> Result<Option<Vec<crate::account::SettledRate>>, VenueError> {
-        // A thousand settlements is most of a year at eight hours; a run
-        // asks about the ones since it started.
-        let body = self.get_public(
-            self.dialect.wire().funding_rate,
-            &format!("symbol={symbol}&startTime={since_ms}&limit=1000"),
-        )?;
-        parse_funding_rates(&body).map(Some)
+        time_paged_history(
+            since_ms,
+            |from| {
+                let body = self.get_public(
+                    self.dialect.wire().funding_rate,
+                    &format!("symbol={symbol}&startTime={from}&limit=1000"),
+                )?;
+                let page = parse_funding_rates(&body)?;
+                let full = crate::json::objects(&body).len() >= 1000;
+                Ok((page, full))
+            },
+            |rate| rate.time_ms,
+            |rate| rate.time_ms,
+        )
+        .map(Some)
     }
 
     fn next_funding_ms(&self, symbol: &str) -> Result<Option<i64>, VenueError> {
@@ -1711,6 +1706,160 @@ fn cash_of(text: &str) -> Option<oq_types::Cash> {
     let digits = format!("{}{frac:0<8}", whole.trim_start_matches(['-', '+']));
     let v: i64 = digits.parse().ok()?;
     Some(oq_types::Cash(if negative { -v } else { v }))
+}
+
+/// Inclusive-time pagination: retain boundary rows, deduplicate by stable
+/// identity and never return a plausible prefix when a full page stalls.
+fn time_paged_history<T: PartialEq>(
+    since_ms: i64,
+    mut fetch: impl FnMut(i64) -> Result<(Vec<T>, bool), VenueError>,
+    id: impl Fn(&T) -> i64,
+    time: impl Fn(&T) -> i64,
+) -> Result<Vec<T>, VenueError> {
+    const MAX_PAGES: usize = 50;
+    let mut out = std::collections::BTreeMap::<i64, T>::new();
+    let mut from = since_ms;
+    for _ in 0..MAX_PAGES {
+        let (rows, full) = fetch(from)?;
+        let last = rows.iter().map(&time).max();
+        for row in rows {
+            let key = id(&row);
+            if time(&row) < from {
+                return Err(VenueError::Malformed {
+                    what: "history ignored the requested lower bound",
+                    body: key.to_string(),
+                });
+            }
+            if out.get(&key).is_some_and(|prior| *prior != row) {
+                return Err(VenueError::Malformed {
+                    what: "history identity has conflicting evidence",
+                    body: key.to_string(),
+                });
+            }
+            out.insert(key, row);
+        }
+        if !full {
+            let mut rows: Vec<_> = out.into_values().collect();
+            rows.sort_by_key(|row| (time(row), id(row)));
+            return Ok(rows);
+        }
+        let Some(last) = last.filter(|last| *last > from) else {
+            return Err(VenueError::Malformed {
+                what: "full history page cannot advance without losing boundary rows",
+                body: from.to_string(),
+            });
+        };
+        from = last;
+    }
+    Err(VenueError::Malformed {
+        what: "history longer than the paging bound",
+        body: format!("{} identities read and more remain", out.len()),
+    })
+}
+
+#[cfg(test)]
+mod history_paging_tests {
+    use super::*;
+
+    #[test]
+    fn inclusive_boundary_preserves_distinct_same_time_ids_and_deduplicates_overlap() {
+        let mut pages = [
+            (vec![(1, 10, 5), (2, 20, 6)], true),
+            (vec![(2, 20, 6), (3, 20, 7), (4, 30, 8)], true),
+            (vec![(4, 30, 8)], false),
+        ]
+        .into_iter();
+        let mut starts = Vec::new();
+        let result = time_paged_history(
+            0,
+            |from| {
+                starts.push(from);
+                Ok(pages.next().unwrap())
+            },
+            |row| row.0,
+            |row| row.1,
+        )
+        .unwrap();
+        assert_eq!(starts, vec![0, 20, 30]);
+        assert_eq!(result, vec![(1, 10, 5), (2, 20, 6), (3, 20, 7), (4, 30, 8)]);
+    }
+
+    #[test]
+    fn a_full_boundary_page_cannot_be_claimed_complete_or_skipped() {
+        let mut requests = 0;
+        let result = time_paged_history(
+            10,
+            |_| {
+                requests += 1;
+                Ok((vec![(1, 10)], true))
+            },
+            |row| row.0,
+            |row| row.1,
+        );
+        assert!(matches!(
+            result,
+            Err(VenueError::Malformed {
+                what: "full history page cannot advance without losing boundary rows",
+                ..
+            })
+        ));
+        assert_eq!(requests, 1);
+    }
+
+    #[test]
+    fn conflicting_stable_ids_and_ignored_ranges_are_refused() {
+        let mut pages = [
+            (vec![(1, 10, 5), (2, 20, 6)], true),
+            (vec![(2, 20, 7)], false),
+        ]
+        .into_iter();
+        assert!(
+            time_paged_history(0, |_| Ok(pages.next().unwrap()), |row| row.0, |row| row.1).is_err()
+        );
+        assert!(
+            time_paged_history(20, |_| Ok((vec![(1, 19)], false)), |row| row.0, |row| row.1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn page_bound_and_request_failure_never_return_an_accumulated_prefix() {
+        let mut requests = 0;
+        let result = time_paged_history(
+            0,
+            |from| {
+                requests += 1;
+                Ok((vec![(from + 1, from + 1)], true))
+            },
+            |row| row.0,
+            |row| row.1,
+        );
+        assert!(matches!(
+            result,
+            Err(VenueError::Malformed {
+                what: "history longer than the paging bound",
+                ..
+            })
+        ));
+        assert_eq!(requests, 50);
+        let mut first = true;
+        let result = time_paged_history(
+            0,
+            |_| {
+                if std::mem::take(&mut first) {
+                    Ok((vec![(1, 10)], true))
+                } else {
+                    Err(VenueError::Malformed {
+                        what: "fixture failure",
+                        body: String::new(),
+                    })
+                }
+            },
+            |row| row.0,
+            |row| row.1,
+        );
+        assert!(result.is_err());
+    }
 }
 
 /// `FUNDING_FEE` lines for one symbol out of an income page.
