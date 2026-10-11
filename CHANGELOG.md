@@ -31,7 +31,7 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
-- **Warm-up research evidence has immutable lineage.**
+- ([#380](https://github.com/openquanter/openquanter/pull/380)) **Warm-up research evidence has immutable lineage.**
   `oq_parity::research::warmup_study` binds the actual consumed tick slice,
   code commit, common-window parameters and explicit constructor policy to
   a `RunManifest`. Every constructed path, including the reference and
@@ -40,7 +40,7 @@ publishes it verbatim, and refuses a tag without one.
   attachments link the exact as-of ledger and checksum the result body.
   Changed inputs/configuration, unknown-code baselines, foreign ledgers and
   malformed or altered attachments refuse verification.
-- **Warm-up sensitivity compares features and decisions on a common window.**
+- ([#379](https://github.com/openquanter/openquanter/pull/379)) **Warm-up sensitivity compares features and decisions on a common window.**
   `oq_features::warmup::sensitivity` creates fresh paths for distinct history
   lengths, feeds history separately, and compares each shorter path with
   the longest only on a declared evaluation interval. Existing feature
@@ -48,7 +48,7 @@ publishes it verbatim, and refuses a tag without one.
   and defined decision changes are measured separately. Numeric tolerance
   cannot override changed decisions or incomplete measurements. Unavailable
   history, duplicate lengths, empty windows and invalid tolerance refuse.
-- **Live position checks require an explicit fresh read cut.** Optional
+- ([#378](https://github.com/openquanter/openquanter/pull/378)) **Live position checks require an explicit fresh read cut.** Optional
   `Account::positions_observed` carries client request/receipt boundaries
   and every expected leg, including explicit flat rows. Startup and periodic
   checks reject incomplete, foreign, stale/future, invalid or wrong-mode
@@ -57,7 +57,7 @@ publishes it verbatim, and refuses a tag without one.
   Reconnection schedules the same checked comparison instead of overwriting
   the risk view. Resume requires a positive cut no older than five seconds
   from the same revision; otherwise a new checked read is requested.
-- **Final live residuals require independently covered native economics.**
+- ([#377](https://github.com/openquanter/openquanter/pull/377)) **Final live residuals require independently covered native economics.**
   After the last funding/fee recovery, the host verifies and persists closed
   histories when `--account-scope-hash SHA256` (or the environment equivalent)
   is established. Native net P&L must agree with Books; shadow initial
@@ -68,7 +68,7 @@ publishes it verbatim, and refuses a tag without one.
   incomplete until final coverage. Covered attribution binds source identity
   and effective model seed/config; a synthetic non-zero P&L gap tests a
   measured zero residual without substituting a component sum for actual P&L.
-- **Coverage histories can be captured and replayed offline.**
+- ([#376](https://github.com/openquanter/openquanter/pull/376)) **Coverage histories can be captured and replayed offline.**
   `ledger::capture_history` queries both bounded sources for the native
   ledger boundary and verifies them against one immutable journal snapshot.
   Strict versioned evidence text persists original rows, account scope,
@@ -78,7 +78,7 @@ publishes it verbatim, and refuses a tag without one.
   Malformed, stale, mismatched or unsupported evidence fails closed. Native
   manifest verification remains distinct from the coverage manifest. This
   does not supply historical model inventory or a G12 residual.
-- **Account history can certify a fixed recent interval.** New optional
+- ([#375](https://github.com/openquanter/openquanter/pull/375)) **Account history can certify a fixed recent interval.** New optional
   `execution_fees_between` / `funding_charged_between` return `BoundedHistory`
   with exact symbol, bounds and observation time. Binance pins `endTime` on
   every inclusive-time page and conservatively supports only intervals in
@@ -88,7 +88,7 @@ publishes it verbatim, and refuses a tag without one.
   consumers attach an externally established scope with `HistoryWindow::from_bounded`.
   Responses describe what the source reported at observation, not finality
   against future venue corrections or a G12 residual.
-- **Closed-window native fee/funding coverage is checked by exact identity.**
+- ([#374](https://github.com/openquanter/openquanter/pull/374)) **Closed-window native fee/funding coverage is checked by exact identity.**
   `ledger::replay_with_history` binds independent `HistoryWindow` evidence
   to the same immutable journal snapshot, requiring explicit account scope,
   retention/pagination completeness, interval and freshness. Missing,
@@ -98,14 +98,14 @@ publishes it verbatim, and refuses a tag without one.
   Producers must establish source completeness externally: legacy history
   vectors and the plain ledger CLI do not make that assertion. Model
   reconstruction and a G12 numeric residual remain independent requirements.
-- **Shadow fee attribution requires a stated model policy.** An absent
+- ([#373](https://github.com/openquanter/openquanter/pull/373)) **Shadow fee attribution requires a stated model policy.** An absent
   policy or stale model total leaves the fee component unavailable and
   prevents a numeric residual. `oq-trade --model-maker-fee-ppm N
   --model-taker-fee-ppm N` states both signed rates; explicit zero and maker
   rebates are supported. Library hosts supply `Environment::model_fees`.
   The effective policy, warm-up length and window join the run config hash.
   A stated policy does not prove venue fee-history coverage.
-- **Native ledger reports bind code, journal bytes and effective context.**
+- ([#372](https://github.com/openquanter/openquanter/pull/372)) **Native ledger reports bind code, journal bytes and effective context.**
   `oq-replay --ledger` reuses `RunManifest`: SHA-256 covers the same immutable
   reader snapshot decoded by replay, and the config hash covers scope plus
   the actual `LEDGER_START` context. `--write-manifest FILE` creates a strict
@@ -114,7 +114,7 @@ publishes it verbatim, and refuses a tag without one.
   change is named separately. Code comes from build-time `GIT_COMMIT` or
   `GITHUB_SHA`; absent metadata remains `unknown`. Matching identity is not
   evidence of fee/funding coverage or G12 success.
-- **Live missing commissions recover at their receive boundary.** Books
+- ([#371](https://github.com/openquanter/openquanter/pull/371)) **Live missing commissions recover at their receive boundary.** Books
   validate the complete pending fill, debit a charge or credit a rebate
   exactly once, and retain fee uncertainty until the remaining accepted
   unknown-fee cohort is empty. Altered/priced fills and conflicting recovery
@@ -124,7 +124,7 @@ publishes it verbatim, and refuses a tag without one.
   from the live record-kind namespace) changes cash/fees, not inventory or
   execution count. Historical risk/cash curves are not backdated and this
   cohort status is not account-history coverage proof.
-- **Original commission history enriches unknown-fee native accounting.**
+- ([#370](https://github.com/openquanter/openquanter/pull/370)) **Original commission history enriches unknown-fee native accounting.**
   `Account::execution_fees` returns per-trade settlement-currency evidence
   or unsupported, never a fabricated zero. The Binance adapter uses paged
   account trades and validates symbol, asset, side and stable identity.
@@ -136,7 +136,7 @@ publishes it verbatim, and refuses a tag without one.
   then recomputes final recorded fees without booking a second execution.
   This does not backdate a live risk adjustment, reconstruct a cash curve,
   repair strategy parity or certify full account-history coverage.
-- **Funding uncertainty survives in the journal.** Additive `FUNDING_STATE`
+- ([#369](https://github.com/openquanter/openquanter/pull/369)) **Funding uncertainty survives in the journal.** Additive `FUNDING_STATE`
   (16) records changed pending timestamps, open/closed schedule gaps and
   uncertainty reasons, even when no cash was booked. Native replay rejects
   a pending obligation disappearing without its settlement, erased/rewritten
@@ -146,7 +146,7 @@ publishes it verbatim, and refuses a tag without one.
   from recorded gaps; an empty pending list is still not coverage proof.
   Schedule gaps now begin at discovery loss itself, including same-instant
   rediscovery, without a one-millisecond future boundary.
-- **Confirmed funding during unknown schedules can recover venue cash.**
+- ([#368](https://github.com/openquanter/openquanter/pull/368)) **Confirmed funding during unknown schedules can recover venue cash.**
   The host keeps polling recorded schedule gaps even after rediscovery,
   reads ledger rows independently of rate availability, and books unseen
   identities inside those gaps without inventing historical model positions
@@ -155,7 +155,7 @@ publishes it verbatim, and refuses a tag without one.
   (15) persists receive time, queried time range and original rows. Ledger
   replay checks ranges and shared identities and reports unmodelled lines;
   attribution and complete funding coverage remain unavailable.
-- **Funding journals retain original venue ledger identities.** Additive
+- ([#367](https://github.com/openquanter/openquanter/pull/367)) **Funding journals retain original venue ledger identities.** Additive
   `FUNDING_EVIDENCE` (14) stores each `(id, time_ms, amount)` line beside the
   settlement's rate, mark, venue/model totals and verification result.
   Native ledger replay checks exact line totals, settlement-window placement
@@ -163,7 +163,7 @@ publishes it verbatim, and refuses a tag without one.
   line count. Legacy `FUNDING` (11) remains readable without invented IDs.
   Identity evidence is not proof that every historical settlement was read;
   `--require-coverage` still refuses unverified funding coverage.
-- **Funding history pagination refuses an incomplete prefix.** Binance
+- ([#366](https://github.com/openquanter/openquanter/pull/366)) **Funding history pagination refuses an incomplete prefix.** Binance
   funding ledger and rate history use a bounded inclusive-time walk with
   stable-identity deduplication and conflict detection. A full page that
   cannot advance is an error, not completion; the boundary is never skipped
@@ -171,14 +171,14 @@ publishes it verbatim, and refuses a tag without one.
   Rate history continues beyond its former single 1,000-row page. Request
   failure and the 50-page bound return no accumulated prefix as success.
   This protects reads, not proof of venue retention or persisted coverage.
-- **Funding schedule discovery retries after a temporary failure.** The
+- ([#365](https://github.com/openquanter/openquanter/pull/365)) **Funding schedule discovery retries after a temporary failure.** The
   host's 60-second funding poll retries missing next-settlement discovery
   even when no settlement is pending. The deterministic watch records
   unknown schedule intervals at injected times, refuses stale answers and
   resumes future settlement capture without extrapolating an interval.
   Rediscovery does not certify the past gap or repair attribution; history
   backfill and persisted coverage are still required for that.
-- **Unanswered funding settlements remain recoverable after 30 minutes.**
+- ([#364](https://github.com/openquanter/openquanter/pull/364)) **Unanswered funding settlements remain recoverable after 30 minutes.**
   They become overdue, remain in the request range and expose their
   unresolved timestamps instead of disappearing from the booking queue.
   Late rate/ledger evidence can resolve them; elapsed time alone does not
@@ -188,7 +188,7 @@ publishes it verbatim, and refuses a tag without one.
   when model attribution is already untrusted. This is in-process recovery;
   schedule rediscovery, persisted pagination/coverage and unknown historical
   model positions still require separate evidence.
-- **Live shadow starts from the observed inventory and position mode.**
+- ([#363](https://github.com/openquanter/openquanter/pull/363)) **Live shadow starts from the observed inventory and position mode.**
   The live runner supplies the same adopted sizes and entry bases to books
   and shadow, including both hedge legs. Initial inventory is a boundary
   condition, not a model fill: it creates no execution evidence, fee,
@@ -197,7 +197,7 @@ publishes it verbatim, and refuses a tag without one.
   Subsequent model closes realize against the adopted basis. This does not
   recover pre-session P&L, commissions or funding, or prove restart strategy
   parity; those remain separate evidence requirements.
-- **L2 invalid intervals suspend execution until a snapshot.** Capture gaps
+- ([#362](https://github.com/openquanter/openquanter/pull/362)) **L2 invalid intervals suspend execution until a snapshot.** Capture gaps
   reach the matcher as observations; refused depth also invalidates the
   stale book. Existing orders survive, already-executed delayed responses
   still release, and recovery skips the first potentially mixed bar rather
@@ -210,7 +210,7 @@ publishes it verbatim, and refuses a tag without one.
   suspended ticks. Legacy `oq-tiers` empty bootstrap remains explicitly
   approximate; it does not recreate a book after a gap. Capture does not
   automatically fetch or archive REST snapshots.
-- **L2 queue entry is sampled at exchange arrival (matching semantics).**
+- ([#361](https://github.com/openquanter/openquanter/pull/361)) **L2 queue entry is sampled at exchange arrival (matching semantics).**
   The last book state before a later depth event seals the due reading;
   market depth at the exact same timestamp has priority before sampling.
   The first aggregated bar that may contain pre-arrival volume cannot
@@ -221,7 +221,7 @@ publishes it verbatim, and refuses a tag without one.
   later update, the queue remains 100; three post-arrival traded lots no
   longer clear it. This is conservative observation-boundary matching, not
   a claim of continuous-time exchange execution between captured events.
-- **Live accounting evidence is independently replayable (additive journal
+- ([#360](https://github.com/openquanter/openquanter/pull/360)) **Live accounting evidence is independently replayable (additive journal
   schema).** Live record kinds `EXECUTION` (12) and `LEDGER_START` (13) retain
   complete venue fills/fee provenance and the actual initial balance, mode,
   instrument grid and cash multiplier. Existing kinds and payloads are not
@@ -234,7 +234,7 @@ publishes it verbatim, and refuses a tag without one.
   Funding amounts alone do not establish coverage, and the report does not
   certify strategy/margin replay or all account cash flows. Old journals need
   independently identified enrichment, not invented zero fees or balances.
-- **Live books do not synthesize liquidation or insurance transfers.**
+- ([#360](https://github.com/openquanter/openquanter/pull/360)) **Live books do not synthesize liquidation or insurance transfers.**
   The venue is authoritative; risk projections remain in the shadow/risk
   path. Synthetic parity: adopting 5 long lots at 100 on cash 10 (one cash
   unit per tick-lot), before the first mark, previously cleared the position
@@ -242,7 +242,7 @@ publishes it verbatim, and refuses a tag without one.
   position and cash. A mark of 1 still cannot clear it. A confirmed close
   of 5 at 1 records −495 realized; any venue insurance/capital adjustment
   requires its own evidence. Simulated kernel/margin behavior is unchanged.
-- **Entry cost is independent of the displayed price tick (ledger and
+- ([#358](https://github.com/openquanter/openquanter/pull/358)) **Entry cost is independent of the displayed price tick (ledger and
   margin semantics).** Each leg retains its quote cost in wide fixed-point
   arithmetic. Partial-close P&L is truncated at cash precision, with the
   residual carried to final flattening; adding a fill and crossing through
@@ -269,7 +269,7 @@ publishes it verbatim, and refuses a tag without one.
   to 20908.09 and −30302.17. The maintainer explicitly confirmed all three
   golden updates. Assertions retain exact cash equality; no tolerance was
   loosened.
-- **Liquidation settles at the bankruptcy price (margin semantics).**
+- ([#351](https://github.com/openquanter/openquanter/pull/351)) **Liquidation settles at the bankruptcy price (margin semantics).**
   A liquidated account used to be closed at the mark and handed back
   whatever was left — its remaining maintenance margin, a free
   liquidation no perpetual venue offers. It now ends at zero: the
@@ -296,21 +296,21 @@ publishes it verbatim, and refuses a tag without one.
   `margin_fidelity`, the windows that closed the account return
   −100.00%, not −96.23%; the 5th percentile is −100.00%, not −97.71%;
   the mean gap 209.97%, not 208.83%.
-- **The fidelity report compares tiers by their conclusion, not their
+- ([#350](https://github.com/openquanter/openquanter/pull/350)) **The fidelity report compares tiers by their conclusion, not their
   fill count.** `TierDivergence::compare` takes the same strategy run at
   several tiers and reports each one's total return and Sharpe ratio;
   `FidelityReport::with_tiers` attaches it and `tiers_invalidate` is
   true when the most faithful tier turns a gain into a loss or a
   positive Sharpe ratio into a non-positive one. A report without a
   comparison says so. `oq-tiers` and `book_tiers` print it.
-- **A maker winner's adverse selection gates the sweep.** The sweep
+- ([#349](https://github.com/openquanter/openquanter/pull/349)) **A maker winner's adverse selection gates the sweep.** The sweep
   marks out the best configuration's fills (`oq_backtest::adverse`,
   the same measurement as `oq-parity markout`) and, when at least half
   are maker fills, refuses it if the mean maker markout at any of 1, 10
   and 60 s is below zero, or if a horizon has fewer than 30 maker fills
   to measure. `Thresholds` gains `adverse`; the sweep file gains
   `adverse-thresholds` and `adverse` lines.
-- **A sweep's deflated Sharpe ratio counts the whole search, not one
+- ([#348](https://github.com/openquanter/openquanter/pull/348)) **A sweep's deflated Sharpe ratio counts the whole search, not one
   sweep.** `sweep` takes a `TrialRegistry` and records every candidate
   into it, including the ones that produced too few returns to score;
   the best configuration is deflated by everything the registry holds.
@@ -323,13 +323,13 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Fixed
 
-- Live shadow evidence now receives only fills accepted by the authoritative
+- ([#359](https://github.com/openquanter/openquanter/pull/359)) Live shadow evidence now receives only fills accepted by the authoritative
   books. Recovered-then-stream redeliveries, stale trade identities and
   unidentifiable reports no longer add surplus venue rows to run exports.
   Distinct partial fills and both sides of a shared trade identity remain
   observable, including maker rebates. Legacy exports with surplus rows
   require rebuilding from accepted journal fills under a new manifest.
-- `oq-tiers` printed final equity divided by 100 instead of the
+- ([#350](https://github.com/openquanter/openquanter/pull/350)) `oq-tiers` printed final equity divided by 100 instead of the
   fixed-point scale, a factor of a million too large.
 
 ## 2.0.0 — 2026-10-01

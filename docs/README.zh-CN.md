@@ -6,6 +6,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [v2.0.1 发布说明](releases/v2.0.1.zh-CN.md) · [English](releases/v2.0.1.md) | 按版本提供的完整发布说明 |
 | [**为什么有 OpenQuanter**](WHY.zh-CN.md) · [English](WHY.md) | **定位、目标人群、前身实盘多年撞到的墙、远景，以及现在到哪了** |
 | [快速上手](QUICKSTART.zh-CN.md) · [English](QUICKSTART.md) | 从克隆到跑通回测、三个示例、如何写自己的策略 |
 | [版本规则](VERSIONING.zh-CN.md) · [English](VERSIONING.md) | 全工作区一个版本、为什么从 2 开始、每个阶段承诺什么 |

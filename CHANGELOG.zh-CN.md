@@ -24,121 +24,121 @@
 
 ### 变更
 
-- **warm-up 研究证据具备不可变关联。** `oq_parity::research::warmup_study` 将实际消费
+- ([#380](https://github.com/openquanter/openquanter/pull/380)) **warm-up 研究证据具备不可变关联。** `oq_parity::research::warmup_study` 将实际消费
   的 tick 切片、代码 commit、公共窗口参数及明确构造策略绑定至 `RunManifest`。每个
   已构造路径（含参考及已启动后失败的路径）均作为 unscored 追加到问题/采样 basis
   相容的累计 `TrialRegistry`。版本化附件关联精确 as-of ledger 并校验结果正文。
   输入/配置改变、未知代码基线、外来 ledger、格式错误或被修改的附件均拒绝验证。
-- **warm-up 敏感性在公共窗口比较指标和决策。** `oq_features::warmup::sensitivity`
+- ([#379](https://github.com/openquanter/openquanter/pull/379)) **warm-up 敏感性在公共窗口比较指标和决策。** `oq_features::warmup::sensitivity`
   为不同历史长度创建新路径，单独输入历史，仅在声明的评估区间将较短路径与最长路径
   比较。复用已有指标 consistency，分别统计 undefined/非有限指标、undefined 决策及
   已定义决策变化。数字容差不能覆盖决策变化或不完整测量；历史不足、重复长度、空窗口
   及非法容差均拒绝。
-- **live 仓位检查要求明确且新鲜的读取边界。** 可选 `Account::positions_observed`
+- ([#378](https://github.com/openquanter/openquanter/pull/378)) **live 仓位检查要求明确且新鲜的读取边界。** 可选 `Account::positions_observed`
   携带客户端请求/接收边界及全部预期仓位腿，含明确空仓行。启动及周期检查拒绝不完整、
   外来、过期/未来、非法或模式不符的观测；本地成交 revision 变化使边界失效。
   hedge 一致性按腿判定，净仓相同不能授权 resume。重连调度同一条 checked 比较，
   不覆盖 risk view。resume 要求同 revision、从请求起不超过五秒的正向比较结果；
   否则请求新的 checked read。
-- **最终 live 残差要求独立覆盖的原生经济记录。** 最后一次资金费/手续费恢复后，host
+- ([#377](https://github.com/openquanter/openquanter/pull/377)) **最终 live 残差要求独立覆盖的原生经济记录。** 最后一次资金费/手续费恢复后，host
   在建立 `--account-scope-hash SHA256`（或 environment 对应配置）时核验并保存闭区间
   历史。原生净盈亏须与 Books 相符；shadow 初始合约、余额、模式、仓位腿及规范交易所
   成交集合也须相符。模型资金费要求义务已知、原始结算已验证且独立合计仍有效。未知
   费率、缺口、来源失败或附件失败均不输出数值残差；运行中报告在最终覆盖前保持不完整。
   覆盖归因绑定来源身份及有效模型初态/配置；合成的非零盈亏差额测试可测得零残差，
   不用分量之和替代实际盈亏。
-- **覆盖历史可捕获并离线重放。** `ledger::capture_history` 从原生账本边界查询两个
+- ([#376](https://github.com/openquanter/openquanter/pull/376)) **覆盖历史可捕获并离线重放。** `ledger::capture_history` 从原生账本边界查询两个
   bounded 来源，并针对同一份不可变 journal 快照验证。严格版本化证据文本持久化
   原始行、账户 scope、来源边界/观测时刻及评估策略；exclusive 创建拒绝覆盖。
   `oq-replay --ledger --coverage-evidence FILE` 核验这些历史，可满足声明区间的
   `--require-coverage`。格式错误、过期、不匹配或不支持的证据均拒绝。原生 manifest
   验证与覆盖 manifest 仍独立；这不补充历史模型仓位，也不提供 G12 残差。
-- **账户历史可明确固定的近期区间。** 新增可选 `execution_fees_between` /
+- ([#375](https://github.com/openquanter/openquanter/pull/375)) **账户历史可明确固定的近期区间。** 新增可选 `execution_fees_between` /
   `funding_charged_between` 返回 `BoundedHistory`，保留精确 symbol、边界及观测时刻。
   Binance 每个 inclusive-time 分页均固定 `endTime`，保守地仅支持最近七天内的区间；
   非法/过旧/未来范围、停滞/超限分页、忽略边界及不可读/外来行均失败，不返回成功前缀。
   共用 wire 的 dialect 不继承该保留期声明。live 覆盖调用方通过
   `HistoryWindow::from_bounded` 附加外部建立的 scope。响应描述来源在观测时的报告，
   不承诺交易所未来不会修订，也不提供 G12 残差。
-- **原生费用/资金费闭区间覆盖按完整身份集合核验。** `ledger::replay_with_history`
+- ([#374](https://github.com/openquanter/openquanter/pull/374)) **原生费用/资金费闭区间覆盖按完整身份集合核验。** `ledger::replay_with_history`
   将独立 `HistoryWindow` 证据绑定至同一份不可变 journal 快照，要求明确账户 scope、
   保留期/分页完整性、区间及新鲜度。缺失、多余、冲突及时间戳/金额不符的行拒绝覆盖；
   legacy 资金费合计及未知手续费仍不足。覆盖有独立 manifest，包含来源行及边界。
   producer 必须在外部建立来源完整性；旧历史 vector 接口及普通账本 CLI 不自动作出
   该声明。模型重建及 G12 数值残差仍须独立满足。
-- **Shadow 费用归因要求明确声明模型费率。** 未声明费率或模型合计过期时，费用分量
+- ([#373](https://github.com/openquanter/openquanter/pull/373)) **Shadow 费用归因要求明确声明模型费率。** 未声明费率或模型合计过期时，费用分量
   保持不可用，不输出数值残差。`oq-trade --model-maker-fee-ppm N
   --model-taker-fee-ppm N` 声明两个有符号费率，支持显式零及 maker 返佣。库调用方
   通过 `Environment::model_fees` 提供配置。有效费率、warm-up 长度及窗口共同进入
   run 配置 hash。声明模型费率不证明交易所费用历史覆盖。
-- **原生账本报告绑定代码、journal 字节和有效上下文。** `oq-replay --ledger` 复用
+- ([#372](https://github.com/openquanter/openquanter/pull/372)) **原生账本报告绑定代码、journal 字节和有效上下文。** `oq-replay --ledger` 复用
   `RunManifest`：SHA-256 覆盖重放实际解码的同一份 Reader 不可变快照，配置 hash 覆盖
   scope 与实际 `LEDGER_START` 上下文。`--write-manifest FILE` 创建严格版本化 sidecar，
   不覆盖已有文件；`--verify-manifest FILE` 拒绝数据/上下文变化及未知代码身份。仅
   已知代码改变会单独标示。代码来自构建时 `GIT_COMMIT` 或 `GITHUB_SHA`；缺失元数据
   保持 `unknown`。身份匹配不证明费用/资金费覆盖，也不证明 G12 成功。
-- **实盘未知手续费在接收边界恢复。** Books 验证完整待补 fill，扣除费用或入账返佣
+- ([#371](https://github.com/openquanter/openquanter/pull/371)) **实盘未知手续费在接收边界恢复。** Books 验证完整待补 fill，扣除费用或入账返佣
   一次，直到已接收的未知费 cohort 全部补齐前仍保留费用不确定性。改动/已定价 fill
   及冲突恢复被拒绝；报告零仍是证据。host 在费用 pending 时每 60 秒轮询，run 结束
   再读一次，仅把新恢复记为 `FEE_EVIDENCE`。追加 core `FeeRecovered`（14，与 live
   record-kind 命名空间独立）只改变现金/费用，不改变库存或成交次数。历史风控/现金
   曲线不回溯改写，cohort 状态不证明完整账户历史覆盖。
-- **原始手续费历史可补齐原生记账中的未知费。** `Account::execution_fees` 返回逐
+- ([#370](https://github.com/openquanter/openquanter/pull/370)) **原始手续费历史可补齐原生记账中的未知费。** `Account::execution_fees` 返回逐
   成交结算币种证据或不支持，不伪造零。Binance adapter 使用分页账户成交，验证 symbol、
   资产、方向和稳定身份。run 结束时按 trade ID 与方向绑定已接收的未知费成交；稳定
   重送去重，冲突拒绝补齐，未匹配费用仍未知。追加 `FEE_EVIDENCE`（17），保留完整
   原始 fill 和报告金额。原生账本拒绝改动/无前序 fill、重复恢复、覆盖已知费及未来
   证据，然后重算最终记录费用，不重复入账成交。这不回溯修改 live 风控、不重建现金
   曲线、不修复策略 parity，也不证明全部账户历史覆盖。
-- **资金费不确定性保留在 journal。** 追加 `FUNDING_STATE`（16），即使没有现金入账，
+- ([#369](https://github.com/openquanter/openquanter/pull/369)) **资金费不确定性保留在 journal。** 追加 `FUNDING_STATE`（16），即使没有现金入账，
   仍记录变更的 pending 时间戳、开放/关闭调度缺口及不确定原因。原生重放拒绝没有对应
   结算就消失的 pending、擦除/改写缺口历史、静默清除不确定性和非法边界。最后状态
   写入中断时，已记录结算仍可解除其 pending 时间戳。CLI 区分未记录的旧义务与已记录
   缺口；pending 为空仍不证明覆盖。调度缺口从发现失败本身开始，包含同瞬间重新发现，
   不再人为引入未来一毫秒边界。
-- **未知调度期间的确认资金费可恢复交易所现金。** host 在重新发现后仍轮询已记录
+- ([#368](https://github.com/openquanter/openquanter/pull/368)) **未知调度期间的确认资金费可恢复交易所现金。** host 在重新发现后仍轮询已记录
   调度缺口，独立于费率可用性读取账单，并将缺口内未见身份入账，不伪造历史模型
   仓位或零模型费用。已知 pending 结算保留其库存快照，不被恢复路径抢走。追加
   `FUNDING_RECOVERED`（15），持久化接收时刻、查询时间范围及原始行。账本重放检查
   范围和共享身份，并报告未建模行；归因和完整资金费覆盖仍不可用。
-- **资金费 journal 保留交易所原始账单身份。** 追加 `FUNDING_EVIDENCE`（14），在结算
+- ([#367](https://github.com/openquanter/openquanter/pull/367)) **资金费 journal 保留交易所原始账单身份。** 追加 `FUNDING_EVIDENCE`（14），在结算
   费率、mark、venue/model 合计和验证结果之外记录每条 `(id, time_ms, amount)` 行。
   原生账本重放检查精确行合计、结算窗口位置及跨结算重复身份，并打印已识别行数。
   旧 `FUNDING`（11）仍可读取，不伪造 ID。身份证据不证明读到了全部历史结算；
   `--require-coverage` 仍拒绝未验证资金费覆盖。
-- **资金费历史分页拒绝把不完整前缀当作成功。** Binance 资金费账单和费率历史使用
+- ([#366](https://github.com/openquanter/openquanter/pull/366)) **资金费历史分页拒绝把不完整前缀当作成功。** Binance 资金费账单和费率历史使用
   有界、包含时间边界的分页，按稳定身份去重并检测冲突。满页无法前进时报错，不算
   完成；不通过加一毫秒跳过边界，以免丢失另一 hedge 腿。费率历史不再局限于单页
   1,000 行。请求失败或达到 50 页上限时，不把累积前缀返回为成功。这保护读取过程，
   不证明交易所历史保留完整，也不构成持久化覆盖证据。
-- **资金费调度发现临时失败后会重试。** 即使没有 pending 结算，host 的 60 秒资金费
+- ([#365](https://github.com/openquanter/openquanter/pull/365)) **资金费调度发现临时失败后会重试。** 即使没有 pending 结算，host 的 60 秒资金费
   轮询仍重试缺失的下一结算调度。确定性 watch 按注入时间记录未知调度区间，拒绝过时
   答复，并恢复未来结算捕获，不外推间隔。重新发现不能证明过去缺口完整或自动修复
   归因；这些仍须历史补取与持久化覆盖证据。
-- **未答复的资金费结算在 30 分钟后仍可恢复。** 它们标为 overdue，保留在补取范围，
+- ([#364](https://github.com/openquanter/openquanter/pull/364)) **未答复的资金费结算在 30 分钟后仍可恢复。** 它们标为 overdue，保留在补取范围，
   暴露未解时间戳，不再从入账队列消失。晚到的费率/账单可解答；仅时间流逝不能证明
   零费用。资金费历史按稳定账单 ID 去重，拒绝冲突行，并防止重叠结算窗口重复入账
   同一 ID。模型归因已不可信时，确认的交易所现金仍可入账。这是进程内恢复；重新
   发现调度、持久化分页/覆盖证明和未知历史模型仓位仍须独立证据。
-- **实盘 shadow 从观测库存和仓位模式启动。** runner 向 books 与 shadow 提供相同的
+- ([#363](https://github.com/openquanter/openquanter/pull/363)) **实盘 shadow 从观测库存和仓位模式启动。** runner 向 books 与 shadow 提供相同的
   接管数量、入场基础，包含 hedge 双腿。初始库存是边界条件，不是模型成交：不生成
   成交证据、手续费、已实现结果，也不按尚未观测的 mark 清算。非法基础、非正数量、
   重复腿、one-way 模式双腿均拒绝。后续模型平仓使用接管基础计算已实现结果。这不
   恢复会话前 P&L、手续费或资金费，也不证明重启策略 parity；这些仍须独立证据。
-- **L2 无效区间暂停成交，直到快照恢复。** 捕获 gap 以观测传到 matcher；拒绝深度
+- ([#362](https://github.com/openquanter/openquanter/pull/362)) **L2 无效区间暂停成交，直到快照恢复。** 捕获 gap 以观测传到 matcher；拒绝深度
   更新也使陈旧盘口失效。已有订单保留，已执行的延迟响应仍释放；恢复时跳过可能混入
   缺口成交量和极值的首个 bar，不消费缺口成交量，也不跨缺口插值价格路径。排队订单
   保留旧 ahead 与新盘口 ahead 的较大值，MBP 无法恢复历史优先级。`SnapshotAt` 保留
   重连位置；独立 `snapshot` 源及 OKX 原生快照同时传到聚合投影与 matcher；只有 seq
   的捕获标记不提供档位。报告统计显式 gap 和暂停 tick。旧 `oq-tiers` 空盘口 bootstrap
   仍明确是近似，gap 后不会自动重建。捕获程序尚不自动获取或归档 REST 快照。
-- **L2 排队在交易所到达时取样（撮合语义变更）。** 后续深度事件覆盖盘口前，封存已到
+- ([#361](https://github.com/openquanter/openquanter/pull/361)) **L2 排队在交易所到达时取样（撮合语义变更）。** 后续深度事件覆盖盘口前，封存已到
   达订单的最后可用读数；相同时间戳的市场深度事件先于取样。可能含到达前成交量的
   首个聚合 bar 不能消耗新队列。已提供的单边/空快照是已知状态，没快照则使用声明的
   L1 政策，不冒充零 ahead。L1 显式队列读数和冻结 L0 语义不变。合成 parity：提交时
   2 lots、到达时 100、后续更新 1，队列保留 100；到达后成交 3 lots 不再清空它。
   这是保守的观测边界撮合，不宣称捕获事件之间的连续时间交易所执行。
-- **实盘记账证据可独立重放（追加 journal 模式）。** 实盘记录新增 `EXECUTION`（12）
+- ([#360](https://github.com/openquanter/openquanter/pull/360)) **实盘记账证据可独立重放（追加 journal 模式）。** 实盘记录新增 `EXECUTION`（12）
   与 `LEDGER_START`（13），保存完整成交/费用来源及实际起始余额、模式、标的网格和
   现金乘数。既有编号与载荷不改作他用。新成交使用带长度的内核标准 venue-fill 载荷，
   明确零手续费与未知手续费不同。启动明确记录初始持仓，包括已确认 flat。
@@ -146,12 +146,12 @@
   拒绝旧版无费用成交、未知记录、残缺尾部及重复经济事件。资金费金额不等于覆盖证明，
   报告不认证策略/保证金完整重放或账户全部现金流。旧 journal 须补充有独立身份的证据，
   不能虚构零手续费或余额。
-- **实盘账本不合成强平或保险金转移。** 交易所是权威来源，风险投影留在 shadow/风控
+- ([#360](https://github.com/openquanter/openquanter/pull/360)) **实盘账本不合成强平或保险金转移。** 交易所是权威来源，风险投影留在 shadow/风控
   路径。合成 parity：现金 10、每 tick-lot 一现金单位，在首个 mark 前接管 5 lots
   多头 @ 100，旧实现经本地强平清空持仓和余额；现在保留已观测的持仓与现金。mark
   为 1 仍不清空，交易所确认 5 lots @ 1 平仓后记录已实现 −495；保险金或资本调整须
   有对应交易所证据。模拟内核/保证金行为不变。
-- **成本基础独立于显示价格 tick（记账与保证金语义变更）。** 每条腿以宽定点数保留
+- ([#358](https://github.com/openquanter/openquanter/pull/358)) **成本基础独立于显示价格 tick（记账与保证金语义变更）。** 每条腿以宽定点数保留
   报价货币成本。部分平仓只在现金精度截断 P&L，尾差留到最终平仓；加仓与穿越 flat
   不再把取整均价当成成本基础。未实现权益、保证金视图与强平价格使用同一成本。接管
   持仓的精度仍受所提供入场证据限制。内核重放指纹包含精确成本。事件编号与序列化
@@ -171,7 +171,7 @@
   20908.1144 变为 20908.0892，最低权益从 −30302.1412 变为 −30302.1664；引用输出
   同步为 20908.09 与 −30302.17。维护者已明确确认全部三项 golden 更新。断言保持
   现金精确相等，不放宽容差。
-- **强平按破产价结算（保证金语义变更）。** 被强平的账户过去按标记价平仓，并把剩下的
+- ([#351](https://github.com/openquanter/openquanter/pull/351)) **强平按破产价结算（保证金语义变更）。** 被强平的账户过去按标记价平仓，并把剩下的
   钱还回去——也就是它剩余的维持保证金，一次任何永续交易所都不提供的"免费强平"。现在
   它归零：仓位平掉，剩余部分记为被交易所保险基金收走的 `forfeited`（`State::forfeited`、
   `Summary::forfeited`、`Output::Liquidated::forfeited`、`run::Liquidation::forfeited`）；
@@ -187,16 +187,16 @@
   还回足够再开仓的保证金——现在都只被强平一次。`margin_fidelity` 中关掉账户的窗口收益
   是 −100.00% 而不是 −96.23%；第 5 百分位是 −100.00% 而不是 −97.71%；平均差距是
   209.97% 而不是 208.83%。
-- **保真报告按结论而不是成交笔数比较档位。** `TierDivergence::compare` 接收同一策略在
+- ([#350](https://github.com/openquanter/openquanter/pull/350)) **保真报告按结论而不是成交笔数比较档位。** `TierDivergence::compare` 接收同一策略在
   多个档位上的运行，报告各自的总收益与 Sharpe；`FidelityReport::with_tiers` 挂上它，
   当最高保真档位把盈利变成亏损、或把正 Sharpe 变成非正时，`tiers_invalidate` 为真。
   没有做比较的报告会明说。`oq-tiers` 与 `book_tiers` 会打印它。
-- **做市胜出者的逆向选择成为扫描闸门。** 扫描对最优配置的成交做 markout
+- ([#349](https://github.com/openquanter/openquanter/pull/349)) **做市胜出者的逆向选择成为扫描闸门。** 扫描对最优配置的成交做 markout
   （`oq_backtest::adverse`，与 `oq-parity markout` 同一度量）；当至少一半是挂单成交时，
   若 1、10、60 秒任一跨度的平均 maker markout 低于零，或某个跨度可度量的 maker 成交
   不足 30 笔，就拒绝它。`Thresholds` 新增 `adverse`；扫描文件新增 `adverse-thresholds`
   与 `adverse` 两行。
-- **扫描的 deflated Sharpe 按整个搜索计数，而不是一次扫描。** `sweep` 接收一个
+- ([#348](https://github.com/openquanter/openquanter/pull/348)) **扫描的 deflated Sharpe 按整个搜索计数，而不是一次扫描。** `sweep` 接收一个
   `TrialRegistry` 并把每个候选都记进去，包括收益太少、无法打分的那些；最优配置按登记里的
   全部试验 deflate。登记以试验账本的形式持久化（`oq_backtest::ledger`、
   `TrialRegistry::to_ledger`/`from_ledger`），同一问题上的下一次扫描从完整计数开始。
@@ -205,11 +205,11 @@
 
 ### 修复
 
-- 实盘 shadow 证据现只接收权威账本接受的成交。先补回再从 stream 重送的回报、陈旧
+- ([#359](https://github.com/openquanter/openquanter/pull/359)) 实盘 shadow 证据现只接收权威账本接受的成交。先补回再从 stream 重送的回报、陈旧
   成交身份与不可识别回报，不再给 run 导出追加多余交易所成交行。不同身份的部分成交、
   同一成交身份的买卖两侧仍保留，包括 maker 返佣。含多余行的旧导出须从已接受的
   journal 成交重建，并绑定新 manifest。
-- `oq-tiers` 打印最终权益时除以 100 而不是定点刻度，大了一百万倍。
+- ([#350](https://github.com/openquanter/openquanter/pull/350)) `oq-tiers` 打印最终权益时除以 100 而不是定点刻度，大了一百万倍。
 
 ## 2.0.0 — 2026-10-01
 
