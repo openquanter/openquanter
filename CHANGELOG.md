@@ -29,6 +29,14 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Warm-up sensitivity compares features and decisions on a common window.**
+  `oq_features::warmup::sensitivity` creates fresh paths for distinct history
+  lengths, feeds history separately, and compares each shorter path with
+  the longest only on a declared evaluation interval. Existing feature
+  consistency is reused; undefined/non-finite values, undefined decisions
+  and defined decision changes are measured separately. Numeric tolerance
+  cannot override changed decisions or incomplete measurements. Unavailable
+  history, duplicate lengths, empty windows and invalid tolerance refuse.
 - **Live position checks require an explicit fresh read cut.** Optional
   `Account::positions_observed` carries client request/receipt boundaries
   and every expected leg, including explicit flat rows. Startup and periodic

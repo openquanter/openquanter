@@ -53,6 +53,7 @@
 
 pub mod builtin;
 pub mod drift;
+pub mod warmup;
 
 use oq_engine::Tick;
 
