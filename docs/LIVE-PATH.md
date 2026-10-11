@@ -659,5 +659,31 @@ paid-positive/rebate-negative amount and remaining unknown count (three
 8-byte LE integers); it affects cash/fees only. Identity validation belongs
 to the host's pending inventory, and its count describes accepted fills,
 not complete venue history. No past risk/cash curve is rewritten. Restart
-state restoration, complete coverage and manifest-bound evidence remain
-separate work.
+state restoration and complete coverage require separate evidence.
+
+### Identity-bound native ledger reports
+
+```sh
+oq-replay run.oqj --ledger --write-manifest run.ledger-manifest
+oq-replay run.oqj --ledger --verify-manifest run.ledger-manifest
+```
+
+The report reuses `RunManifest` with the method scope `openquanter
+native-ledger manifest v1`. Data hash covers the complete raw snapshot
+held by `Reader`, including frames irrelevant to the final account fold;
+hashing never reopens a journal that may have changed after decoding.
+Native config hash covers the scope, a zero separator and the encoded
+`LEDGER_START` context actually used by this session. It is the accounting
+context, not the strategy configuration. Torn tails and undecodable frames
+remain refused before binding.
+
+The sidecar is four lines: scope header, `code_commit=`, `data_hash=` and
+`config_hash=` in that order. Duplicate, missing, extra or malformed fields
+are refused. Creation uses a new file and cannot overwrite the journal or
+an existing sidecar. Verification rejects changed data/context; a known
+code-only change reports `CodeChanged` rather than pretending identical
+code. Build-time `GIT_COMMIT` or `GITHUB_SHA` provides the revision. Without
+it, the report/sidecar says `unknown` and baseline verification exits 2.
+Identity verification never promotes unknown coverage: `--require-coverage`
+still independently checks fee/funding evidence, and this native accounting
+scope does not certify full strategy/margin replay or G12.

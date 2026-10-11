@@ -22,6 +22,12 @@
 
 ### 变更
 
+- **原生账本报告绑定代码、journal 字节和有效上下文。** `oq-replay --ledger` 复用
+  `RunManifest`：SHA-256 覆盖重放实际解码的同一份 Reader 不可变快照，配置 hash 覆盖
+  scope 与实际 `LEDGER_START` 上下文。`--write-manifest FILE` 创建严格版本化 sidecar，
+  不覆盖已有文件；`--verify-manifest FILE` 拒绝数据/上下文变化及未知代码身份。仅
+  已知代码改变会单独标示。代码来自构建时 `GIT_COMMIT` 或 `GITHUB_SHA`；缺失元数据
+  保持 `unknown`。身份匹配不证明费用/资金费覆盖，也不证明 G12 成功。
 - **实盘未知手续费在接收边界恢复。** Books 验证完整待补 fill，扣除费用或入账返佣
   一次，直到已接收的未知费 cohort 全部补齐前仍保留费用不确定性。改动/已定价 fill
   及冲突恢复被拒绝；报告零仍是证据。host 在费用 pending 时每 60 秒轮询，run 结束

@@ -479,4 +479,24 @@ instrument、来源不在未来、重复不冲突。返佣与明确报告的零�
 仍保持费用未知。core `FeeRecovered`（14）编码接收 ns、支出正/返佣负金额及剩余
 未知数量（三个 8-byte LE 整数），只影响现金/费用。身份校验属于 host 待补库存，
 数量描述已接收 fill，不代表完整交易所历史。不改写过去风控/现金曲线。重启状态
-恢复、完整覆盖及 manifest-bound 证据仍是独立工作。
+恢复及完整覆盖仍须独立证据。
+
+### 身份绑定的原生账本报告
+
+```sh
+oq-replay run.oqj --ledger --write-manifest run.ledger-manifest
+oq-replay run.oqj --ledger --verify-manifest run.ledger-manifest
+```
+
+报告复用 `RunManifest`，方法 scope 为 `openquanter native-ledger manifest v1`。
+数据 hash 覆盖 Reader 保持的完整原始快照，包括不影响最终账户 fold 的 frame；hash
+不会重新打开解码后可能已变化的 journal。原生配置 hash 覆盖 scope、零分隔符及
+当前 session 实际采用的编码 `LEDGER_START` 上下文；这是记账上下文，不是策略配置。
+残缺尾部和无法解码的 frame 在绑定前仍拒绝。
+
+sidecar 恰为四行：scope header、`code_commit=`、`data_hash=`、`config_hash=`，按此
+顺序。重复、缺失、额外或非法字段均拒绝。创建只写新文件，不覆盖 journal 或现有
+sidecar。验证拒绝数据/上下文变化；仅已知代码变化会报告 `CodeChanged`，不冒充
+同一代码。构建时 `GIT_COMMIT` 或 `GITHUB_SHA` 提供 revision；缺失时报告/sidecar
+标为 `unknown`，基线验证退出 2。身份验证不升级未知覆盖：`--require-coverage` 仍
+独立检查费用/资金费证据，原生记账 scope 不认证完整策略/保证金重放或 G12。

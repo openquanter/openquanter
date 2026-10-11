@@ -179,6 +179,168 @@ fn write(records: &[Record]) -> std::path::PathBuf {
 }
 
 #[test]
+fn bound_identity_names_code_changes_and_rejects_different_input_or_context() {
+    use oq_live::ledger::{manifest_text, parse_manifest, replay_bound};
+    let code = "a".repeat(40);
+    let base = records(PositionMode::OneWay);
+    let path = write(&base);
+    let bound = replay_bound(&path, &code, None).unwrap();
+    assert!(bound.code_identity_known());
+    assert_eq!(
+        bound.accounting.executions,
+        replay(&path).unwrap().executions
+    );
+    let serialized = manifest_text(&bound.manifest).unwrap();
+    assert_eq!(parse_manifest(&serialized).unwrap(), bound.manifest);
+    assert_eq!(
+        replay_bound(&path, &code, Some(&bound.manifest))
+            .unwrap()
+            .baseline,
+        Some(oq_parity::BaselineStatus::Comparable)
+    );
+    assert_eq!(
+        replay_bound(&path, &"b".repeat(40), Some(&bound.manifest))
+            .unwrap()
+            .baseline,
+        Some(oq_parity::BaselineStatus::CodeChanged)
+    );
+    assert!(
+        replay_bound(&path, "unknown", Some(&bound.manifest))
+            .unwrap_err()
+            .contains("known build code")
+    );
+    let repeated = write(&[base.clone(), base.clone()].concat());
+    assert_eq!(
+        replay(&repeated).unwrap().recorded_balance,
+        bound.accounting.recorded_balance
+    );
+    assert!(
+        replay_bound(&repeated, &code, Some(&bound.manifest))
+            .unwrap_err()
+            .contains("input data hash")
+    );
+    let mut changed = base;
+    for record in &mut changed {
+        if let Record::LedgerStart { balance, .. } = record {
+            balance.0 += 1;
+        }
+    }
+    let changed = write(&changed);
+    let error = replay_bound(&changed, &code, Some(&bound.manifest)).unwrap_err();
+    assert!(error.contains("input data hash") && error.contains("configuration hash"));
+    for path in [path, repeated, changed] {
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn manifest_snapshot_is_the_immutable_bytes_that_are_decoded() {
+    let path = write(&records(PositionMode::OneWay));
+    let reader = oq_journal::Reader::open(&path).unwrap();
+    let bytes = reader.snapshot().to_vec();
+    let frames = reader.replay().unwrap().frames.len();
+    fs::write(&path, b"different source after the snapshot").unwrap();
+    assert_eq!(reader.snapshot(), bytes);
+    assert_eq!(reader.replay().unwrap().frames.len(), frames);
+    assert!(oq_live::ledger::replay_bound(&path, &"a".repeat(40), None).is_err());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn native_manifest_refuses_ambiguous_partial_and_foreign_scope_fields() {
+    let path = write(&records(PositionMode::OneWay));
+    let bound = oq_live::ledger::replay_bound(&path, &"a".repeat(40), None).unwrap();
+    let text = oq_live::ledger::manifest_text(&bound.manifest).unwrap();
+    assert!(oq_live::ledger::parse_manifest(&format!("{text}data_hash=duplicate\n")).is_err());
+    assert!(oq_live::ledger::parse_manifest(&text.replace("config_hash=", "data_hash=")).is_err());
+    assert!(
+        oq_live::ledger::parse_manifest(&text.replace(&bound.manifest.data_hash, "short")).is_err()
+    );
+    let mut foreign = bound.manifest;
+    foreign.label = "different method".into();
+    assert!(
+        oq_live::ledger::replay_bound(&path, &"a".repeat(40), Some(&foreign))
+            .unwrap_err()
+            .contains("different replay scope")
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn ledger_cli_creates_but_never_overwrites_identity_and_keeps_coverage_separate() {
+    let path = write(&records(PositionMode::OneWay));
+    let sidecar = path.with_extension("manifest");
+    let command = || {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_oq-replay"));
+        command.arg(&path).arg("--ledger");
+        command
+    };
+    let result = command()
+        .arg("--write-manifest")
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let manifest = oq_live::ledger::parse_manifest(&fs::read_to_string(&sidecar).unwrap()).unwrap();
+    assert!(String::from_utf8_lossy(&result.stdout).contains("journal hash"));
+    let verified = command()
+        .arg("--verify-manifest")
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    if manifest.code_commit == "unknown" {
+        assert_eq!(verified.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&verified.stderr).contains("known build code"));
+    } else {
+        assert!(verified.status.success());
+        assert!(String::from_utf8_lossy(&verified.stdout).contains("Comparable"));
+    }
+    assert_eq!(
+        command()
+            .arg("--require-coverage")
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    let before = fs::read(&path).unwrap();
+    assert_eq!(
+        command()
+            .arg("--write-manifest")
+            .arg(&path)
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        command()
+            .arg("--write-manifest")
+            .arg(&sidecar)
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        command()
+            .arg("--verify-manifest")
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    for path in [path, sidecar] {
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn original_unknown_fee_is_enriched_without_a_second_fill_or_inventory_change() {
     let mut all = records(PositionMode::OneWay);
     let original = replay_records(&all).unwrap();

@@ -29,6 +29,15 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Native ledger reports bind code, journal bytes and effective context.**
+  `oq-replay --ledger` reuses `RunManifest`: SHA-256 covers the same immutable
+  reader snapshot decoded by replay, and the config hash covers scope plus
+  the actual `LEDGER_START` context. `--write-manifest FILE` creates a strict
+  versioned sidecar without overwriting anything; `--verify-manifest FILE`
+  refuses changed data/context and unknown code identity. A known code-only
+  change is named separately. Code comes from build-time `GIT_COMMIT` or
+  `GITHUB_SHA`; absent metadata remains `unknown`. Matching identity is not
+  evidence of fee/funding coverage or G12 success.
 - **Live missing commissions recover at their receive boundary.** Books
   validate the complete pending fill, debit a charge or credit a rebate
   exactly once, and retain fee uncertainty until the remaining accepted
