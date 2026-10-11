@@ -239,7 +239,8 @@ impl Shadow {
         Ok(Self::from_state(state))
     }
 
-    fn from_state(state: State) -> Self {
+    /// Start from a stated model seed, including its optional fee policy.
+    pub fn from_state(state: State) -> Self {
         Self {
             kernel: Kernel::new(state),
             last: None,
@@ -465,7 +466,8 @@ impl Shadow {
             unmatched: self.unpaired.clone(),
             funding,
             funding_unavailable,
-            fees,
+            fees: fees
+                .filter(|(_, model)| self.model_fees_known() && *model == self.model_fees().neg()),
         }
     }
 
@@ -478,6 +480,11 @@ impl Shadow {
     #[must_use]
     pub fn model_fees(&self) -> Cash {
         self.kernel.state().fees
+    }
+
+    #[must_use]
+    pub fn model_fees_known(&self) -> bool {
+        self.kernel.state().fees_known()
     }
 
     /// The model's realized result, for the decomposition's other side.
@@ -645,6 +652,57 @@ mod tests {
             TierTable::example_btcusdt(),
             Cash::from_units(100_000),
         )
+    }
+
+    #[test]
+    fn fee_evidence_requires_a_stated_policy_and_current_model_total() {
+        let unknown = shadow();
+        assert!(
+            unknown
+                .evidence(Ok((Cash::ZERO, Cash::ZERO)), Some((Cash::ZERO, Cash::ZERO)))
+                .fees
+                .is_none()
+        );
+        let state = || {
+            State::new(
+                InstrumentId(1),
+                Contract::new(10_000),
+                TierTable::example_btcusdt(),
+                Cash::from_units(100_000),
+            )
+        };
+        let zero = Shadow::from_state(state().with_fees(oq_core::Fees::none()));
+        assert_eq!(
+            zero.evidence(Ok((Cash::ZERO, Cash::ZERO)), Some((Cash::ZERO, Cash::ZERO)))
+                .fees,
+            Some((Cash::ZERO, Cash::ZERO))
+        );
+        let mut rated = Shadow::from_state(
+            state().with_fees(oq_core::Fees::flat(oq_types::Ratio::from_ppm(500))),
+        );
+        buy(&mut rated, 1, SEC, 6_000_000);
+        assert!(rated.model_fees().0 > 0);
+        assert!(
+            rated
+                .evidence(Ok((Cash::ZERO, Cash::ZERO)), Some((Cash::ZERO, Cash::ZERO)))
+                .fees
+                .is_none(),
+            "a pre-fill fee total is stale"
+        );
+        let current = (Cash(-100), rated.model_fees().neg());
+        assert_eq!(
+            rated
+                .evidence(Ok((Cash::ZERO, Cash::ZERO)), Some(current))
+                .fees,
+            Some(current)
+        );
+        assert!(
+            rated
+                .evidence(Ok((Cash::ZERO, Cash::ZERO)), None)
+                .fees
+                .is_none(),
+            "a policy does not establish venue coverage"
+        );
     }
 
     fn stamp(ns: i64) -> Stamp {

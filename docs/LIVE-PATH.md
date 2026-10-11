@@ -637,6 +637,18 @@ record have unknown obligations. Persistence makes them inspectable across
 process exit; automatic restart restoration and complete coverage proof are
 separate recovery work.
 
+Shadow attribution also needs a declared model fee policy. The production
+environment defaults to unknown; supply `Production::with_model_fees`, or
+override `Environment::model_fees` in a library host. The CLI accepts both
+`--model-maker-fee-ppm N` and `--model-taker-fee-ppm N` (signed integer ppm,
+including explicit zero and negative maker rebates). A missing partner,
+duplicate option or overflowing rate is refused. The effective policy,
+warm-up length and observation window are bound into the run config hash.
+Unknown policy or a supplied model fee total that no longer matches the
+shadow's current total makes fee attribution unavailable, so it cannot
+produce a numeric residual. Venue commission coverage remains independently
+required; specifying model rates does not recover missing venue economics.
+
 For an accepted execution whose fee was unreadable, original per-trade
 commission history can append native-ledger evidence. The account query
 is scoped to the same symbol; the adapter validates settlement asset and

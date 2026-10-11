@@ -362,7 +362,7 @@ pub fn attribute(
                             "funding",
                             evidence.funding_unavailable.as_deref(),
                         ),
-                        Component::FeeTier => cash_difference(evidence.fees, "fees", None),
+                        Component::FeeTier => cash_difference(evidence.fees, "fees", Some("venue fee history or stated model fee policy is unavailable or stale")),
                         _ => Attributed::Unavailable(why.to_string()),
                     };
                     (*c, value)
@@ -445,7 +445,11 @@ pub fn attribute(
         ),
         (
             Component::FeeTier,
-            cash_difference(evidence.fees, "fees", None),
+            cash_difference(
+                evidence.fees,
+                "fees",
+                Some("venue fee history or stated model fee policy is unavailable or stale"),
+            ),
         ),
     ];
 

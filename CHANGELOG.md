@@ -29,6 +29,13 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Shadow fee attribution requires a stated model policy.** An absent
+  policy or stale model total leaves the fee component unavailable and
+  prevents a numeric residual. `oq-trade --model-maker-fee-ppm N
+  --model-taker-fee-ppm N` states both signed rates; explicit zero and maker
+  rebates are supported. Library hosts supply `Environment::model_fees`.
+  The effective policy, warm-up length and window join the run config hash.
+  A stated policy does not prove venue fee-history coverage.
 - **Native ledger reports bind code, journal bytes and effective context.**
   `oq-replay --ledger` reuses `RunManifest`: SHA-256 covers the same immutable
   reader snapshot decoded by replay, and the config hash covers scope plus
