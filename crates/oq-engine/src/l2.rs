@@ -89,6 +89,7 @@ use crate::l1::L1Engine;
 pub struct L2Engine {
     inner: L1Engine,
     venue: VenueBook,
+    has_snapshot: bool,
     /// Depth updates the book refused, in sequence order.
     ///
     /// Counted rather than absorbed. A book that quietly accepted an
@@ -114,6 +115,7 @@ impl L2Engine {
         Self {
             inner,
             venue: VenueBook::new(),
+            has_snapshot: false,
             refused: 0,
             swept: 0,
             unswept: 0,
@@ -134,6 +136,7 @@ impl L2Engine {
         asks: &[oq_book::Level],
     ) {
         self.venue.install_snapshot(update_id, bids, asks);
+        self.has_snapshot = true;
     }
 
     /// Apply one incremental depth update.
@@ -142,6 +145,12 @@ impl L2Engine {
     /// The sequencing rule it broke. The update is not applied and the
     /// book is left as it was.
     pub fn on_depth(&mut self, update: &DepthUpdate) -> Result<(), SequenceError> {
+        let before = Nanos(update.event_ms.saturating_mul(1_000_000).saturating_sub(1));
+        let venue = &self.venue;
+        let known = self.has_snapshot;
+        self.inner.sample_arrivals(before, |side, price| {
+            Self::queue_from(venue, known, side, price)
+        });
         match self.venue.apply(update) {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -151,15 +160,18 @@ impl L2Engine {
         }
     }
 
-    /// Submit an order, measuring what is queued ahead of it.
+    /// Submit an order; measure queue ahead at its exchange arrival.
     ///
     /// A market order measures nothing: it is the thing the queue is
     /// waiting for. A limit order at a price the book does not show
     /// measures **zero**, because nothing is displayed there — which is
-    /// a reading and not an absence, and is why it is not `None`.
+    /// a reading and not an absence, and is why it is not `None`. A book
+    /// with no snapshot is unknown and uses the stated L1 fallback.
     pub fn submit(&mut self, order: Working, now: Nanos) {
-        let ahead = order.price().map(|p| self.displayed_at(order.side(), p));
-        self.inner.submit_with_queue(order, now, ahead);
+        let ahead = order
+            .price()
+            .and_then(|p| Self::queue_from(&self.venue, self.has_snapshot, order.side(), p));
+        self.inner.submit_from_book(order, now, ahead);
     }
 
     /// Advance to an observation, pricing taker fills off the book.
@@ -190,6 +202,10 @@ impl L2Engine {
         let (mut swept, mut unswept) = (0_u64, 0_u64);
         {
             let venue = &self.venue;
+            let known = self.has_snapshot;
+            self.inner.sample_arrivals(tick.stamp.exch, |side, price| {
+                Self::queue_from(venue, known, side, price)
+            });
             let mut working = WorkingDepth::default();
             self.inner.on_tick_with_impact(tick, |side, qty| {
                 match working.take(venue, side, qty) {
@@ -234,9 +250,17 @@ impl L2Engine {
     /// means.
     #[must_use]
     pub fn displayed_at(&self, side: Side, price: PriceTicks) -> i64 {
+        Self::displayed_from(&self.venue, side, price)
+    }
+
+    fn queue_from(venue: &VenueBook, known: bool, side: Side, price: PriceTicks) -> Option<i64> {
+        known.then(|| Self::displayed_from(venue, side, price))
+    }
+
+    fn displayed_from(venue: &VenueBook, side: Side, price: PriceTicks) -> i64 {
         let levels = match side {
-            Side::Buy => self.venue.bids(),
-            Side::Sell => self.venue.asks(),
+            Side::Buy => venue.bids(),
+            Side::Sell => venue.asks(),
         };
         levels
             .levels()
@@ -322,7 +346,8 @@ impl L2Engine {
         &self.inner
     }
 
-    /// Mutable access, for ticks, cancels and fill collection.
+    /// Advanced access to L1 state. Matching must use `L2Engine::on_tick`
+    /// so arrival-time queue readings and depth impact are not bypassed.
     pub const fn inner_mut(&mut self) -> &mut L1Engine {
         &mut self.inner
     }
@@ -517,10 +542,8 @@ mod tests {
     /// report changing, which is exactly the confusion the ladder
     /// exists to prevent.
     ///
-    /// The measurement is deliberately *not* recomputed on arrival. It
-    /// belongs to the moment the order was sent; by the time it lands
-    /// the book has moved, and re-reading it would answer a different
-    /// question with the same name.
+    /// It is sampled at arrival, before any strictly later depth update
+    /// can replace that reading. A stable book keeps the same queue.
     #[test]
     fn a_measured_queue_is_not_lost_to_entry_latency() {
         use crate::l1::Delay;
@@ -550,7 +573,7 @@ mod tests {
             ask: PriceTicks(100),
             volume: QtyLots(0),
         };
-        let _ = e.inner_mut().on_tick(&tick);
+        let _ = e.on_tick(&tick);
         assert_eq!(
             e.inner().queued(),
             1,
@@ -585,6 +608,112 @@ mod tests {
         );
         e.submit(market, Nanos(0));
         assert_eq!(e.inner().queued(), 0, "a market order does not queue");
+    }
+
+    fn delayed_queue(initial: i64) -> L2Engine {
+        let mut e = L2Engine::new(L1Engine::new(
+            oq_types::InstrumentId(1),
+            Policy {
+                queue: QueueAhead::None,
+                latency: Latency {
+                    entry: Delay::Fixed(Nanos(10_000_000)),
+                    response: Delay::Fixed(Nanos(0)),
+                },
+                impact: Impact { coefficient: 0 },
+            },
+        ));
+        e.install_snapshot(100, &[at(99, initial)], &[at(101, 100)]);
+        e.on_tick(&timed(0, 0));
+        e.submit(limit(1, Side::Buy, 99, 1), Nanos(0));
+        e
+    }
+
+    fn timed(ms: i64, volume: i64) -> Tick {
+        Tick {
+            stamp: Stamp::new(ms * 1_000_000, ms * 1_000_000),
+            ..observation(volume)
+        }
+    }
+
+    fn depth_change(ms: i64, id: u64, qty: i64) -> DepthUpdate {
+        DepthUpdate {
+            event_ms: ms,
+            first_id: id,
+            final_id: id,
+            prev_final_id: Some(id - 1),
+            bids: vec![at(99, qty)],
+            asks: vec![],
+        }
+    }
+
+    #[test]
+    fn in_flight_growth_is_measured_at_arrival_not_submission() {
+        let mut e = delayed_queue(2);
+        e.on_depth(&depth_change(5, 101, 100)).unwrap();
+        assert!(e.on_tick(&timed(10, 0)).is_empty());
+        assert!(
+            e.on_tick(&timed(11, 3)).is_empty(),
+            "the two lots seen at submission are not the arrival queue"
+        );
+        assert_eq!(e.inner().queued(), 1);
+        e.on_tick(&timed(12, 100));
+        assert_eq!(e.inner().queued(), 0);
+    }
+
+    #[test]
+    fn an_update_after_arrival_cannot_reprice_the_arrival_queue() {
+        let mut e = delayed_queue(2);
+        e.on_depth(&depth_change(5, 101, 100)).unwrap();
+        e.on_depth(&depth_change(12, 102, 1)).unwrap();
+        e.on_tick(&timed(15, 0));
+        assert!(e.on_tick(&timed(16, 2)).is_empty());
+        assert_eq!(
+            e.inner().queued(),
+            1,
+            "arrival was at 10, not at the tick after the depth at 12"
+        );
+        e.on_tick(&timed(17, 100));
+        assert_eq!(e.inner().queued(), 0);
+    }
+
+    #[test]
+    fn pre_arrival_volume_cannot_spend_the_new_queue() {
+        let mut e = delayed_queue(100);
+        assert!(
+            e.on_tick(&timed(10, 500)).is_empty(),
+            "this bar includes volume from before arrival"
+        );
+        assert_eq!(e.inner().queued(), 1);
+        e.on_tick(&timed(11, 600));
+        assert_eq!(
+            e.inner().queued(),
+            0,
+            "a fully post-arrival interval can consume the measured queue"
+        );
+    }
+
+    #[test]
+    fn depth_at_the_exact_arrival_has_market_first_priority() {
+        let mut e = delayed_queue(2);
+        e.on_depth(&depth_change(10, 101, 100)).unwrap();
+        e.on_tick(&timed(10, 0));
+        assert!(e.on_tick(&timed(11, 3)).is_empty());
+        assert_eq!(
+            e.inner().queued(),
+            1,
+            "the coincident market event precedes sampling"
+        );
+    }
+
+    #[test]
+    fn unready_depth_is_not_a_measurement_of_zero_ahead() {
+        let mut e = engine(QueueAhead::Fixed(QtyLots(60)));
+        e.submit(limit(1, Side::Buy, 99, 1), Nanos(0));
+        assert_eq!(
+            e.inner().queued(),
+            1,
+            "unknown book falls back to the stated L1 policy"
+        );
     }
 
     // ---- Taker impact, walked rather than estimated ----

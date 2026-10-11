@@ -29,6 +29,17 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **L2 queue entry is sampled at exchange arrival (matching semantics).**
+  The last book state before a later depth event seals the due reading;
+  market depth at the exact same timestamp has priority before sampling.
+  The first aggregated bar that may contain pre-arrival volume cannot
+  consume that queue. A supplied one-sided/empty snapshot is known, whereas
+  no snapshot uses the stated L1 policy rather than masquerading as zero
+  ahead. Explicit L1 queue measurements and frozen L0 semantics are unchanged.
+  Synthetic parity: with 2 lots at submission, 100 at arrival, then 1 in a
+  later update, the queue remains 100; three post-arrival traded lots no
+  longer clear it. This is conservative observation-boundary matching, not
+  a claim of continuous-time exchange execution between captured events.
 - **Live accounting evidence is independently replayable (additive journal
   schema).** Live record kinds `EXECUTION` (12) and `LEDGER_START` (13) retain
   complete venue fills/fee provenance and the actual initial balance, mode,

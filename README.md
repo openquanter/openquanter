@@ -302,6 +302,12 @@ comparison. `oq-tiers` runs it against a
 captured archive, and `Event::Depth` puts the book in the journal, so an
 L2 run replays into the market it actually matched in.
 
+Queue sampling follows exchange arrival rather than submission, seals the
+reading before later depth updates, and a measured queue does not spend an
+aggregated bar's pre-arrival volume. A supplied snapshot can explicitly show an empty level;
+no snapshot is unknown and uses the declared L1 policy. This remains an
+observation-boundary model, not continuous-time execution between records.
+
 **AI-native, in parts.** The RL environments are built — `oq-env` gives
 `Env` and `VecEnv` with seeds threaded through, an action that is a target
 position rather than an order, and a reproduction test that holds because

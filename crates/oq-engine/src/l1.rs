@@ -319,11 +319,12 @@ impl Policy {
 struct Pending {
     /// Queue ahead measured from a venue book, when a caller had one.
     ///
-    /// Carried through the latency delay rather than recomputed on
-    /// arrival: the measurement belongs to the moment the order was
-    /// *sent*, and the book has moved by the time it lands. Recomputing
-    /// would silently answer a different question.
+    /// Explicit L1 measurements retain their caller-defined semantics.
+    /// L2 marks a reading for sampling at arrival before a later depth
+    /// update can replace it.
     measured_ahead: Option<i64>,
+    sample_at_arrival: bool,
+    since: Option<Nanos>,
     live_at: Nanos,
     order: Working,
 }
@@ -334,6 +335,8 @@ struct Queued {
     /// Lots that must trade at or through this price before the order
     /// can fill.
     remaining: i64,
+    /// L2 cannot spend the pre-arrival part of an aggregated volume bar.
+    since: Option<Nanos>,
     order: Working,
 }
 
@@ -365,6 +368,7 @@ pub struct L1Engine {
     /// order that arrives at once was given no volume at all — a queue of
     /// zero while the report still claimed the multiple.
     last_traded: Option<i64>,
+    prev_at: Option<Nanos>,
 }
 
 impl L1Engine {
@@ -380,6 +384,7 @@ impl L1Engine {
             released: Vec::new(),
             prev_volume: None,
             last_traded: None,
+            prev_at: None,
         }
     }
 
@@ -413,15 +418,60 @@ impl L1Engine {
     /// of it. `None` falls back to the policy, so every existing caller
     /// is unaffected.
     pub fn submit_with_queue(&mut self, order: Working, now: Nanos, ahead: Option<i64>) {
-        if !self.policy.latency.entry.is_zero() {
+        self.submit_queue(order, now, ahead, false);
+    }
+
+    pub(crate) fn submit_from_book(&mut self, order: Working, now: Nanos, ahead: Option<i64>) {
+        self.submit_queue(order, now, ahead, true);
+    }
+
+    fn submit_queue(
+        &mut self,
+        order: Working,
+        now: Nanos,
+        ahead: Option<i64>,
+        sample_at_arrival: bool,
+    ) {
+        let delay = self.policy.latency.entry.at(order.id().0);
+        if if sample_at_arrival {
+            delay.0 > 0
+        } else {
+            !self.policy.latency.entry.is_zero()
+        } {
+            let live_at = Nanos(now.0.saturating_add(delay.0));
             self.pending.push(Pending {
-                live_at: Nanos(now.0 + self.policy.latency.entry.at(order.id().0).0),
+                live_at,
                 order,
                 measured_ahead: ahead,
+                sample_at_arrival,
+                since: sample_at_arrival.then_some(live_at),
             });
             return;
         }
-        self.admit(order, self.last_traded, ahead);
+        self.admit(
+            order,
+            self.last_traded,
+            ahead,
+            sample_at_arrival.then_some(now),
+        );
+    }
+
+    /// Seal a reading before a depth event later than the arrival can replace
+    /// it. A depth event at the same instant has market-before-arrival priority.
+    pub(crate) fn sample_arrivals(
+        &mut self,
+        now: Nanos,
+        mut queue: impl FnMut(Side, PriceTicks) -> Option<i64>,
+    ) {
+        for p in &mut self.pending {
+            if p.sample_at_arrival && p.live_at.0 <= now.0 {
+                p.measured_ahead = p
+                    .order
+                    .price()
+                    .and_then(|price| queue(p.order.side(), price));
+                p.sample_at_arrival = false;
+            }
+        }
     }
 
     /// Withdraw an order, wherever it currently is.
@@ -546,17 +596,17 @@ impl L1Engine {
         // would make entry latency silently downgrade an L2 order to an
         // L1 one — the tier would change without the report changing,
         // which is the failure the ladder exists to prevent.
-        let mut arriving: Vec<(Working, Option<i64>)> = Vec::new();
+        let mut arriving: Vec<(Working, Option<i64>, Option<Nanos>)> = Vec::new();
         self.pending.retain(|p| {
             if p.live_at.0 <= now.0 {
-                arriving.push((p.order, p.measured_ahead));
+                arriving.push((p.order, p.measured_ahead, p.since));
                 false
             } else {
                 true
             }
         });
-        for (order, measured) in arriving {
-            self.admit(order, Some(traded), measured);
+        for (order, measured, since) in arriving {
+            self.admit(order, Some(traded), measured, since);
         }
 
         // 2. Queues deplete against the volume that traded at or through
@@ -570,6 +620,11 @@ impl L1Engine {
         //    promoted.
         let mut promoted: Vec<Working> = Vec::new();
         self.queued.retain_mut(|q| {
+            if q.since
+                .is_some_and(|at| self.prev_at.is_none_or(|prev| prev.0 < at.0))
+            {
+                return true;
+            }
             let Some(price) = q.order.price() else {
                 promoted.push(q.order);
                 return false;
@@ -642,6 +697,7 @@ impl L1Engine {
             self.last_traded = Some(traded);
         }
         self.prev_volume = Some(tick.volume);
+        self.prev_at = Some(now);
         &self.released
     }
 
@@ -679,7 +735,13 @@ impl L1Engine {
     }
 
     /// Put an order into the book, or into a queue in front of it.
-    fn admit(&mut self, order: Working, arrival_volume: Option<i64>, measured: Option<i64>) {
+    fn admit(
+        &mut self,
+        order: Working,
+        arrival_volume: Option<i64>,
+        measured: Option<i64>,
+        since: Option<Nanos>,
+    ) {
         let ahead = match (measured, order.price()) {
             // A market order queues for nothing whatever anyone
             // measured; it is the thing the queue is waiting for.
@@ -694,6 +756,7 @@ impl L1Engine {
         if ahead > 0 {
             self.queued.push(Queued {
                 remaining: ahead,
+                since: if measured.is_some() { since } else { None },
                 order,
             });
         } else {
