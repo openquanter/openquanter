@@ -51,6 +51,7 @@ pub mod funding;
 pub mod interlock;
 pub mod latency;
 pub mod ledger;
+pub mod ledger_coverage;
 pub mod metrics;
 mod order_ids;
 pub mod record;

@@ -489,6 +489,30 @@ instrument、来源不在未来、重复不冲突。返佣与明确报告的零�
 数量描述已接收 fill，不代表完整交易所历史。不改写过去风控/现金曲线。重启状态
 恢复及完整覆盖仍须独立证据。
 
+### 原生费用/资金费闭区间覆盖
+
+库调用方可通过 `ledger::replay_with_history(path, code, evidence)` 提供独立的
+`ledger_coverage::CoverageEvidence`。附件指定原生 journal 数据 hash、外部建立的
+不透明账户 scope hash、从 `LEDGER_START` 开始的闭区间、评估时刻及来源最大年龄。
+两个 `HistoryWindow` 来源必须具有相同账户及 symbol，覆盖请求区间，并在 producer
+建立保留期及终止分页后明确声明完整性。`Incomplete(reason)`、不支持的历史、过期/
+未来观测及截断区间均拒绝验证。契约不认证账户声明，也不从短页/空页推断来源完整性；
+producer 负责建立该声明。现有 `Account` 历史 vector 接口不自动满足它。
+
+每笔 execution 必须具有已报告或有效恢复的手续费，其稳定 trade ID、方向、交易所
+毫秒时间及金额须与历史匹配。每条资金费须按原始 ledger ID、时间及金额匹配。多余
+行（含零）、缺失行、冲突及相同合计但身份不同均失败；稳定重叠行去重。legacy
+资金费合计不能证明原始行覆盖。空历史只有在完整区间明确声明且初始仓位明确时才
+接受。区间外的已记录经济事件拒绝整场证明。
+
+同一 Reader 快照同时供给原生身份及确定性 fold。返回的覆盖 manifest scope 为
+`openquanter native-ledger coverage v1`，绑定 journal/上下文 hash、全部规范排序
+来源行、来源元数据及评估策略。证据变化使基线失效；仅代码变化仍可区分。通过覆盖
+报告的 `verify_baseline` 验证完整证据身份；仅原生 manifest 及未知代码被拒绝。普通原生
+重放继续报告 funding coverage 为 false；覆盖重放成功仅证明声明区间的费用/资金费。
+CLI 尚不读取这些外部 window。覆盖不重建调度缺口中的模型仓位、不认证其他账户
+转账、不恢复策略，也不提供 G12 数值残差。
+
 ### 身份绑定的原生账本报告
 
 ```sh

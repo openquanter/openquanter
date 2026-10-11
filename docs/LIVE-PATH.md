@@ -673,6 +673,43 @@ to the host's pending inventory, and its count describes accepted fills,
 not complete venue history. No past risk/cash curve is rewritten. Restart
 state restoration and complete coverage require separate evidence.
 
+### Closed-window native fee/funding coverage
+
+Library consumers can call `ledger::replay_with_history(path, code, evidence)`
+with independent `ledger_coverage::CoverageEvidence`. The attachment names
+the native journal data hash, an externally established opaque account-scope
+hash, a closed interval beginning at `LEDGER_START`, evaluation time and a
+maximum source age. Both `HistoryWindow` sources name the same account and
+symbol, cover the requested interval, and explicitly certify completeness
+after their producer has established retention and terminal pagination.
+`Incomplete(reason)`, unsupported history, stale/future observations and
+truncated intervals refuse verification. This contract does not authenticate
+an account statement or infer source completeness from a short/empty page;
+the producer is responsible for that assertion. Existing `Account` vector
+history APIs do not establish it automatically.
+
+Every execution must have a reported or valid recovered fee, and its stable
+trade ID, side, exchange millisecond and amount must match the history.
+Every funding line must match its original ledger ID, time and amount.
+Surplus rows (including zero), missing rows, conflicts and equal totals with
+different identities are failures. Stable overlapping rows deduplicate.
+Legacy aggregate funding cannot prove original-line coverage. Empty histories
+are accepted only with an explicit complete window and explicit initial
+positions. Out-of-window recorded economics refuse a whole-session proof.
+
+The reader snapshot supplies both the native identity and deterministic
+fold. The returned coverage manifest has scope `openquanter native-ledger
+coverage v1` and binds journal/context hashes, all canonical source rows,
+source metadata and evaluation policy. Changing the evidence invalidates
+its baseline; a code-only change stays distinguishable. Use the covered
+report's `verify_baseline` to verify this complete evidence identity; it
+refuses native-only manifests and unknown code. Plain native replay
+continues to report funding coverage as false; a successful covered replay
+reports fee/funding coverage for the declared interval only. The CLI does
+not yet ingest these external windows. Coverage does not reconstruct model
+positions in schedule gaps, certify other account transfers, restore a
+strategy, or supply a numeric G12 residual.
+
 ### Identity-bound native ledger reports
 
 ```sh
