@@ -316,6 +316,17 @@ impl Env {
                 } => {
                     self.kernel.install_snapshot(update_id, &bids, &asks);
                 }
+                Observation::SnapshotAt {
+                    at,
+                    update_id,
+                    bids,
+                    asks,
+                } => {
+                    self.kernel.install_snapshot_at(at, update_id, &bids, &asks);
+                }
+                Observation::Gap { .. } => {
+                    self.kernel.apply_depth_gap();
+                }
                 Observation::Tick(tick) => {
                     // Funding due since the last tick, on the position held
                     // until now, as the backtest settles it. It was not

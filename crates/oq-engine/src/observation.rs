@@ -46,6 +46,17 @@ pub enum Observation {
         bids: Vec<Level>,
         asks: Vec<Level>,
     },
+    /// A captured snapshot installed at its receive boundary, including
+    /// reconnects. Unlike a legacy starting snapshot this must not be
+    /// moved to the front of a replay.
+    SnapshotAt {
+        at: oq_types::Nanos,
+        update_id: u64,
+        bids: Vec<Level>,
+        asks: Vec<Level>,
+    },
+    /// Depth continuity was lost. L2 suspends matching until a snapshot.
+    Gap { at: oq_types::Nanos },
 }
 
 impl From<Tick> for Observation {
@@ -72,6 +83,7 @@ impl Observation {
             Self::Tick(t) => Some(t.stamp.exch.0 / 1_000_000),
             Self::Depth(u) => Some(u.event_ms),
             Self::Snapshot { .. } => None,
+            Self::SnapshotAt { at, .. } | Self::Gap { at } => Some(at.0 / 1_000_000),
         }
     }
 }

@@ -229,6 +229,23 @@ impl Venue for OkxSwap {
             asks: levels(text, r#""asks":[["#, scales)?,
         })
     }
+
+    fn parse_depth_snapshot(
+        &self,
+        payload: &[u8],
+        scales: Scales,
+    ) -> Result<crate::depth::DepthSnapshot, ParseError> {
+        let text = core::str::from_utf8(payload).map_err(|_| ParseError::NotDepth)?;
+        if !text.contains(r#""action":"snapshot""#) {
+            return Err(ParseError::NotDepth);
+        }
+        let update = self.parse_depth(payload, scales)?;
+        Ok(crate::depth::DepthSnapshot {
+            last_update_id: update.final_id,
+            bids: update.bids,
+            asks: update.asks,
+        })
+    }
 }
 
 /// A quoted JSON string value following `key`.

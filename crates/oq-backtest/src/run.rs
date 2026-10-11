@@ -225,11 +225,14 @@ pub struct RunResult {
     pub depth_applied: u64,
     /// Depth updates the book refused, in sequence order.
     ///
-    /// Messages were lost between two updates. The book is left as it
-    /// was rather than guessing the missing state, and the count says
-    /// how often — a reconstruction with holes in it produces plausible
-    /// queues that are wrong, and nothing downstream can tell.
+    /// Messages were lost between two updates. L2 invalidates the stale
+    /// book and suspends execution until a fresh snapshot; the count
+    /// distinguishes undeclared sequencing breaks from capture gaps.
     pub depth_refused: u64,
+    /// Declared discontinuities read by L2.
+    pub depth_gaps: u64,
+    /// Tick boundaries where L2 suspended execution awaiting a snapshot.
+    pub depth_invalid_ticks: u64,
     /// Orders for an instrument this run does not hold.
     ///
     /// Refused and reported to the strategy through `on_placed`, not
@@ -391,6 +394,7 @@ where
     let mut misrouted = 0u64;
     let mut depth_applied = 0u64;
     let mut depth_refused = 0u64;
+    let mut depth_gaps = 0u64;
     let mut depth_unused = 0u64;
     for observation in stream {
         let tick = match observation {
@@ -409,6 +413,25 @@ where
                 asks,
             } => {
                 if !kernel.install_snapshot(update_id, &bids, &asks) {
+                    depth_unused += 1;
+                }
+                continue;
+            }
+            Observation::SnapshotAt {
+                at,
+                update_id,
+                bids,
+                asks,
+            } => {
+                if !kernel.install_snapshot_at(at, update_id, &bids, &asks) {
+                    depth_unused += 1;
+                }
+                continue;
+            }
+            Observation::Gap { .. } => {
+                if kernel.apply_depth_gap() {
+                    depth_gaps += 1;
+                } else {
                     depth_unused += 1;
                 }
                 continue;
@@ -677,6 +700,8 @@ where
         tier,
         depth_applied,
         depth_refused,
+        depth_gaps,
+        depth_invalid_ticks: kernel.state().holding().engine.invalid_depth_ticks(),
         depth_unused,
         misrouted_orders: misrouted,
     }
@@ -1518,6 +1543,42 @@ mod depth_path_tests {
         assert_eq!(out.tier, "L0");
         assert_eq!(out.depth_applied, 0);
         assert_eq!(out.depth_unused, 1, "an ignored update must be visible");
+    }
+
+    #[test]
+    fn declared_gap_reaches_l2_and_is_reported_until_recovery() {
+        let ticks = flat_ticks(4, 100);
+        let stream = vec![
+            Observation::Snapshot {
+                update_id: 0,
+                bids: vec![],
+                asks: vec![],
+            },
+            Observation::Tick(ticks[0]),
+            Observation::Gap {
+                at: ticks[0].stamp.exch,
+            },
+            Observation::Tick(ticks[1]),
+            Observation::SnapshotAt {
+                at: ticks[2].stamp.exch,
+                update_id: 100,
+                bids: vec![],
+                asks: vec![],
+            },
+            Observation::Tick(ticks[2]),
+            Observation::Tick(ticks[3]),
+        ];
+        let mut strategy = RestOnce {
+            placed: false,
+            price: 100,
+        };
+        let cfg = config(1_000_000).at_tier(Tier::L2(Policy::TRANSPARENT));
+        let result = run_observations(&cfg, &mut strategy, stream);
+        assert_eq!(result.depth_gaps, 1);
+        assert_eq!(result.depth_invalid_ticks, 2);
+        assert_eq!(result.depth_refused, 0);
+        assert_eq!(result.depth_unused, 0);
+        assert!(!result.fills.is_empty(), "resting order survives recovery");
     }
 
     /// An order for an instrument the run does not hold is refused, not

@@ -37,6 +37,90 @@ fn convert(records: &[Record], window: i64) -> (Vec<Tick>, Report) {
 }
 
 #[test]
+fn captured_gap_and_snapshot_stay_at_their_window_boundary() {
+    let trades = [
+        trade(T0, "100.00", "1.000"),
+        trade(T0 + 3 * SECOND, "100.00", "1.000"),
+    ];
+    let snapshots = [Record::payload(
+        T0 + 2 * SECOND,
+        oq_l2feed::frame::NO_EXCH_TS,
+        br#"{"lastUpdateId":200,"bids":[["99.00","10.000"]],"asks":[["101.00","10.000"]]}"#
+            .to_vec(),
+    )];
+    let controls = [
+        Record::control(
+            T0 + SECOND,
+            oq_l2feed::manifest::control::gap("fixture", Some(100), SECOND),
+        ),
+        Record::control(T0 + SECOND + 1, oq_l2feed::manifest::control::snapshot(200)),
+    ];
+    let sources = [
+        Source {
+            records: &trades,
+            stream: "trade",
+        },
+        Source {
+            records: &controls,
+            stream: "depth",
+        },
+        Source {
+            records: &snapshots,
+            stream: "snapshot",
+        },
+    ];
+    let mut agg = Aggregator::new(SECOND).unwrap();
+    let mut report = Report::default();
+    let out = fold_into_observations(
+        &BinancePerp::new(),
+        &sources,
+        scales(),
+        &mut agg,
+        &mut report,
+    );
+    assert!(
+        matches!(out[0], Observation::Tick(_)),
+        "prior window closes first"
+    );
+    assert!(matches!(out[1], Observation::Gap { at } if at.0 == T0 + SECOND));
+    assert!(matches!(out[2], Observation::Tick(t) if t.bid.0 == 0));
+    assert!(
+        matches!(out[3], Observation::SnapshotAt { at, update_id: 200, .. } if at.0 == T0 + 2 * SECOND)
+    );
+    assert!(matches!(out[4], Observation::Tick(t) if t.bid.0 == 9900));
+    assert_eq!(report.gaps, 1);
+    assert_eq!(report.unparseable, 0);
+    assert_eq!(
+        agg.counts().snapshots,
+        1,
+        "a seq-only marker is not a full book"
+    );
+}
+
+#[test]
+fn native_okx_snapshots_are_resets_not_incremental_updates() {
+    let payload = br#"{"arg":{"channel":"books"},"action":"snapshot","data":[{"ts":"1786000000000","seqId":7,"prevSeqId":-1,"bids":[["99.00","1.000","0","1"]],"asks":[["101.00","1.000","0","1"]]}]}"#;
+    let records = [Record::payload(T0, T0, payload.to_vec())];
+    let mut agg = Aggregator::new(SECOND).unwrap();
+    let mut report = Report::default();
+    let out = fold_into_observations(
+        &oq_l2feed::venue::okx::OkxSwap,
+        &[Source {
+            records: &records,
+            stream: "depth",
+        }],
+        scales(),
+        &mut agg,
+        &mut report,
+    );
+    assert!(matches!(
+        out.as_slice(),
+        [Observation::SnapshotAt { update_id: 7, .. }]
+    ));
+    assert_eq!(report.unparseable, 0);
+}
+
+#[test]
 fn extremes_belong_to_their_own_window() {
     // A rising window then a falling one. If the high were carried
     // forward, the second window would report the first window's peak —

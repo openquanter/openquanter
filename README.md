@@ -308,6 +308,17 @@ aggregated bar's pre-arrival volume. A supplied snapshot can explicitly show an 
 no snapshot is unknown and uses the declared L1 policy. This remains an
 observation-boundary model, not continuous-time execution between records.
 
+Captured gaps and sequence refusals invalidate L2 depth and suspend new
+execution until a snapshot. `Observation::SnapshotAt` preserves a captured
+snapshot's boundary; a `snapshot` archive source or a native OKX snapshot
+reaches both aggregator and matcher. Recovery skips the first mixed bar,
+preserves orders and conservatively re-estimates queued ahead. Reports expose
+`depth_gaps` and `depth_invalid_ticks`. A seq-only marker is not a book.
+The legacy empty bootstrap in `oq-tiers` is explicitly approximate and does
+not reinitialise after a gap; capture does not yet archive REST snapshots
+automatically. Exact reproduction must retain the entire observation stream,
+including snapshots and gaps, rather than `Event::Depth` alone.
+
 **AI-native, in parts.** The RL environments are built — `oq-env` gives
 `Env` and `VecEnv` with seeds threaded through, an action that is a target
 position rather than an order, and a reproduction test that holds because

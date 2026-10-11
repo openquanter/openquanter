@@ -662,6 +662,8 @@ mod tests {
             tier: "L0",
             depth_applied: 0,
             depth_refused: 0,
+            depth_gaps: 0,
+            depth_invalid_ticks: 0,
             depth_unused: 0,
             misrouted_orders: 0,
         }
@@ -863,6 +865,8 @@ mod tier_tests {
             tier: "L0",
             depth_applied: 0,
             depth_refused: 0,
+            depth_gaps: 0,
+            depth_invalid_ticks: 0,
             depth_unused: 0,
             misrouted_orders: 0,
         }

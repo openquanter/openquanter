@@ -331,6 +331,20 @@ impl Aggregator {
         closed
     }
 
+    /// Install a captured snapshot where it arrived, after closing any
+    /// earlier window. Its levels must not leak into that earlier tick.
+    pub fn on_snapshot(&mut self, at: i64, local: i64, snapshot: &DepthSnapshot) -> Option<Tick> {
+        let closed = self.roll(at, local);
+        self.snapshots = true;
+        self.pending.clear();
+        self.book
+            .install_snapshot(snapshot.last_update_id, &snapshot.bids, &snapshot.asks);
+        self.bootstrapped = true;
+        self.counts.snapshots += 1;
+        self.read_top();
+        closed
+    }
+
     /// Forget the book without closing a window.
     ///
     /// For a live feed whose depth stream has just been lost: whatever

@@ -23,7 +23,7 @@ use oq_l2feed::frame::{Record, decode_all};
 
 /// The streams a run reads. Depth first, so a book is seeded before the
 /// trades that match against it are folded.
-pub const STREAMS: [&str; 2] = ["depth", "trade"];
+pub const STREAMS: [&str; 3] = ["snapshot", "depth", "trade"];
 
 /// Files holding one stream for one day.
 ///
@@ -173,7 +173,7 @@ mod tests {
     /// before the trades matched against it are folded in.
     #[test]
     fn depth_is_read_before_trades() {
-        assert_eq!(STREAMS, ["depth", "trade"]);
+        assert_eq!(STREAMS, ["snapshot", "depth", "trade"]);
     }
 
     /// A capture and its compressed twin name the same hour. Reading

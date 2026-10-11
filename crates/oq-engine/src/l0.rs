@@ -166,6 +166,13 @@ impl L0Engine {
         &self.fills
     }
 
+    /// Used only by the L2 wrapper: an unobserved interval cannot supply
+    /// a price path for gap-crossing fills after reconstruction resumes.
+    pub(crate) fn forget_price_path(&mut self) {
+        self.prev_price = None;
+        self.prev_stamp = None;
+    }
+
     /// Fills caused by the price path between the previous tick and
     /// this one.
     fn gap_fill(&mut self, tick: &Tick) {

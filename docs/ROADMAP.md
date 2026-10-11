@@ -648,12 +648,12 @@ repository, as required by [the boundary policy](REQUIREMENTS.md#8-repository-bo
 - **L2**: order book reconstruction from incremental depth, matching against
   the reconstructed book, snapshot reconciliation and gap handling. Built:
   reconstruction, the measured queue, and the taker's walk up the levels.
-  Validate the entire snapshot/gap path before calibration: the aggregator
-  resets on capture gaps, but `fold_into_observations` does not emit a gap
-  invalidation to the matcher. Snapshot installation exists, while the
-  archive path bootstraps from an incremental update. These input-validity
-  gaps need reproductions and explicit reinitialisation, not a longer
-  capture window. Beyond them remains reaction — the book is what the venue
+  Validate the entire snapshot/gap path before calibration: captured gaps
+  and sequence refusals must suspend matching until an explicit snapshot,
+  and reconnect snapshots must retain their boundary in the observation
+  stream. Reproduction must label suspended intervals and conservative
+  priority/first-bar recovery. A legacy empty archive bootstrap is not
+  evidence of full initial depth; see the README for current limitations. Beyond them remains reaction — the book is what the venue
   displayed, and
   how the rest of the market answers a trade of ours is a claim nothing in
   it measures.

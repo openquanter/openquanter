@@ -425,6 +425,20 @@ impl L1Engine {
         self.submit_queue(order, now, ahead, true);
     }
 
+    pub(crate) fn submit_while_depth_invalid(&mut self, order: Working, now: Nanos) {
+        let live_at = Nanos(
+            now.0
+                .saturating_add(self.policy.latency.entry.at(order.id().0).0),
+        );
+        self.pending.push(Pending {
+            order,
+            live_at,
+            measured_ahead: None,
+            sample_at_arrival: true,
+            since: Some(live_at),
+        });
+    }
+
     fn submit_queue(
         &mut self,
         order: Working,
@@ -562,6 +576,64 @@ impl L1Engine {
     /// entitled to know about.
     pub fn on_tick(&mut self, tick: &Tick) -> &[L0Fill] {
         self.on_tick_with_impact(tick, |_, _| None)
+    }
+
+    /// Preserve orders and release already-executed responses, but invent
+    /// no execution while the L2 input is invalid.
+    pub(crate) fn on_invalid_tick(&mut self, tick: &Tick) -> &[L0Fill] {
+        self.released.clear();
+        self.delayed.retain(|d| {
+            if d.known_at.0 <= tick.stamp.exch.0 {
+                self.released.push(d.fill);
+                false
+            } else {
+                true
+            }
+        });
+        self.prev_volume = Some(tick.volume);
+        self.prev_at = Some(tick.stamp.exch);
+        self.inner.forget_price_path();
+        &self.released
+    }
+
+    pub(crate) fn invalidate_depth(&mut self) {
+        self.inner.forget_price_path();
+        self.prev_volume = None;
+        self.prev_at = None;
+        for p in &mut self.pending {
+            p.sample_at_arrival = true;
+            p.measured_ahead = None;
+        }
+    }
+
+    /// Lost priority cannot be recovered from a snapshot. Retain the
+    /// larger of the old queue and the new displayed queue, and skip the
+    /// first volume interval after recovery.
+    pub(crate) fn resume_depth(&mut self, mut queue: impl FnMut(Side, PriceTicks) -> i64) {
+        self.prev_volume = None;
+        self.prev_at = None;
+        self.inner.forget_price_path();
+        let mut resting: Vec<_> = self.inner.book().iter().copied().collect();
+        resting.sort_by_key(|r| r.arrival);
+        for r in resting {
+            if let Some(price) = r.order.price() {
+                let ahead = queue(r.order.side(), price);
+                if ahead > 0 {
+                    self.inner.cancel(r.id());
+                    self.queued.push(Queued {
+                        order: r.order,
+                        remaining: ahead,
+                        since: Some(Nanos(i64::MIN)),
+                    });
+                }
+            }
+        }
+        for q in &mut self.queued {
+            if let Some(price) = q.order.price() {
+                q.remaining = q.remaining.max(queue(q.order.side(), price));
+                q.since = Some(Nanos(i64::MIN));
+            }
+        }
     }
 
     /// Advance to an observation, pricing taker fills from a measurement
