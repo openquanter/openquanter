@@ -1502,7 +1502,7 @@ pub struct Fingerprint {
     /// Identifier watermark, so a replay that skipped an id is caught.
     pub id_watermark: (u64, u64),
     /// Precise costs are state even when their displayed ticks are identical.
-    pub entry_costs: Vec<(InstrumentId, i128, i128)>,
+    entry_costs: Vec<(InstrumentId, i128, i128)>,
 }
 
 /// Account state at a point in the run.
