@@ -32,7 +32,7 @@
 //! list below cannot silently disagree with a writer generated from a
 //! macro.
 
-use oq_types::{Cash, Nanos, PriceTicks, QtyLots, Side};
+use oq_types::{Cash, Fee, Fill, Instrument, InstrumentId, Nanos, PriceTicks, QtyLots, Side};
 
 /// Frame kinds. Numbered explicitly and never reused: a reader from an
 /// older build must be able to skip what it does not know rather than
@@ -67,6 +67,10 @@ pub mod kind {
     /// A funding settlement: what the venue charged and what the model
     /// was charged for the same instant.
     pub const FUNDING: u16 = 11;
+    /// A complete booked execution, including fee evidence and both clocks.
+    pub const EXECUTION: u16 = 12;
+    /// The parameters of the authoritative account ledger.
+    pub const LEDGER_START: u16 = 13;
 }
 
 /// How a submitted order turned out.
@@ -240,6 +244,22 @@ pub enum Record {
         model: Cash,
         verified: bool,
     },
+    /// Uses the core's canonical venue-fill payload instead of a second
+    /// encoder for offset, liquidity, clocks and reported commission.
+    Execution {
+        client_id: String,
+        fill: Fill,
+        fee: Fee,
+    },
+    /// What the books were initialized with, not an inferred balance or mode.
+    LedgerStart {
+        at: Nanos,
+        instrument_id: InstrumentId,
+        instrument: Instrument,
+        tick_cash: i64,
+        balance: Cash,
+        mode: oq_core::PositionMode,
+    },
 }
 
 impl Record {
@@ -265,7 +285,9 @@ impl Record {
             | Self::Refused { .. }
             | Self::Reconciled { .. }
             | Self::Operator { .. }
-            | Self::Funding { .. } => false,
+            | Self::Funding { .. }
+            | Self::Execution { .. }
+            | Self::LedgerStart { .. } => false,
         }
     }
 
@@ -284,6 +306,8 @@ impl Record {
             Self::Waiting { .. } => kind::WAITING,
             Self::Operator { .. } => kind::OPERATOR,
             Self::Funding { .. } => kind::FUNDING,
+            Self::Execution { .. } => kind::EXECUTION,
+            Self::LedgerStart { .. } => kind::LEDGER_START,
         }
     }
 
@@ -293,6 +317,47 @@ impl Record {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
+            Self::Execution {
+                client_id,
+                fill,
+                fee,
+            } => {
+                put_str(&mut out, client_id);
+                let payload = oq_core::Event::VenueFill {
+                    fill: *fill,
+                    fee: *fee,
+                }
+                .encode();
+                out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                out.extend_from_slice(&payload);
+            }
+            Self::LedgerStart {
+                at,
+                instrument_id,
+                instrument,
+                tick_cash,
+                balance,
+                mode,
+            } => {
+                put_i64(&mut out, at.0);
+                put_i64(&mut out, i64::from(instrument_id.0));
+                out.push(instrument.price_scale);
+                out.push(instrument.qty_scale);
+                for v in [
+                    instrument.contract_size,
+                    instrument.price_tick,
+                    instrument.qty_step,
+                    instrument.min_notional.0,
+                    *tick_cash,
+                    balance.0,
+                ] {
+                    put_i64(&mut out, v);
+                }
+                out.push(match mode {
+                    oq_core::PositionMode::OneWay => 0,
+                    oq_core::PositionMode::Hedge => 1,
+                });
+            }
             Self::SessionStart {
                 prefix,
                 symbol,
@@ -524,6 +589,62 @@ impl Record {
                 model: Cash(take_i64(&mut p)?),
                 verified: take_u8(&mut p)? != 0,
             },
+            kind::EXECUTION => {
+                let client_id = take_str(&mut p)?;
+                if p.len() < 4 {
+                    return None;
+                }
+                let len = u32::from_le_bytes(p[..4].try_into().ok()?) as usize;
+                p = &p[4..];
+                if p.len() != len {
+                    return None;
+                }
+                let oq_core::Event::VenueFill { fill, fee } =
+                    oq_core::Event::decode(oq_core::kind::VENUE_FILL, p)?
+                else {
+                    return None;
+                };
+                p = &[];
+                Self::Execution {
+                    client_id,
+                    fill,
+                    fee,
+                }
+            }
+            kind::LEDGER_START => {
+                let at = Nanos(take_i64(&mut p)?);
+                let id = u32::try_from(take_i64(&mut p)?).ok()?;
+                let instrument = Instrument {
+                    price_scale: take_u8(&mut p)?,
+                    qty_scale: take_u8(&mut p)?,
+                    contract_size: take_i64(&mut p)?,
+                    price_tick: take_i64(&mut p)?,
+                    qty_step: take_i64(&mut p)?,
+                    min_notional: Cash(take_i64(&mut p)?),
+                };
+                let tick_cash = take_i64(&mut p)?;
+                let balance = Cash(take_i64(&mut p)?);
+                let mode = match take_u8(&mut p)? {
+                    0 => oq_core::PositionMode::OneWay,
+                    1 => oq_core::PositionMode::Hedge,
+                    _ => return None,
+                };
+                if tick_cash <= 0
+                    || instrument.price_tick <= 0
+                    || instrument.qty_step <= 0
+                    || oq_margin::Contract::of(&instrument)?.tick_cash != tick_cash
+                {
+                    return None;
+                }
+                Self::LedgerStart {
+                    at,
+                    instrument_id: InstrumentId::new(id),
+                    instrument,
+                    tick_cash,
+                    balance,
+                    mode,
+                }
+            }
             kind::RECONCILED => {
                 let at = Nanos(take_i64(&mut p)?);
                 let n = take_i64(&mut p)?;
@@ -541,6 +662,14 @@ impl Record {
             _ => return None,
         };
         if p.is_empty() { Some(record) } else { None }
+    }
+}
+
+/// A model fee schedule is not evidence of what a venue charged.
+pub(crate) fn venue_fee(fee: Fee) -> Fee {
+    match fee {
+        Fee::Unsaid => Fee::Unreadable,
+        other => other,
     }
 }
 

@@ -29,6 +29,27 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Live accounting evidence is independently replayable (additive journal
+  schema).** Live record kinds `EXECUTION` (12) and `LEDGER_START` (13) retain
+  complete venue fills/fee provenance and the actual initial balance, mode,
+  instrument grid and cash multiplier. Existing kinds and payloads are not
+  repurposed. New executions use a length-delimited canonical core venue-fill
+  payload; explicit zero commission differs from unknown commission.
+  Startup records an explicit initial position, including verified flat.
+  `oq-replay FILE --ledger` replays the latest session through the live books
+  and reports recorded economics and missing evidence; it refuses legacy
+  fee-less fills, unknown records, torn tails and duplicate economic events.
+  Funding amounts alone do not establish coverage, and the report does not
+  certify strategy/margin replay or all account cash flows. Old journals need
+  independently identified enrichment, not invented zero fees or balances.
+- **Live books do not synthesize liquidation or insurance transfers.**
+  The venue is authoritative; risk projections remain in the shadow/risk
+  path. Synthetic parity: adopting 5 long lots at 100 on cash 10 (one cash
+  unit per tick-lot), before the first mark, previously cleared the position
+  and balance through local liquidation; it now retains the observed
+  position and cash. A mark of 1 still cannot clear it. A confirmed close
+  of 5 at 1 records −495 realized; any venue insurance/capital adjustment
+  requires its own evidence. Simulated kernel/margin behavior is unchanged.
 - **Entry cost is independent of the displayed price tick (ledger and
   margin semantics).** Each leg retains its quote cost in wide fixed-point
   arithmetic. Partial-close P&L is truncated at cash precision, with the

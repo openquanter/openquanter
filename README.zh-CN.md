@@ -331,7 +331,7 @@ backtest only
 | 历史资金费 | 已补取交易所账单，按结算精度逐腿截断的计算精确复现所取流水 |
 | 补充证据后的内核记账重放 | [#353](https://github.com/openquanter/openquanter/issues/353) 精确成本修复后，重复重放确定性成立，数量、最终均价、已实现盈亏、手续费与补取资金费一致；合成、部分平仓及强平边界测试覆盖此次修复 |
 | shadow/导出的交易所成交 | 运行器现只把已接受的唯一成交送入 shadow，有恢复/stream 重送和部分成交测试。含多余行的旧导出须从已接受的 journal 成交重建，并绑定新 manifest，见 [#354](https://github.com/openquanter/openquanter/issues/354) |
-| 净记账与 G12 | **未通过。** 已记录手续费/资金费证据不完整，数值残差仍不可得；须持久化来源并幂等补取，见 [#355](https://github.com/openquanter/openquanter/issues/355) |
+| 净记账与 G12 | **未通过。** 新 journal 保存完整成交与账本上下文，`oq-replay --ledger` 报告费用不确定性并拒绝不完整证据；仍须补齐旧记录证据、费用/资金费恢复和覆盖证明及数值残差，见 [#355](https://github.com/openquanter/openquanter/issues/355) |
 
 该记账重放补充了原实盘 journal 未完整携带的手续费账单和交易所持仓腿信息，不是策略
 决策、保证金检查或初始钱包状态的完整独立重放。普通重启的持仓恢复也不证明手册要求

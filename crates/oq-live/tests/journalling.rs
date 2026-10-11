@@ -552,6 +552,62 @@ fn a_fill_is_recorded_with_the_id_the_strategy_knew_it_by() {
     }
 }
 
+#[test]
+fn accounting_writer_records_context_and_explicit_fee_uncertainty() {
+    let path = temp("accounting-evidence.oqj");
+    let _ = std::fs::remove_file(&path);
+    let venue = Watching {
+        journal: path.clone(),
+        seen_at_place: RefCell::new(Vec::new()),
+    };
+    let instrument = Instrument::linear(2, 3);
+    let mut session = Session::start(
+        venue,
+        RiskGate::new(limits()),
+        SessionConfig {
+            symbol: "SYNTH".into(),
+            instrument,
+            position_side: PositionSide::OneWay,
+            id_prefix: "fixture".into(),
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap()
+    .journalling(Writer::open(&path, SyncPolicy::EveryRecordNoFsync).unwrap());
+    session.record_ledger_start(
+        oq_types::Nanos(0),
+        oq_types::InstrumentId(1),
+        oq_margin::Contract::of(&instrument).unwrap(),
+        oq_types::Cash::from_units(100),
+        oq_core::PositionMode::OneWay,
+    );
+    session.record_initial_positions(oq_types::Nanos(0), vec![]);
+    let fill = oq_types::Fill {
+        stamp: oq_types::Stamp::new(7, 9),
+        instrument: oq_types::InstrumentId(1),
+        order: oq_types::OrderId(1),
+        trade: oq_types::TradeId(1),
+        side: Side::Buy,
+        offset: oq_types::Offset::Open,
+        price: PriceTicks(100),
+        qty: QtyLots(2),
+        liquidity: oq_types::Liquidity::Taker,
+    };
+    session.record_execution(&fill, "fixture-1", oq_types::Fee::Unsaid);
+    let all = records(&path);
+    assert!(all.iter().any(|r| matches!(r, Record::LedgerStart { balance, mode: oq_core::PositionMode::OneWay, .. } if *balance == oq_types::Cash::from_units(100))));
+    assert!(all.iter().any(|r| matches!(r, Record::Execution { fill: f, fee: oq_types::Fee::Unreadable, .. } if *f == fill)));
+    assert!(
+        !all.iter().any(|r| matches!(r, Record::Fill { .. })),
+        "new evidence does not rewrite the legacy payload"
+    );
+    let report = oq_live::ledger::replay(&path).unwrap();
+    assert_eq!(report.missing_fees, 1);
+    assert_eq!(report.executions, 1);
+}
+
 /// A venue that counts placements, for proving none happened.
 #[derive(Default)]
 struct Counting {
