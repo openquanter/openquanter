@@ -420,12 +420,13 @@ socket",所以打印出来的是一个**下界**,并且被明确标注为"不是
 |---|---|---|
 | P0 | 全窗口执行与账户审计 | 所选区间的订单、持仓与账单经济项勾稽；丢失/重复成交及恢复过程有解释；实盘 journal 重放与记录输出比较 |
 | P0 | G12 归因闭环 | 补取资金费/手续费账单并重算，或明确缺失区间及影响；独立计算的分量与数值残差绑定 `RunManifest` |
-| P0 | L2 输入有效性审计 | 归档初始快照与 gap 后重初始化同时抵达聚合器和撮合器；复现用例覆盖断流/重连，不可用区间明确标记 |
+| P0 | L2 输入有效性审计 | 归档初始快照与 gap 后重初始化同时抵达聚合器和撮合器，队列按交易所到达时刻的深度取样；复现用例覆盖断流、重连、在途深度变化，不可用区间明确标记 |
 | P1 | 切换验收 | 按 [CUTOVER](CUTOVER.zh-CN.md) 审计历史证据，补齐演练与 abort 覆盖，记录订单归属、持仓/均价一致性及风险暴露区间 |
 | P1 | 对账竞态覆盖 | 陈旧 REST 快照与 stream 成交交错、有限历史、未知下单结果、迟到回报和外部订单的确定性用例；缺少持仓报告不等于 flat |
 | P1 | 成交与延迟校准 | 按流动性状态比较成交概率、time-to-fill、部分成交和 markout；分别记录 feed、入场、回报时序，并与成交所属市场一致 |
 | P1 | 采集质量报告 | 逐流 gap、序列完整性、快照覆盖、保留文件校验与存储增长；验证每日保证金规则快照覆盖 |
-| P2 | 重启与研究可复现性 | 不同 warm-up 历史长度下的特征/决策收敛；滚动 OOS 实验关联所有尝试过的 trial、保真报告与部署 manifest |
+| P1 | 重启收敛 | 不同 warm-up 历史长度下，对齐公共区间比较特征值与决策，分别报告未定义值和决策变化 |
+| P2 | 研究可复现性 | 基于已有 manifest 与 trial ledger 原语，将滚动 OOS 实验关联所有尝试过的 trial、保真报告与部署 manifest |
 
 testnet 记录可用于完成执行、记账、重放和恢复验证，也能校准 testnet 行为；它们不能
 证明生产市场的 maker 队列保真度。请求新的校准样本前，须列出具体缺少的市场、流动性
@@ -433,19 +434,42 @@ testnet 记录可用于完成执行、记账、重放和恢复验证，也能校
 
 ### 可吸收的开源设计
 
-以下是验证工作的设计参考，不是新增验收门：
+2026-10-11 已按上游文档/源码与本 workspace 复核。以下是设计参考，不是新增验收门或
+依赖。先修复 README 当前状态列出的记账/证据缺陷；在已有原语上做最小扩展。
+复核后的工作跟踪于 [#356](https://github.com/openquanter/openquanter/issues/356)。
 
 - [NautilusTrader 对账](https://nautilustrader.io/docs/latest/concepts/execution/reconciliation/)：
-  快照新鲜度、有限历史来源与未知命令结果。
+  在已有 `Unknown`/恢复机制上补充报告覆盖范围、完整性与快照新鲜度。区分明确 flat
+  与缺少报告，区分交易所实际事件与合成对账事件。合成对齐不能恢复历史 P&L；不能把
+  超时终态化或静默持仓修正移植到 fatal-on-unknown 语义中。
 - [HftBacktest 队列模型](https://hftbacktest.readthedocs.io/en/latest/order_fill.html)及
   [延迟模型](https://hftbacktest.readthedocs.io/en/latest/latency_models.html)：用成交比较
-  保守/概率队列，区分 feed、入场、回报延迟；先校准，再选择更复杂的模型。
+  保守/概率队列，区分 feed、入场、回报延迟。market-by-price 队列是估计，不是实际
+  FIFO 位置的观测。[概率队列实现](https://github.com/nkaz001/hftbacktest/blob/master/hftbacktest/src/backtest/models/queue.rs)
+  按期望队列数量确定性推进，不用 RNG，并从深度下降中扣除已经计入的成交，避免双算。
+  语义须适配定点内核。先验证 snapshot/gap 链路及**交易所到达时刻**的队列取样，而不是
+  提交时刻：`L2Engine::submit` 当前在 L1 入场延迟结束前取得 ahead。保留交易所视图与
+  按到达时间的策略视图，复用 `oq-data` 的 arrival as-of join。时钟偏移未知时，仅减
+  两个时戳不是已校准的单向延迟。重放不能改变后续市场路径；单个观测内的吃单耗量不
+  是完整市场冲击模型。先校准，再选择更复杂模型。
 - [Freqtrade recursive analysis](https://www.freqtrade.io/en/stable/recursive-analysis/)：
-  改变 warm-up 历史长度，测量重启后指标和决策收敛。
+  上游只比较最后一行的指标，不检查入场/出场决策。复用 `oq-features::consistency`，
+  再扩展为不同历史长度下对齐公共窗口的比较及实际决策差异，包含尚未定义的 warm-up
+  值。不能把指标收敛称为策略重启 parity，也不重复建设已有 lookahead 检查。
 - [Qlib 实验记录](https://qlib.readthedocs.io/en/latest/component/recorder.html)：关联数据
-  版本、每一次 trial、滚动 OOS 结果与部署产物。
+  版本、每一次 trial、滚动 OOS 结果与部署产物。`RunManifest` 与持久化
+  `TrialRegistry` 已有运行身份、跨 sweep 和未评分 trial 计数；增量是产物血缘、运行
+  状态和确定性内核之外的滚动 OOS 编排。Recorder 本身不证明无泄漏或过拟合已受控。
 - [Hummingbot executors](https://hummingbot.org/strategies/v2-strategies/executors/)：可复用
-  订单生命周期组件，同时保留本框架的确定性状态机与回测/实盘共享语义。
+  订单生命周期组件，待至少两个策略确实需要同一生命周期再抽取。撤单替换、部分成交
+  应变成有 journal、注入时间、回测/实盘共享的事件状态机；不直接移植上游异步运行时。
+
+另外两项参考保留触发条件，不列为立即工作：
+[LEAN 交易模型示例](https://github.com/QuantConnect/Lean/blob/master/Algorithm.CSharp/CustomModelsAlgorithm.cs)
+可参考在已有成交/费用/保证金组件上显式定义可版本化交易所规则组合，不是再建一套
+记账引擎；示例中的随机成交和无限 buying power 只是演示，不能作为默认值移植。
+[VeighNa 算法执行模块](https://github.com/vnpy/vnpy_algotrading)可参考 TWAP/iceberg
+生命周期；组合或多腿归属须有明确账户模型和用例，再增加管理器。
 
 公开报告使用通用复现用例与汇总验收结论。策略、参数、账户账单、采集数据、部署细节
 和运行事件记录保留在本仓库之外，遵循[仓库边界政策](REQUIREMENTS.zh-CN.md#8-仓库边界政策)。
