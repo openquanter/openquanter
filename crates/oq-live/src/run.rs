@@ -1182,14 +1182,7 @@ where
                 }
                 if let Ok(fill) = parsed {
                     let overclose = books.close_exceeds_position(&fill);
-                    shadow.on_venue_fill(
-                        fill.order,
-                        fill.side,
-                        fill.price,
-                        fill.qty,
-                        fill.stamp.exch,
-                    );
-                    match books.on_venue_fill(&fill, u.fee) {
+                    match book_and_observe(&mut books, &mut shadow, &fill, u.fee) {
                         crate::books::Booked::Applied(outputs) => {
                             // Counted here, where a fill is known to be
                             // new. The other arms used to take one back
@@ -2800,6 +2793,175 @@ fn ending_of(status: &str) -> Option<Ending> {
         "FILLED" => Some(Ending::Filled),
         "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" => Some(Ending::Cancelled),
         _ => None,
+    }
+}
+
+/// Observers receive the executions accepted by the authoritative books,
+/// never stream redeliveries or reports rejected by identity validation.
+fn book_and_observe(
+    books: &mut crate::books::Books,
+    shadow: &mut crate::shadow::Shadow,
+    fill: &oq_types::Fill,
+    fee: oq_types::Fee,
+) -> crate::books::Booked {
+    let booked = books.on_venue_fill(fill, fee);
+    if matches!(&booked, crate::books::Booked::Applied(_)) {
+        shadow.on_venue_fill(fill.order, fill.side, fill.price, fill.qty, fill.stamp.exch);
+    }
+    booked
+}
+
+#[cfg(test)]
+mod accepted_fill_observation {
+    use super::book_and_observe;
+    use crate::books::{Booked, Books};
+    use crate::shadow::Shadow;
+    use oq_margin::{Contract, TierTable};
+    use oq_types::{
+        Cash, Fee, Fill, InstrumentId, Liquidity, Nanos, Offset, OrderId, PriceTicks, QtyLots,
+        Side, Stamp, TradeId,
+    };
+
+    fn pair() -> (Books, Shadow) {
+        let id = InstrumentId::new(1);
+        let contract = Contract::new(100);
+        let cash = Cash::from_units(100);
+        let mut books = Books::new(
+            id,
+            contract,
+            TierTable::example_btcusdt(),
+            cash,
+            oq_core::PositionMode::Hedge,
+        );
+        books.on_submit(OrderId(1), Side::Buy, QtyLots(3), Offset::Open, Nanos(0));
+        (
+            books,
+            Shadow::new(id, contract, TierTable::example_btcusdt(), cash),
+        )
+    }
+
+    fn execution(trade: u64, order: u64, price: i64) -> Fill {
+        Fill {
+            stamp: Stamp::new(trade as i64, trade as i64),
+            instrument: InstrumentId::new(1),
+            order: OrderId(order),
+            trade: TradeId(trade),
+            side: Side::Buy,
+            offset: Offset::Open,
+            price: PriceTicks(price),
+            qty: QtyLots(1),
+            liquidity: Liquidity::Maker,
+        }
+    }
+
+    #[test]
+    fn recovered_then_stream_execution_is_observed_only_once() {
+        let (mut books, mut shadow) = pair();
+        let fill = execution(7, 1, 100);
+        assert!(matches!(
+            book_and_observe(&mut books, &mut shadow, &fill, Fee::Reported(Cash(12))),
+            Booked::Applied(_)
+        ));
+        // The completed local association may be absent on redelivery.
+        let redelivered = Fill {
+            order: OrderId(0),
+            ..fill
+        };
+        assert_eq!(
+            book_and_observe(
+                &mut books,
+                &mut shadow,
+                &redelivered,
+                Fee::Reported(Cash(12))
+            ),
+            Booked::Duplicate
+        );
+        assert_eq!(books.legs().0, QtyLots(1));
+        assert_eq!(books.realized_parts().1, Cash(12));
+        let (venue, _) = shadow.fills("TEST");
+        assert_eq!(venue.len(), 1);
+        assert_eq!(venue[0].tag, Some("1".to_string()));
+    }
+
+    #[test]
+    fn partial_fills_with_distinct_identities_are_preserved() {
+        let (mut books, mut shadow) = pair();
+        for (id, price) in [(7, 100), (8, 101)] {
+            let fill = execution(id, 1, price);
+            assert!(matches!(
+                book_and_observe(&mut books, &mut shadow, &fill, Fee::Reported(Cash(3))),
+                Booked::Applied(_)
+            ));
+        }
+        assert_eq!(books.legs().0, QtyLots(2));
+        assert_eq!(books.realized_parts().1, Cash(6));
+        let (venue, _) = shadow.fills("TEST");
+        assert_eq!(venue.len(), 2);
+        assert_eq!(venue.iter().map(|f| f.qty.0).sum::<i64>(), 2);
+    }
+
+    #[test]
+    fn stale_and_unidentifiable_reports_cannot_pollute_the_export() {
+        let (mut books, mut shadow) = pair();
+        assert!(matches!(
+            book_and_observe(
+                &mut books,
+                &mut shadow,
+                &execution(crate::dedup::WINDOW + 7, 1, 100),
+                Fee::Reported(Cash(3))
+            ),
+            Booked::Applied(_)
+        ));
+        assert_eq!(
+            book_and_observe(
+                &mut books,
+                &mut shadow,
+                &execution(6, 1, 99),
+                Fee::Reported(Cash(20))
+            ),
+            Booked::Stale
+        );
+        assert_eq!(
+            book_and_observe(
+                &mut books,
+                &mut shadow,
+                &execution(0, 1, 99),
+                Fee::Reported(Cash(20))
+            ),
+            Booked::Unidentifiable
+        );
+        assert_eq!(books.legs().0, QtyLots(1));
+        assert_eq!(books.realized_parts().1, Cash(3));
+        assert_eq!(shadow.fills("TEST").0.len(), 1);
+    }
+
+    #[test]
+    fn both_sides_of_one_trade_are_real_executions() {
+        let (mut books, mut shadow) = pair();
+        let buy = execution(7, 1, 100);
+        assert!(matches!(
+            book_and_observe(&mut books, &mut shadow, &buy, Fee::Reported(Cash(-2))),
+            Booked::Applied(_)
+        ));
+        books.on_submit(OrderId(2), Side::Sell, QtyLots(1), Offset::Open, Nanos(7));
+        let sell = Fill {
+            order: OrderId(2),
+            side: Side::Sell,
+            ..buy
+        };
+        assert!(matches!(
+            book_and_observe(&mut books, &mut shadow, &sell, Fee::Reported(Cash(-2))),
+            Booked::Applied(_)
+        ));
+        assert_eq!(books.legs(), (QtyLots(1), QtyLots(-1)));
+        assert_eq!(books.realized_parts().1, Cash(-4));
+        assert_eq!(shadow.fills("TEST").0.len(), 2);
+        assert_eq!(
+            book_and_observe(&mut books, &mut shadow, &sell, Fee::Reported(Cash(-2))),
+            Booked::Duplicate
+        );
+        assert_eq!(shadow.fills("TEST").0.len(), 2);
+        assert_eq!(books.realized_parts().1, Cash(-4));
     }
 }
 

@@ -447,7 +447,7 @@ deployment; no account data or operational records are published here.
 | Position continuity | Adopted quantities agree across restarts; reconstructed final legs and entry prices agree with the venue at recorded price precision; current resting order identities agree |
 | Historical funding | Venue statements recovered; per-leg settlement arithmetic, truncated at settlement precision, reproduces the retrieved ledger exactly |
 | Evidence-enriched kernel accounting replay | Repeated replay is deterministic; quantities, final entries, realized P&L, fees and recovered funding agree after the precise-cost correction in [#353](https://github.com/openquanter/openquanter/issues/353). Synthetic, partial-close and liquidation-boundary tests cover the correction |
-| Shadow/exported venue fills | Surplus rows relative to accepted unique executions prevent using the exports as a clean attribution baseline; deduplicate before forwarding to shadow: [#354](https://github.com/openquanter/openquanter/issues/354) |
+| Shadow/exported venue fills | The runner now forwards only accepted unique executions to shadow, with recovery/stream redelivery and partial-fill tests. Legacy exports with surplus rows must be rebuilt from accepted journal fills under a new manifest: [#354](https://github.com/openquanter/openquanter/issues/354) |
 | Net accounting and G12 | **Not passed.** Recorded fee/funding evidence is incomplete, and a numeric residual remains unavailable. Persist provenance and backfill it idempotently: [#355](https://github.com/openquanter/openquanter/issues/355) |
 
 The accounting replay joins fee statements and venue leg information that
