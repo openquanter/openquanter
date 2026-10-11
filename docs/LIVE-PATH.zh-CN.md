@@ -489,6 +489,27 @@ instrument、来源不在未来、重复不冲突。返佣与明确报告的零�
 数量描述已接收 fill，不代表完整交易所历史。不改写过去风控/现金曲线。重启状态
 恢复及完整覆盖仍须独立证据。
 
+### 可比较的仓位观测
+
+live 启动及周期对账使用 `Account::positions_observed`。默认不支持，不把旧 vector
+提升为完整快照。`PositionObservation` 携带 symbol、模式、全部预期仓位腿及客户端
+请求/接收边界。`check` 要求 one-way 恰有一条 BOTH，hedge 恰有 LONG 和 SHORT
+各一条，含明确零仓行。空回复、缺失/重复/外来仓位腿、非法符号或矛盾的原始数字
+文本都不能证明空仓。adapter 保留零仓行并要求明确方向字段；省略未活跃仓位腿的
+provider 不能仅靠空或部分 vector 满足契约。
+
+接收窗口须有序，不晚于评估时刻，且从请求起不超过五秒。这是客户端接收边界，
+不保证交易所账户快照原子性，也不用最近成交活动时间衡量读取新鲜度。本地已接受
+成交 revision 括住读取；成交或 round-trip 改变 revision 时必须建立新边界。所有
+检查由注入边界确定。不合格读取是不可读证据，不是一致或仓位差异，并清除先前的
+成功边界。
+
+数量一致性同时按 hedge 腿及净仓判定。重连/stream 过期动作调度同一条 checked
+比较，不接管未限定的 risk-view vector。仍先按原始回报恢复漏收成交，再由持续差异
+判定 stream 失效，不生成 synthetic 成交或盈亏修正。resume 只消费当前本地 revision
+的新鲜正向边界；缺失、失效或过期时请求 checked read，并拒绝当次 resume。新边界
+成功后可再次请求 resume。
+
 ### 原生费用/资金费闭区间覆盖
 
 库调用方可通过 `ledger::replay_with_history(path, code, evidence)` 提供独立的

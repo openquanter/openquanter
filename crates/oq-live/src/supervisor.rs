@@ -210,7 +210,18 @@ impl Supervisor {
         streamed: &[oq_gateway::PositionSnapshot],
         venue: &[oq_gateway::PositionSnapshot],
     ) -> Vec<Action> {
-        match self.health.observe(streamed, venue) {
+        self.position_verdict(streamed, venue).1
+    }
+
+    /// Return the observed leg-level verdict alongside the actions. An
+    /// equal net is insufficient when hedge legs differ.
+    pub fn position_verdict(
+        &mut self,
+        streamed: &[oq_gateway::PositionSnapshot],
+        venue: &[oq_gateway::PositionSnapshot],
+    ) -> (Health, Vec<Action>) {
+        let health = self.health.observe(streamed, venue);
+        let actions = match health {
             Health::Agreed => {
                 // A replacement that restored agreement was the right
                 // answer, and the evidence against the next one starts
@@ -239,7 +250,14 @@ impl Supervisor {
                     vec![Action::Reconnect, Action::Reconcile]
                 }
             }
-        }
+        };
+        (health, actions)
+    }
+
+    /// Schedule a checked read after reconnect, rather than adopting an
+    /// unqualified vector through the session's risk view.
+    pub fn request_position_check(&mut self) {
+        self.last_check = None;
     }
 
     /// Streams condemned since the two views last agreed.
@@ -292,6 +310,71 @@ fn elapsed(last: Option<Nanos>, now: Nanos, period: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_requested_read_uses_the_checked_path_once_after_reconnect() {
+        let mut s = Supervisor::new(Timings::default());
+        assert!(s.due(Nanos(0)).contains(&Action::CheckPositions));
+        assert!(!s.due(Nanos(1)).contains(&Action::CheckPositions));
+        s.request_position_check();
+        assert_eq!(s.due(Nanos(1)), vec![Action::CheckPositions]);
+        assert!(s.due(Nanos(2)).is_empty());
+    }
+
+    #[test]
+    fn equal_net_with_different_hedge_legs_is_a_disagreement() {
+        let leg = |side: &str, amount| oq_gateway::PositionSnapshot {
+            symbol: "SYNTH".into(),
+            position_side: side.into(),
+            amount,
+            amount_text: format!("{amount}"),
+            entry_price: 100.0,
+            entry_text: "100".into(),
+            unrealized: 0.0,
+        };
+        let local = [leg("LONG", 1.0), leg("SHORT", -1.0)];
+        let remote = [leg("LONG", 2.0), leg("SHORT", -2.0)];
+        let mut s = Supervisor::new(Timings::default());
+        let (health, actions) = s.position_verdict(&local, &remote);
+        assert_eq!(health, Health::Disagreed { consecutive: 1 });
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn a_stale_apparently_matching_frame_does_not_clear_a_disagreement() {
+        let row = |amount: f64| oq_gateway::PositionSnapshot {
+            symbol: "SYNTH".into(),
+            position_side: "BOTH".into(),
+            amount,
+            amount_text: amount.to_string(),
+            entry_price: 100.0,
+            entry_text: "100".into(),
+            unrealized: 0.0,
+        };
+        let local = [row(1.0)];
+        let differing = [row(2.0)];
+        let mut s = Supervisor::new(Timings::default());
+        assert_eq!(
+            s.position_verdict(&local, &differing).0,
+            Health::Disagreed { consecutive: 1 }
+        );
+        let stale = oq_gateway::position_read::PositionObservation {
+            symbol: "SYNTH".into(),
+            hedged: false,
+            positions: local.to_vec(),
+            requested_ms: 0,
+            received_ms: 1,
+        };
+        assert_eq!(
+            stale.check("SYNTH", false, 10, 5, 0, 0),
+            Err(oq_gateway::position_read::PositionReadError::Stale)
+        );
+        assert!(s.on_read_failed().is_empty());
+        assert_eq!(
+            s.position_verdict(&local, &differing).0,
+            Health::Disagreed { consecutive: 2 }
+        );
+    }
     use oq_gateway::PositionSnapshot;
 
     const SEC: i64 = 1_000_000_000;

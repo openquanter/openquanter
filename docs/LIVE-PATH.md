@@ -673,6 +673,36 @@ to the host's pending inventory, and its count describes accepted fills,
 not complete venue history. No past risk/cash curve is rewritten. Restart
 state restoration and complete coverage require separate evidence.
 
+### Comparable position observations
+
+Live startup and periodic reconciliation use `Account::positions_observed`.
+The default is unsupported, not a promotion of a legacy vector to a full
+snapshot. A `PositionObservation` carries symbol, mode, every expected leg
+and client-clock request/receipt bounds. `check` requires exactly one BOTH
+row in one-way mode, or one LONG and one SHORT row in hedge mode, including
+explicit zero rows. Empty replies, missing/duplicate/foreign legs, invalid
+signs or inconsistent raw numeric text do not establish flat positions.
+The adapter retains zero rows and requires explicit side fields. A provider
+that omits inactive legs cannot satisfy this contract merely by returning
+an empty or partial vector.
+
+The receipt window must be ordered, no later than evaluation, and no older
+than five seconds from its request start. These are client receipt bounds,
+not a guarantee of an atomic exchange account snapshot or an activity-time
+freshness test. Local accepted-execution revisions bracket the read; a fill
+or round trip changing that revision requires a new cut. All checks are
+deterministic with injected boundaries. A refused read is unread evidence,
+not agreement or a position mismatch, and clears the prior successful cut.
+
+Quantity agreement is per hedge leg as well as net. Reconnect/expired-stream
+actions schedule the same checked comparison rather than adopting an
+unqualified risk-view vector. Missed fills are still recovered as original
+reports before a persistent difference condemns the stream. No synthetic
+fill or P&L correction is introduced. Resume consumes only a fresh positive
+cut of the current local revision; a missing, invalidated or expired cut
+requests a checked read and refuses that resume attempt. Retry resume once
+the new cut has succeeded.
+
 ### Closed-window native fee/funding coverage
 
 Library consumers can call `ledger::replay_with_history(path, code, evidence)`

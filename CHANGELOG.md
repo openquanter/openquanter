@@ -29,6 +29,15 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Live position checks require an explicit fresh read cut.** Optional
+  `Account::positions_observed` carries client request/receipt boundaries
+  and every expected leg, including explicit flat rows. Startup and periodic
+  checks reject incomplete, foreign, stale/future, invalid or wrong-mode
+  observations; a changed local execution revision invalidates the cut.
+  Hedge agreement is per leg, so an equal net cannot authorize resume.
+  Reconnection schedules the same checked comparison instead of overwriting
+  the risk view. Resume requires a positive cut no older than five seconds
+  from the same revision; otherwise a new checked read is requested.
 - **Final live residuals require independently covered native economics.**
   After the last funding/fee recovery, the host verifies and persists closed
   histories when `--account-scope-hash SHA256` (or the environment equivalent)

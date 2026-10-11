@@ -1764,6 +1764,39 @@ impl crate::account::Account for Binance {
         Self::positions(self, symbol)
     }
 
+    fn positions_observed(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<crate::position_read::PositionObservation>, VenueError> {
+        let requested_ms = now_ms();
+        let body = self.get_signed(
+            self.dialect.wire().position_risk,
+            &format!("symbol={symbol}"),
+        )?;
+        let received_ms = now_ms();
+        history_array(&body)?;
+        let mut positions = Vec::new();
+        for object in objects(&body) {
+            positions.push(PositionSnapshot {
+                symbol: need_str(&object, "symbol")?,
+                position_side: need_str(&object, "positionSide")?,
+                amount_text: need_str(&object, "positionAmt")?,
+                amount: need_f64(&object, "positionAmt")?,
+                entry_text: need_str(&object, "entryPrice")?,
+                entry_price: need_f64(&object, "entryPrice")?,
+                unrealized: need_f64(&object, "unRealizedProfit")?,
+            });
+        }
+        let hedged = positions.iter().any(|p| p.position_side != "BOTH");
+        Ok(Some(crate::position_read::PositionObservation {
+            symbol: symbol.into(),
+            hedged,
+            positions,
+            requested_ms,
+            received_ms,
+        }))
+    }
+
     fn balances(&self) -> Result<AccountSnapshot, VenueError> {
         self.account()
     }
