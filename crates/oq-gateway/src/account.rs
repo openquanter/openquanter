@@ -152,6 +152,17 @@ pub trait Account: Execution {
         Ok(None)
     }
 
+    /// Original per-execution commissions in the settlement currency,
+    /// keyed by this account/symbol's stable trade id and direction.
+    /// `None` is unsupported, never an empty complete history.
+    fn execution_fees(
+        &self,
+        _symbol: &str,
+        _since_ms: i64,
+    ) -> Result<Option<Vec<ExecutionFee>>, VenueError> {
+        Ok(None)
+    }
+
     /// The account's own trades on a symbol over the venue's recent
     /// history, oldest first.
     ///
@@ -275,6 +286,15 @@ pub struct FundingCharge {
     pub id: i64,
 }
 
+/// A venue's original commission, not a model fee schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionFee {
+    pub trade_id: u64,
+    pub side: oq_types::Side,
+    pub time_ms: i64,
+    pub amount: Cash,
+}
+
 /// A settled funding rate: the rate and mark price the venue charged
 /// every position at one settlement.
 ///
@@ -367,6 +387,13 @@ impl Account for Box<dyn Account> {
     }
     fn fees_charged(&self, symbol: &str, since_ms: i64) -> Result<Option<Cash>, VenueError> {
         (**self).fees_charged(symbol, since_ms)
+    }
+    fn execution_fees(
+        &self,
+        symbol: &str,
+        since_ms: i64,
+    ) -> Result<Option<Vec<ExecutionFee>>, VenueError> {
+        (**self).execution_fees(symbol, since_ms)
     }
     fn trade_history(&self, symbol: &str) -> Result<Option<Vec<AccountTrade>>, VenueError> {
         (**self).trade_history(symbol)

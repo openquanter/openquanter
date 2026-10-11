@@ -464,3 +464,16 @@ session 在资金费捕获和轮询之后写状态，即使交易所未返回行
 解除历史覆盖义务。后续状态写入中断时，最终报告仍可从经济记录解除已答复 pending。
 没有这个记录的旧 journal 义务未知。持久化使进程退出后的义务可检查；自动重启恢复
 和完整覆盖证明仍是独立恢复工作。
+
+已接收成交的费用无法读取时，原始逐成交手续费历史可追加原生账本证据。账户查询
+限定同一 symbol，adapter 验证结算资产；binder 检查稳定 trade ID 加方向、单一
+instrument、来源不在未来、重复不冲突。返佣与明确报告的零仍是测量值；未匹配 fill
+费用继续未知。
+
+`FEE_EVIDENCE`（17）编码接收 ns、来源 ms（i64 LE）、u32 LE 规范 payload 长度，
+以及原始 core `VenueFill` payload，其中费为 `Fee::Reported(amount)`。原生重放要求
+已有等价的 typed execution，且其费用未知；拒绝覆盖已知费用或重复恢复。使用补齐
+费用重算最终账户经济结果，库存和已实现 P&L 不变。原始成交保留，费用证据不是第二
+笔 fill。当前 run 结束查询补齐 journal，不修改 live projection 过去风控，也不导出
+重建的日内现金曲线。重启/live 增量费用恢复、完整覆盖及 manifest-bound 证据仍是
+独立工作。

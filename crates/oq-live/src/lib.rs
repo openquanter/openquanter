@@ -45,6 +45,7 @@ pub mod clock;
 pub mod control;
 mod dedup;
 pub mod env;
+pub mod fee_history;
 pub mod feed;
 pub mod funding;
 pub mod interlock;

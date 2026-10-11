@@ -78,6 +78,8 @@ pub mod kind {
     pub const FUNDING_RECOVERED: u16 = 15;
     /// A snapshot of unresolved funding obligations, never a completion flag.
     pub const FUNDING_STATE: u16 = 16;
+    /// Commission attached to an original unknown-fee execution.
+    pub const FEE_EVIDENCE: u16 = 17;
 }
 
 /// How a submitted order turned out.
@@ -275,6 +277,12 @@ pub enum Record {
         at: Nanos,
         obligations: crate::funding::FundingObligations,
     },
+    FeeEvidence {
+        at: Nanos,
+        source_ms: i64,
+        fill: Fill,
+        amount: Cash,
+    },
     /// Uses the core's canonical venue-fill payload instead of a second
     /// encoder for offset, liquidity, clocks and reported commission.
     Execution {
@@ -320,6 +328,7 @@ impl Record {
             | Self::FundingEvidence { .. }
             | Self::FundingRecovered { .. }
             | Self::FundingState { .. }
+            | Self::FeeEvidence { .. }
             | Self::Execution { .. }
             | Self::LedgerStart { .. } => false,
         }
@@ -343,6 +352,7 @@ impl Record {
             Self::FundingEvidence { .. } => kind::FUNDING_EVIDENCE,
             Self::FundingRecovered { .. } => kind::FUNDING_RECOVERED,
             Self::FundingState { .. } => kind::FUNDING_STATE,
+            Self::FeeEvidence { .. } => kind::FEE_EVIDENCE,
             Self::Execution { .. } => kind::EXECUTION,
             Self::LedgerStart { .. } => kind::LEDGER_START,
         }
@@ -574,6 +584,26 @@ impl Record {
                     put_i64(&mut out, amount.0);
                 }
             }
+            Self::FeeEvidence {
+                at,
+                source_ms,
+                fill,
+                amount,
+            } => {
+                put_i64(&mut out, at.0);
+                put_i64(&mut out, *source_ms);
+                let payload = oq_core::Event::VenueFill {
+                    fill: *fill,
+                    fee: Fee::Reported(*amount),
+                }
+                .encode();
+                out.extend_from_slice(
+                    &u32::try_from(payload.len())
+                        .expect("canonical fee payload fits u32")
+                        .to_le_bytes(),
+                );
+                out.extend(payload);
+            }
             Self::FundingState { at, obligations } => {
                 put_i64(&mut out, at.0);
                 put_i64(
@@ -798,6 +828,32 @@ impl Record {
                         schedule_gaps,
                         problem,
                     },
+                }
+            }
+            kind::FEE_EVIDENCE => {
+                let at = Nanos(take_i64(&mut p)?);
+                let source_ms = take_i64(&mut p)?;
+                if p.len() < 4 {
+                    return None;
+                }
+                let count = u32::from_le_bytes(p[..4].try_into().ok()?) as usize;
+                p = &p[4..];
+                if count != p.len() {
+                    return None;
+                }
+                let oq_core::Event::VenueFill {
+                    fill,
+                    fee: Fee::Reported(amount),
+                } = oq_core::Event::decode(oq_core::kind::VENUE_FILL, p)?
+                else {
+                    return None;
+                };
+                p = &[];
+                Self::FeeEvidence {
+                    at,
+                    source_ms,
+                    fill,
+                    amount,
                 }
             }
             kind::EXECUTION => {

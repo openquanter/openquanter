@@ -29,6 +29,18 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Original commission history enriches unknown-fee native accounting.**
+  `Account::execution_fees` returns per-trade settlement-currency evidence
+  or unsupported, never a fabricated zero. The Binance adapter uses paged
+  account trades and validates symbol, asset, side and stable identity.
+  At run end, unknown accepted fills bind by trade ID and direction; stable
+  duplicates deduplicate, conflicts refuse enrichment and unmatched fees
+  remain unknown. Additive `FEE_EVIDENCE` (17) retains the complete original
+  fill and reported amount. Native ledger replay refuses altered/prior-less
+  fills, repeated recovery, replacement of known fees and future evidence,
+  then recomputes final recorded fees without booking a second execution.
+  This does not backdate a live risk adjustment, reconstruct a cash curve,
+  repair strategy parity or certify full account-history coverage.
 - **Funding uncertainty survives in the journal.** Additive `FUNDING_STATE`
   (16) records changed pending timestamps, open/closed schedule gaps and
   uncertainty reasons, even when no cash was booked. Native replay rejects

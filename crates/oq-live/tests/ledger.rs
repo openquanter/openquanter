@@ -178,6 +178,113 @@ fn write(records: &[Record]) -> std::path::PathBuf {
     write_with_tail(records, None)
 }
 
+#[test]
+fn original_unknown_fee_is_enriched_without_a_second_fill_or_inventory_change() {
+    let mut all = records(PositionMode::OneWay);
+    let original = replay_records(&all).unwrap();
+    let (fill, old_fee) = all
+        .iter_mut()
+        .find_map(|record| {
+            if let Record::Execution { fill, fee, .. } = record {
+                let Fee::Reported(old) = *fee else {
+                    return None;
+                };
+                *fee = Fee::Unreadable;
+                Some((*fill, old))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(replay_records(&all).unwrap().missing_fees, 1);
+    let evidence = Record::FeeEvidence {
+        at: Nanos(fill.stamp.local.0 + 10),
+        source_ms: fill.stamp.exch.0 / 1_000_000,
+        fill,
+        amount: Cash(-7),
+    };
+    assert_eq!(
+        Record::decode(evidence.kind(), &evidence.encode()),
+        Some(evidence.clone())
+    );
+    all.push(evidence.clone());
+    let recovered = replay_records(&all).unwrap();
+    assert_eq!(recovered.missing_fees, 0);
+    assert_eq!(recovered.recovered_fee_executions, 1);
+    assert_eq!(recovered.executions, original.executions);
+    assert_eq!(recovered.legs, original.legs);
+    assert_eq!(recovered.realized, original.realized);
+    assert_eq!(
+        recovered.recorded_fees,
+        original.recorded_fees.sub(old_fee).add(Cash(-7))
+    );
+    all.push(evidence);
+    assert!(
+        replay_records(&all)
+            .unwrap_err()
+            .contains("duplicate fee recovery")
+    );
+}
+
+#[test]
+fn fee_evidence_refuses_altered_fill_known_commission_and_bad_receipt() {
+    let base = records(PositionMode::OneWay);
+    let fill = base
+        .iter()
+        .find_map(|record| {
+            if let Record::Execution { fill, .. } = record {
+                Some(*fill)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let receipt = Nanos(fill.stamp.local.0 + 10);
+    let mut known = base.clone();
+    known.push(Record::FeeEvidence {
+        at: receipt,
+        source_ms: 0,
+        fill,
+        amount: Cash(7),
+    });
+    assert!(
+        replay_records(&known)
+            .unwrap_err()
+            .contains("already reported")
+    );
+    let mut changed = base.clone();
+    let mut altered = fill;
+    altered.price.0 += 1;
+    changed.push(Record::FeeEvidence {
+        at: receipt,
+        source_ms: 0,
+        fill: altered,
+        amount: Cash(7),
+    });
+    assert!(replay_records(&changed).unwrap_err().contains("bind"));
+    let mut future = base;
+    future.push(Record::FeeEvidence {
+        at: receipt,
+        source_ms: receipt.0 / 1_000_000 + 1,
+        fill,
+        amount: Cash(7),
+    });
+    assert!(replay_records(&future).unwrap_err().contains("future"));
+    let record = Record::FeeEvidence {
+        at: receipt,
+        source_ms: 0,
+        fill,
+        amount: Cash(7),
+    };
+    let bytes = record.encode();
+    for len in 0..bytes.len() {
+        assert!(Record::decode(record.kind(), &bytes[..len]).is_none());
+    }
+    let mut trailing = bytes;
+    trailing.push(0);
+    assert!(Record::decode(record.kind(), &trailing).is_none());
+}
+
 fn funding_state(
     at_ms: i64,
     pending_ms: Vec<i64>,
