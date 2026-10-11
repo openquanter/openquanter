@@ -91,6 +91,8 @@ pub mod kind {
     /// venue does not. The instrument is optional, as for [`FUNDING_ON`]:
     /// a 16-byte payload names none, a 20-byte one names it.
     pub const FUNDING_CHARGED: u16 = 13;
+    /// A validated missing commission recovered at its receive boundary.
+    pub const FEE_RECOVERED: u16 = 14;
 }
 
 /// An input to the core.
@@ -163,6 +165,15 @@ pub enum Event {
         /// Received positive, paid negative.
         amount: Cash,
     },
+    /// The host has validated identity against an unknown-fee execution.
+    /// Paid positive, rebate negative; no inventory or strategy fill.
+    /// `remaining_missing` describes this accepted execution cohort,
+    /// never completeness of the venue's account history.
+    FeeRecovered {
+        at: Nanos,
+        amount: Cash,
+        remaining_missing: u64,
+    },
     /// The clock advanced. The only way the core learns the time.
     Time(Nanos),
     /// Collateral added to or removed from the account.
@@ -219,6 +230,7 @@ impl Event {
             } => kind::FUNDING,
             Self::Funding { .. } => kind::FUNDING_ON,
             Self::FundingCharged { .. } => kind::FUNDING_CHARGED,
+            Self::FeeRecovered { .. } => kind::FEE_RECOVERED,
             Self::Time(_) => kind::TIME,
             Self::MarginDeposit { .. } => kind::MARGIN_DEPOSIT,
             Self::VenueFill { .. } => kind::VENUE_FILL,
@@ -234,6 +246,7 @@ impl Event {
             Self::Submit { stamp, .. } | Self::Cancel { stamp, .. } => stamp.exch,
             Self::Funding { at, .. }
             | Self::FundingCharged { at, .. }
+            | Self::FeeRecovered { at, .. }
             | Self::Time(at)
             | Self::MarginDeposit { at, .. } => *at,
             // The venue's clock, not this process's. A fill is ordered
@@ -369,6 +382,15 @@ impl Event {
                 }
             }
             Self::Time(at) => put_i64(&mut out, at.0),
+            Self::FeeRecovered {
+                at,
+                amount,
+                remaining_missing,
+            } => {
+                put_i64(&mut out, at.0);
+                put_i64(&mut out, amount.0);
+                out.extend_from_slice(&remaining_missing.to_le_bytes());
+            }
             Self::VenueFill { fill: f, fee } => {
                 put_i64(&mut out, f.stamp.exch.0);
                 put_i64(&mut out, f.stamp.local.0);
@@ -553,6 +575,16 @@ impl Event {
                     return None;
                 }
                 Some(Self::Time(Nanos(i64_at(payload, 0)?)))
+            }
+            kind::FEE_RECOVERED => {
+                if payload.len() != 24 {
+                    return None;
+                }
+                Some(Self::FeeRecovered {
+                    at: Nanos(i64_at(payload, 0)?),
+                    amount: Cash(i64_at(payload, 1)?),
+                    remaining_missing: u64::from_le_bytes(payload[16..24].try_into().ok()?),
+                })
             }
             kind::MARGIN_DEPOSIT => {
                 if payload.len() != 16 {
@@ -1073,5 +1105,25 @@ mod tests {
         }
         assert!(Event::decode(kind::FUNDING_CHARGED, &[0; 12]).is_none());
         assert!(Event::decode(kind::FUNDING_CHARGED, &[0; 24]).is_none());
+    }
+
+    #[test]
+    fn recovered_commission_has_an_additive_fixed_payload_and_no_fill() {
+        let event = Event::FeeRecovered {
+            at: Nanos(7),
+            amount: Cash(-3),
+            remaining_missing: 2,
+        };
+        assert_eq!(event.kind(), 14);
+        assert_eq!(event.at(), Nanos(7));
+        let encoded = event.encode();
+        assert_eq!(encoded.len(), 24);
+        assert_eq!(Event::decode(event.kind(), &encoded), Some(event));
+        for len in 0..encoded.len() {
+            assert!(Event::decode(kind::FEE_RECOVERED, &encoded[..len]).is_none());
+        }
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(Event::decode(kind::FEE_RECOVERED, &trailing).is_none());
     }
 }

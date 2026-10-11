@@ -22,6 +22,12 @@
 
 ### 变更
 
+- **实盘未知手续费在接收边界恢复。** Books 验证完整待补 fill，扣除费用或入账返佣
+  一次，直到已接收的未知费 cohort 全部补齐前仍保留费用不确定性。改动/已定价 fill
+  及冲突恢复被拒绝；报告零仍是证据。host 在费用 pending 时每 60 秒轮询，run 结束
+  再读一次，仅把新恢复记为 `FEE_EVIDENCE`。追加 core `FeeRecovered`（14，与 live
+  record-kind 命名空间独立）只改变现金/费用，不改变库存或成交次数。历史风控/现金
+  曲线不回溯改写，cohort 状态不证明完整账户历史覆盖。
 - **原始手续费历史可补齐原生记账中的未知费。** `Account::execution_fees` 返回逐
   成交结算币种证据或不支持，不伪造零。Binance adapter 使用分页账户成交，验证 symbol、
   资产、方向和稳定身份。run 结束时按 trade ID 与方向绑定已接收的未知费成交；稳定

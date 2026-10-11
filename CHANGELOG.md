@@ -29,6 +29,16 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Live missing commissions recover at their receive boundary.** Books
+  validate the complete pending fill, debit a charge or credit a rebate
+  exactly once, and retain fee uncertainty until the remaining accepted
+  unknown-fee cohort is empty. Altered/priced fills and conflicting recovery
+  are refused; reported zero is still evidence. The host polls every 60
+  seconds while fees are pending and once at run end, journalling only new
+  recoveries as `FEE_EVIDENCE`. Additive core `FeeRecovered` (14, separate
+  from the live record-kind namespace) changes cash/fees, not inventory or
+  execution count. Historical risk/cash curves are not backdated and this
+  cohort status is not account-history coverage proof.
 - **Original commission history enriches unknown-fee native accounting.**
   `Account::execution_fees` returns per-trade settlement-currency evidence
   or unsupported, never a fabricated zero. The Binance adapter uses paged
