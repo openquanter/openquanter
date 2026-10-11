@@ -10,6 +10,7 @@ use oq_core::PositionMode;
 use oq_engine::Tick;
 use oq_journal::Reader;
 use oq_margin::{Contract, TierTable};
+use oq_parity::{BaselineStatus, RunManifest};
 use oq_types::{Cash, Fee, InstrumentId, PriceTicks, QtyLots, Side, Stamp};
 
 use crate::books::{Booked, Books};
@@ -40,16 +41,40 @@ pub struct LedgerReport {
     pub funding_obligations: Option<crate::funding::FundingObligations>,
 }
 
+/// Identity-bound recorded accounting. Coverage is an independent result
+/// inside `accounting`, never inferred from a matching manifest.
+#[derive(Debug)]
+pub struct BoundLedgerReport {
+    pub accounting: LedgerReport,
+    pub manifest: RunManifest,
+    pub baseline: Option<BaselineStatus>,
+}
+
+const MANIFEST_SCOPE: &str = "openquanter native-ledger manifest v1";
+
+fn code_known(code: &str) -> bool {
+    matches!(code.len(), 40 | 64) && code.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+impl BoundLedgerReport {
+    #[must_use]
+    pub fn code_identity_known(&self) -> bool {
+        code_known(&self.manifest.code_commit)
+    }
+}
+
 /// Read a checksummed journal through the live books' kernel.
 ///
 /// # Errors
 /// Corruption, unknown records, missing context, legacy fee-less fills,
 /// duplicate economic events or a changed instrument within one session.
 pub fn replay(path: impl AsRef<Path>) -> Result<LedgerReport, String> {
-    let journal = Reader::open(path)
-        .map_err(|e| e.to_string())?
-        .replay()
-        .map_err(|e| e.to_string())?;
+    let reader = Reader::open(path).map_err(|e| e.to_string())?;
+    replay_records(&decode_snapshot(&reader)?)
+}
+
+fn decode_snapshot(reader: &Reader) -> Result<Vec<Record>, String> {
+    let journal = reader.replay().map_err(|e| e.to_string())?;
     if journal.stop != oq_journal::ReplayStop::Clean {
         return Err("ledger journal has an incomplete tail; use forensic replay to inspect its verified prefix".into());
     }
@@ -63,7 +88,102 @@ pub fn replay(path: impl AsRef<Path>) -> Result<LedgerReport, String> {
             records.push(record);
         }
     }
-    replay_records(&records)
+    Ok(records)
+}
+
+/// Hash and decode one immutable snapshot, binding the actual effective
+/// native accounting context. Code changes are named; changed input or
+/// context invalidates comparison. Unknown code cannot verify a baseline.
+pub fn replay_bound(
+    path: impl AsRef<Path>,
+    code_commit: &str,
+    expected: Option<&RunManifest>,
+) -> Result<BoundLedgerReport, String> {
+    let reader = Reader::open(path).map_err(|e| e.to_string())?;
+    let records = decode_snapshot(&reader)?;
+    let accounting = replay_records(&records)?;
+    let start = records
+        .iter()
+        .rposition(|r| matches!(r, Record::SessionStart { .. }))
+        .ok_or("session identity is missing")?;
+    let context = records[start + 1..]
+        .iter()
+        .find(|r| matches!(r, Record::LedgerStart { .. }))
+        .ok_or("journal has no native ledger context")?;
+    let mut config = MANIFEST_SCOPE.as_bytes().to_vec();
+    config.push(0);
+    config.extend(context.encode());
+    let revision = if code_known(code_commit) {
+        code_commit.to_ascii_lowercase()
+    } else {
+        "unknown".into()
+    };
+    let manifest = RunManifest::from_content(revision, reader.snapshot(), &config, MANIFEST_SCOPE);
+    let baseline = if let Some(expected) = expected {
+        if expected.label != MANIFEST_SCOPE {
+            return Err("manifest describes a different replay scope".into());
+        }
+        if !code_known(&expected.code_commit) || !code_known(&manifest.code_commit) {
+            return Err("manifest verification needs a known build code revision".into());
+        }
+        let status = expected.compare(&manifest);
+        if let BaselineStatus::Invalidated { changed } = &status {
+            return Err(format!(
+                "manifest invalidated: {}",
+                changed
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Some(status)
+    } else {
+        None
+    };
+    Ok(BoundLedgerReport {
+        accounting,
+        manifest,
+        baseline,
+    })
+}
+
+/// A strict, scope-named sidecar for the existing RunManifest identity.
+pub fn manifest_text(manifest: &RunManifest) -> Result<String, String> {
+    if manifest.label != MANIFEST_SCOPE
+        || !(code_known(&manifest.code_commit) || manifest.code_commit == "unknown")
+        || ![&manifest.data_hash, &manifest.config_hash]
+            .into_iter()
+            .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err("invalid native ledger manifest identity or scope".into());
+    }
+    Ok(format!(
+        "{MANIFEST_SCOPE}\ncode_commit={}\ndata_hash={}\nconfig_hash={}\n",
+        manifest.code_commit, manifest.data_hash, manifest.config_hash
+    ))
+}
+
+/// Reject ambiguous, duplicate, extra or partial sidecar fields.
+pub fn parse_manifest(text: &str) -> Result<RunManifest, String> {
+    let lines: Vec<_> = text.lines().collect();
+    if lines.len() != 4 || lines[0] != MANIFEST_SCOPE {
+        return Err("invalid native ledger manifest header or field count".into());
+    }
+    let get = |index: usize, key: &str| {
+        lines[index]
+            .strip_prefix(key)
+            .map(str::to_string)
+            .ok_or_else(|| "invalid native ledger manifest field".to_string())
+    };
+    let manifest = RunManifest {
+        code_commit: get(1, "code_commit=")?.to_ascii_lowercase(),
+        data_hash: get(2, "data_hash=")?.to_ascii_lowercase(),
+        config_hash: get(3, "config_hash=")?.to_ascii_lowercase(),
+        label: MANIFEST_SCOPE.into(),
+    };
+    manifest_text(&manifest)?;
+    Ok(manifest)
 }
 
 /// The same deterministic fold for callers with already verified records.

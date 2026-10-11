@@ -30,6 +30,8 @@ OPTIONS:
     --orders     Only the order lifecycle, without the ticks
     --ledger     Replay recorded accounting; report unknown fees/coverage
     --require-coverage  With --ledger, return 2 unless fee/funding evidence is complete
+    --write-manifest <FILE>  With --ledger, create a new identity sidecar
+    --verify-manifest <FILE> With --ledger, reject changed input/context or unknown code
     --help
 ";
 
@@ -40,8 +42,31 @@ fn main() -> ExitCode {
         return ExitCode::from(u8::from(args.is_empty()));
     }
     let path = &args[0];
+    let verify = match option_value(&args, "--verify-manifest") {
+        Ok(value) => value,
+        Err(why) => {
+            eprintln!("oq-replay: {why}");
+            return ExitCode::from(2);
+        }
+    };
+    let write = match option_value(&args, "--write-manifest") {
+        Ok(value) => value,
+        Err(why) => {
+            eprintln!("oq-replay: {why}");
+            return ExitCode::from(2);
+        }
+    };
     if args.iter().any(|a| a == "--ledger") {
-        return render_ledger(path, args.iter().any(|a| a == "--require-coverage"));
+        return render_ledger(
+            path,
+            args.iter().any(|a| a == "--require-coverage"),
+            verify,
+            write,
+        );
+    }
+    if verify.is_some() || write.is_some() {
+        eprintln!("oq-replay: manifest options require --ledger");
+        return ExitCode::from(2);
     }
     let orders_only = args.iter().any(|a| a == "--orders");
 
@@ -160,14 +185,82 @@ fn main() -> ExitCode {
     }
 }
 
-fn render_ledger(path: &str, require_coverage: bool) -> ExitCode {
-    let report = match oq_live::ledger::replay(path) {
+fn option_value<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>, String> {
+    let positions: Vec<_> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, arg)| (arg == name).then_some(i))
+        .collect();
+    match positions.as_slice() {
+        [] => Ok(None),
+        [i] => args
+            .get(i + 1)
+            .filter(|value| !value.starts_with("--"))
+            .map(|value| Some(value.as_str()))
+            .ok_or_else(|| format!("{name} needs a file path")),
+        _ => Err(format!("{name} was repeated")),
+    }
+}
+
+fn render_ledger(
+    path: &str,
+    require_coverage: bool,
+    verify: Option<&str>,
+    write: Option<&str>,
+) -> ExitCode {
+    let expected = match verify
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| oq_live::ledger::parse_manifest(&text))
+        })
+        .transpose()
+    {
+        Ok(expected) => expected,
+        Err(why) => {
+            eprintln!("oq-replay: manifest: {why}");
+            return ExitCode::from(2);
+        }
+    };
+    let code = option_env!("GIT_COMMIT")
+        .or(option_env!("GITHUB_SHA"))
+        .unwrap_or("unknown");
+    let bound = match oq_live::ledger::replay_bound(path, code, expected.as_ref()) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("oq-replay ledger: {error}");
-            return ExitCode::FAILURE;
+            return if verify.is_some() {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            };
         }
     };
+    if let Some(path) = write {
+        use std::io::Write;
+        let result = oq_live::ledger::manifest_text(&bound.manifest).and_then(|text| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| e.to_string())
+                .and_then(|mut file| file.write_all(text.as_bytes()).map_err(|e| e.to_string()))
+        });
+        if let Err(why) = result {
+            eprintln!("oq-replay: cannot create manifest: {why}");
+            return ExitCode::from(2);
+        }
+    }
+    println!("code commit        {}", bound.manifest.code_commit);
+    println!("journal hash       {}", bound.manifest.data_hash);
+    println!("native context hash {}", bound.manifest.config_hash);
+    if !bound.code_identity_known() {
+        println!("code identity      unknown; baseline verification unavailable");
+    }
+    if let Some(status) = &bound.baseline {
+        println!("manifest baseline  {status:?}");
+    }
+    let report = bound.accounting;
     let cash = |v: oq_types::Cash| oq_gateway::exec::decimal(v.0, 8);
     println!("ledger symbol      {} {:?}", report.symbol, report.mode);
     println!("starting balance   {}", cash(report.starting_balance));

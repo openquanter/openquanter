@@ -94,6 +94,13 @@ impl Reader {
         &self.path
     }
 
+    /// The immutable file snapshot that `replay` decodes. Hash this,
+    /// rather than reopening a growing journal and binding different bytes.
+    #[must_use]
+    pub fn snapshot(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// Decode every whole record, stopping at a torn tail.
     ///
     /// # Errors
