@@ -29,6 +29,33 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Entry cost is independent of the displayed price tick (ledger and
+  margin semantics).** Each leg retains its quote cost in wide fixed-point
+  arithmetic. Partial-close P&L is truncated at cash precision, with the
+  residual carried to final flattening; adding a fill and crossing through
+  flat no longer reuse a rounded average as the cost basis. Unrealized
+  equity, margin views and liquidation pricing use the same cost. Adopted
+  positions still carry only the entry precision their evidence supplies.
+  Kernel replay fingerprints include the precise costs. Event discriminants
+  and serialized payloads are unchanged.
+
+  **Synthetic parity report** (one quote unit per tick-lot; no fees/funding):
+
+  | Executions | Previous realized P&L | Corrected realized P&L |
+  |---|---:|---:|
+  | Buy 1 @ 100, buy 2 @ 101, sell 3 @ 102 | 6 | 4 |
+  | Sell 1 @ 100, sell 2 @ 101, buy 3 @ 102 | −6 | −4 |
+  | First close of 1 lot in the long case | 2 | 1.33333333 |
+  | Remaining close of 2 lots in the long case | 4 | 2.66666667 |
+
+  Quantities and executions in these fixtures are unchanged. The
+  `martingale_ladder` golden's `forfeited` value changes from 61.5320 to
+  61.5288 (still displayed as 61.53); final enforced equity remains zero.
+  The margin-free arm's final equity changes from 20908.1144 to 20908.0892,
+  and its minimum from −30302.1412 to −30302.1664. Quoted output is updated
+  to 20908.09 and −30302.17. The maintainer explicitly confirmed all three
+  golden updates. Assertions retain exact cash equality; no tolerance was
+  loosened.
 - **Liquidation settles at the bankruptcy price (margin semantics).**
   A liquidated account used to be closed at the mark and handed back
   whatever was left — its remaining maintenance margin, a free

@@ -54,7 +54,7 @@ The arms part at sample 458 of 459 — which is to say, at the liquidation
 and not before. The paired quantiles are identical *by construction*, and
 the zeros they show are not evidence that margin does not matter. In this
 very run the venue closed the account and it ended at 0.00 while the
-margin-free arm claimed 20,908.11. The damage is entirely outside the paired region,
+margin-free arm claimed 20,908.09. The damage is entirely outside the paired region,
 which is why `Fidelity::paired_until` is reported and why every paired
 statistic stops there rather than differencing two series that have
 stopped describing the same account.

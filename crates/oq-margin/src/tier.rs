@@ -65,7 +65,7 @@ impl Contract {
     /// exposure.
     #[must_use]
     pub const fn notional(&self, price: PriceTicks, qty: QtyLots) -> Cash {
-        let v = price.0 as i128 * qty.0.saturating_abs() as i128 * self.tick_cash as i128;
+        let v = self.notional_wide(price, qty);
         // Saturating, not truncating. `as i64` on an i128 **wraps**, and a
         // notional that wrapped came back negative — which put the
         // position in the first tier, produced a maintenance requirement
@@ -75,6 +75,31 @@ impl Contract {
         // none. Found by a generated input; the hand-written cases all
         // used sizes that fit.
         Cash(saturate(v))
+    }
+
+    /// Quote cost without narrowing to the account's cash accumulator.
+    ///
+    /// Entry cost must survive price-grid rounding when fills are blended.
+    /// Saturation at the wide boundary is explicit rather than integer wrap.
+    #[must_use]
+    pub const fn notional_wide(&self, price: PriceTicks, qty: QtyLots) -> i128 {
+        (price.0 as i128)
+            .saturating_mul(qty.0.saturating_abs() as i128)
+            .saturating_mul(self.tick_cash as i128)
+    }
+
+    /// Profit using the remaining quote cost, not the displayed entry tick.
+    #[must_use]
+    pub const fn unrealized_from_cost(&self, cost: i128, mark: PriceTicks, qty: QtyLots) -> Cash {
+        if qty.0 == 0 {
+            return Cash::ZERO;
+        }
+        let delta = self.notional_wide(mark, qty).saturating_sub(cost);
+        Cash(saturate(if qty.0 > 0 {
+            delta
+        } else {
+            delta.saturating_neg()
+        }))
     }
 
     /// Signed profit of a position marked from `entry` to `mark`.

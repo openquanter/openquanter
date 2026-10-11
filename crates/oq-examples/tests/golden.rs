@@ -176,10 +176,10 @@ fn the_margin_free_arm_reports_an_account_that_did_not_survive() {
     assert_eq!(report.enforced.final_equity, Cash(0));
     assert_eq!(
         report.enforced.liquidations[0].forfeited,
-        Cash(6_153_200_000)
+        Cash(6_152_880_000)
     );
-    assert_eq!(report.ignored.final_equity, Cash(2_090_811_440_000));
-    assert_eq!(report.ignored.min_equity, Cash(-3_030_214_120_000));
+    assert_eq!(report.ignored.final_equity, Cash(2_090_808_920_000));
+    assert_eq!(report.ignored.min_equity, Cash(-3_030_216_640_000));
 }
 
 #[test]

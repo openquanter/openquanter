@@ -20,6 +20,7 @@
 //! settlements is liquidated then, not later, which is what the venue
 //! does and what a backtest that only checks at settlement misses.
 
+use crate::cost::EntryCost;
 use crate::event::Event;
 use oq_engine::Tick;
 
@@ -259,18 +260,89 @@ impl Holding {
     /// Unrealized profit on both legs at the current mark.
     #[must_use]
     pub fn unrealized(&self) -> Cash {
-        let long = if self.qty.is_zero() {
-            Cash::ZERO
+        self.unrealized_at(self.mark)
+    }
+
+    /// Remaining entry cost in quote cash units, before display rounding.
+    #[must_use]
+    pub fn entry_cost(&self) -> i128 {
+        self.long_cost.value(self.contract, self.qty, self.entry)
+    }
+
+    #[must_use]
+    pub fn short_entry_cost(&self) -> i128 {
+        self.short_cost
+            .value(self.contract, self.short_qty, self.short_entry)
+    }
+
+    fn unrealized_at(&self, mark: PriceTicks) -> Cash {
+        self.contract
+            .unrealized_from_cost(self.entry_cost(), mark, self.qty)
+            .add(
+                self.contract
+                    .unrealized_from_cost(self.short_entry_cost(), mark, self.short_qty),
+            )
+    }
+
+    fn open_leg(&mut self, short: bool, qty: QtyLots, price: PriceTicks, sign: i64) {
+        if qty.is_zero() {
+            return;
+        }
+        let (held, cost) = if short {
+            (self.short_qty, self.short_entry_cost())
         } else {
-            self.contract.unrealized(self.entry, self.mark, self.qty)
+            (self.qty, self.entry_cost())
         };
-        let short = if self.short_qty.is_zero() {
-            Cash::ZERO
+        let size = held.0.saturating_abs().saturating_add(qty.0);
+        let value = cost.saturating_add(self.contract.notional_wide(price, qty));
+        let denominator = i128::from(size) * i128::from(self.contract.tick_cash);
+        let entry = if denominator > 0 {
+            PriceTicks(
+                (value / denominator).clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+            )
         } else {
-            self.contract
-                .unrealized(self.short_entry, self.mark, self.short_qty)
+            price
         };
-        long.add(short)
+        let total = QtyLots(sign * size);
+        if short {
+            self.short_qty = total;
+            self.short_entry = entry;
+            self.short_cost.set(total, entry, value);
+        } else {
+            self.qty = total;
+            self.entry = entry;
+            self.long_cost.set(total, entry, value);
+        }
+    }
+
+    fn close_leg(&mut self, short: bool, qty: QtyLots, price: PriceTicks) -> Cash {
+        let (held, entry, cost) = if short {
+            (self.short_qty, self.short_entry, self.short_entry_cost())
+        } else {
+            (self.qty, self.entry, self.entry_cost())
+        };
+        if held.is_zero() {
+            return Cash::ZERO;
+        }
+        let closing = qty.0.min(held.0.saturating_abs());
+        let exit = self.contract.notional_wide(price, QtyLots(closing));
+        let (value, pnl) = crate::cost::close(cost, held, closing, exit);
+        let left = QtyLots(held.0 - closing * if held.0 > 0 { 1 } else { -1 });
+        let entry = if left.is_zero() {
+            PriceTicks::ZERO
+        } else {
+            entry
+        };
+        if short {
+            self.short_qty = left;
+            self.short_entry = entry;
+            self.short_cost.set(left, entry, value);
+        } else {
+            self.qty = left;
+            self.entry = entry;
+            self.long_cost.set(left, entry, value);
+        }
+        pnl
     }
 }
 
@@ -305,6 +377,8 @@ pub struct Holding {
     pub short_entry: PriceTicks,
     /// The last price this instrument traded at.
     pub mark: PriceTicks,
+    long_cost: EntryCost,
+    short_cost: EntryCost,
 }
 
 impl State {
@@ -326,6 +400,8 @@ impl State {
                 short_entry: PriceTicks::ZERO,
                 mark: PriceTicks::ZERO,
                 instrument,
+                long_cost: EntryCost::default(),
+                short_cost: EntryCost::default(),
             }],
             mode: PositionMode::OneWay,
             balances: Balances::of(Currency::usdt(), starting_balance),
@@ -387,6 +463,7 @@ impl State {
             self.holding().qty,
             self.balance(),
         )
+        .with_entry_cost(self.holding().entry_cost())
     }
 
     /// Account for opposing exposure as two legs rather than one net.
@@ -501,6 +578,8 @@ impl State {
             short_qty: QtyLots::ZERO,
             short_entry: PriceTicks::ZERO,
             mark: PriceTicks::ZERO,
+            long_cost: EntryCost::default(),
+            short_cost: EntryCost::default(),
         });
         self.holdings.last_mut().expect("just pushed")
     }
@@ -603,6 +682,7 @@ impl State {
             self.holding().short_qty,
             self.balance(),
         )
+        .with_entry_cost(self.holding().short_entry_cost())
     }
 
     /// Account equity at the current mark.
@@ -697,42 +777,26 @@ impl State {
         }
         let signed = fill.position_delta();
         let old = self.holdings[h].qty;
-        let new = old.add(signed);
-
         let reduces = old.0 != 0 && (old.0 > 0) != (signed.0 > 0);
         if reduces {
-            let closed = signed.0.abs().min(old.0.abs());
-            let closed_signed = QtyLots(closed * if old.0 > 0 { 1 } else { -1 });
-            // This holding's contract, not the first one's: two
-            // instruments with different multipliers realized one's
-            // profit at the other's size.
-            let pnl = self.holdings[h].contract.unrealized(
-                self.holdings[h].entry,
-                fill.price,
-                closed_signed,
-            );
+            let closed = signed.0.saturating_abs().min(old.0.saturating_abs());
+            let pnl = self.at(h).close_leg(false, QtyLots(closed), fill.price);
             self.realized = self.realized.add(pnl);
             self.credit(pnl);
-        }
-
-        if new.0 == 0 {
-            self.at(h).entry = PriceTicks::ZERO;
-        } else if old.0 == 0 || (old.0 > 0) == (new.0 > 0) && !reduces {
-            // Opening or adding: the entry price is the size-weighted
-            // average, which is what the venue reports and what every
-            // margin calculation is written against.
-            let old_notional = self.holdings[h].entry.0 as i128 * old.0.abs() as i128;
-            let add_notional = fill.price.0 as i128 * signed.0.abs() as i128;
-            let total = old.0.abs() as i128 + signed.0.abs() as i128;
-            if total > 0 {
-                self.at(h).entry = PriceTicks(((old_notional + add_notional) / total) as i64);
+            let remainder = signed.0.saturating_abs() - closed;
+            if remainder > 0 {
+                // Crossing through flat starts a fresh cost basis.
+                self.at(h)
+                    .open_leg(false, QtyLots(remainder), fill.price, signed.0.signum());
             }
-        } else if (old.0 > 0) != (new.0 > 0) {
-            // Crossed through flat: the remainder is a new position at
-            // the fill price, not a blend with the side just closed.
-            self.at(h).entry = fill.price;
+        } else {
+            self.at(h).open_leg(
+                false,
+                QtyLots(signed.0.saturating_abs()),
+                fill.price,
+                signed.0.signum(),
+            );
         }
-        self.at(h).qty = new;
     }
 
     /// Apply a fill to whichever leg it names.
@@ -766,79 +830,13 @@ impl State {
         };
 
         if opens {
-            if long_leg {
-                let (q, e) = Self::blend(
-                    self.holdings[h].qty,
-                    self.holdings[h].entry,
-                    qty,
-                    fill.price,
-                    1,
-                );
-                self.at(h).qty = q;
-                self.at(h).entry = e;
-            } else {
-                let (q, e) = Self::blend(
-                    self.holdings[h].short_qty,
-                    self.holdings[h].short_entry,
-                    qty,
-                    fill.price,
-                    -1,
-                );
-                self.at(h).short_qty = q;
-                self.at(h).short_entry = e;
-            }
+            self.at(h)
+                .open_leg(!long_leg, qty, fill.price, if long_leg { 1 } else { -1 });
             return;
         }
-
-        let (held, entry) = if long_leg {
-            (self.holdings[h].qty, self.holdings[h].entry)
-        } else {
-            (self.holdings[h].short_qty, self.holdings[h].short_entry)
-        };
-        if held.0 == 0 {
-            return;
-        }
-        let closing = qty.0.min(held.0.abs());
-        let signed_closed = QtyLots(closing * if held.0 > 0 { 1 } else { -1 });
-        let pnl = self.holdings[h]
-            .contract
-            .unrealized(entry, fill.price, signed_closed);
+        let pnl = self.at(h).close_leg(!long_leg, qty, fill.price);
         self.realized = self.realized.add(pnl);
         self.credit(pnl);
-
-        let left = QtyLots(held.0 - signed_closed.0);
-        if long_leg {
-            self.at(h).qty = left;
-            if left.0 == 0 {
-                self.at(h).entry = PriceTicks::ZERO;
-            }
-        } else {
-            self.at(h).short_qty = left;
-            if left.0 == 0 {
-                self.at(h).short_entry = PriceTicks::ZERO;
-            }
-        }
-    }
-
-    /// Size-weighted average of an existing leg and an addition.
-    fn blend(
-        held: QtyLots,
-        entry: PriceTicks,
-        add: QtyLots,
-        price: PriceTicks,
-        sign: i64,
-    ) -> (QtyLots, PriceTicks) {
-        let held_abs = held.0.abs();
-        let total = held_abs + add.0;
-        if total == 0 {
-            return (QtyLots::ZERO, PriceTicks::ZERO);
-        }
-        let notional =
-            i128::from(entry.0) * i128::from(held_abs) + i128::from(price.0) * i128::from(add.0);
-        (
-            QtyLots(sign * total),
-            PriceTicks((notional / i128::from(total)) as i64),
-        )
     }
 
     /// Close the position because the venue liquidated it.
@@ -907,14 +905,7 @@ impl State {
         // leave one side running, and reporting only the long would
         // understate what the account lost.
         let holding = &self.holdings[h];
-        let pnl = holding
-            .contract
-            .unrealized(holding.entry, price, holding.qty)
-            .add(
-                holding
-                    .contract
-                    .unrealized(holding.short_entry, price, holding.short_qty),
-            );
+        let pnl = holding.unrealized_at(price);
         self.realized = self.realized.add(pnl);
         self.credit(pnl);
         let equity = self.balance();
@@ -929,6 +920,8 @@ impl State {
         holding.entry = PriceTicks::ZERO;
         holding.short_qty = QtyLots::ZERO;
         holding.short_entry = PriceTicks::ZERO;
+        holding.long_cost = EntryCost::default();
+        holding.short_cost = EntryCost::default();
         holding.engine.cancel_all();
         Output::Liquidated {
             at: self.now,
@@ -1444,6 +1437,11 @@ impl Kernel {
             working: self.working.clone(),
             enforce_liquidation: self.state.enforce_liquidation,
             id_watermark: self.state.holding().engine.id_watermark(),
+            entry_costs: self
+                .state
+                .holdings()
+                .map(|h| (h.instrument, h.entry_cost(), h.short_entry_cost()))
+                .collect(),
         }
     }
 
@@ -1503,6 +1501,8 @@ pub struct Fingerprint {
     pub enforce_liquidation: bool,
     /// Identifier watermark, so a replay that skipped an id is caught.
     pub id_watermark: (u64, u64),
+    /// Precise costs are state even when their displayed ticks are identical.
+    entry_costs: Vec<(InstrumentId, i128, i128)>,
 }
 
 /// Account state at a point in the run.
