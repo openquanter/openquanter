@@ -27,6 +27,8 @@ publishes it verbatim, and refuses a tag without one.
 
 ## Unreleased
 
+## 2.0.1 — 2026-10-11
+
 ### Changed
 
 - **Warm-up research evidence has immutable lineage.**

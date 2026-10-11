@@ -20,6 +20,8 @@
 
 ## 未发布
 
+## 2.0.1 — 2026-10-11
+
 ### 变更
 
 - **warm-up 研究证据具备不可变关联。** `oq_parity::research::warmup_study` 将实际消费
