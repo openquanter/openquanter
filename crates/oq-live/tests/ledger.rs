@@ -178,6 +178,195 @@ fn write(records: &[Record]) -> std::path::PathBuf {
     write_with_tail(records, None)
 }
 
+fn funding_state(
+    at_ms: i64,
+    pending_ms: Vec<i64>,
+    schedule_gaps: Vec<oq_live::funding::ScheduleGap>,
+    problem: Option<&str>,
+) -> Record {
+    Record::FundingState {
+        at: Nanos(at_ms * 1_000_000),
+        obligations: oq_live::funding::FundingObligations {
+            pending_ms,
+            schedule_gaps,
+            problem: problem.map(str::to_string),
+        },
+    }
+}
+
+#[test]
+fn durable_pending_can_only_disappear_after_its_settlement_is_on_the_tape() {
+    let base = records(PositionMode::OneWay);
+    let mut erased = base.clone();
+    erased.push(funding_state(7000, vec![7000], vec![], None));
+    erased.push(funding_state(8000, vec![], vec![], None));
+    assert!(replay_records(&erased).unwrap_err().contains("disappeared"));
+    let mut resolved = base;
+    resolved.push(funding_state(7000, vec![7000], vec![], None));
+    resolved.push(identified_funding(
+        7000,
+        vec![(1, 7000, Cash(-5))],
+        Cash(-5),
+    ));
+    resolved.push(funding_state(8000, vec![], vec![], None));
+    assert!(
+        replay_records(&resolved)
+            .unwrap()
+            .funding_obligations
+            .unwrap()
+            .pending_ms
+            .is_empty()
+    );
+    resolved.pop();
+    assert!(
+        replay_records(&resolved)
+            .unwrap()
+            .funding_obligations
+            .unwrap()
+            .pending_ms
+            .is_empty(),
+        "a booked settlement discharges its obligation even if the final state flush was interrupted"
+    );
+}
+
+#[test]
+fn durable_schedule_gaps_and_uncertainty_cannot_be_erased_or_rewritten() {
+    use oq_live::funding::ScheduleGap;
+    let mut all = records(PositionMode::OneWay);
+    all.push(funding_state(
+        7000,
+        vec![],
+        vec![ScheduleGap {
+            since_ms: 6000,
+            until_ms: None,
+        }],
+        Some("schedule unknown"),
+    ));
+    let mut erased = all.clone();
+    erased.push(funding_state(
+        8000,
+        vec![],
+        vec![],
+        Some("schedule unknown"),
+    ));
+    assert!(replay_records(&erased).unwrap_err().contains("disappeared"));
+    let mut cleared = all.clone();
+    cleared.push(funding_state(
+        8000,
+        vec![],
+        vec![ScheduleGap {
+            since_ms: 6000,
+            until_ms: Some(8000),
+        }],
+        None,
+    ));
+    assert!(
+        replay_records(&cleared)
+            .unwrap_err()
+            .contains("silently cleared")
+    );
+    all.push(funding_state(
+        8000,
+        vec![],
+        vec![ScheduleGap {
+            since_ms: 6000,
+            until_ms: Some(8000),
+        }],
+        Some("schedule unknown"),
+    ));
+    let report = replay_records(&all).unwrap();
+    assert_eq!(
+        report.funding_obligations.unwrap().schedule_gaps[0].until_ms,
+        Some(8000)
+    );
+    assert!(!report.funding_coverage);
+    all.push(funding_state(
+        9000,
+        vec![],
+        vec![ScheduleGap {
+            since_ms: 6000,
+            until_ms: Some(9000),
+        }],
+        Some("schedule unknown"),
+    ));
+    assert!(replay_records(&all).unwrap_err().contains("rewritten"));
+}
+
+#[test]
+fn obligation_payload_bounds_flags_and_timestamps_are_validated() {
+    use oq_live::funding::ScheduleGap;
+    let record = funding_state(
+        8000,
+        vec![7000],
+        vec![ScheduleGap {
+            since_ms: 7001,
+            until_ms: None,
+        }],
+        Some("awaiting history"),
+    );
+    let bytes = record.encode();
+    assert_eq!(Record::decode(record.kind(), &bytes), Some(record.clone()));
+    for len in 0..bytes.len() {
+        assert!(Record::decode(record.kind(), &bytes[..len]).is_none());
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(Record::decode(record.kind(), &trailing).is_none());
+    let mut bad_flag = bytes;
+    bad_flag[40] = 2;
+    assert!(Record::decode(record.kind(), &bad_flag).is_none());
+    for record in [
+        funding_state(8000, vec![7000, 7000], vec![], None),
+        funding_state(8000, vec![9000], vec![], None),
+        funding_state(
+            8000,
+            vec![],
+            vec![ScheduleGap {
+                since_ms: 7000,
+                until_ms: Some(6000),
+            }],
+            None,
+        ),
+    ] {
+        let mut all = records(PositionMode::OneWay);
+        all.push(record);
+        assert!(replay_records(&all).is_err());
+    }
+}
+
+#[test]
+fn same_instant_schedule_loss_and_rediscovery_have_a_valid_durable_boundary() {
+    let t = 7000;
+    let mut watch = oq_live::funding::FundingWatch::new(Instrument::linear(1, 0), Ok(Some(t)));
+    watch.on_time(
+        t,
+        (QtyLots(0), QtyLots(0)),
+        (QtyLots(0), QtyLots(0)),
+        || None,
+    );
+    let mut all = records(PositionMode::OneWay);
+    all.push(Record::FundingState {
+        at: Nanos(t * 1_000_000),
+        obligations: watch.obligations(),
+    });
+    watch.rediscover_schedule(t, Ok(Some(t + 1000)));
+    all.push(Record::FundingState {
+        at: Nanos(t * 1_000_000),
+        obligations: watch.obligations(),
+    });
+    let report = replay_records(&all).unwrap();
+    let obligations = report.funding_obligations.unwrap();
+    assert_eq!(
+        obligations.schedule_gaps[0],
+        oq_live::funding::ScheduleGap {
+            since_ms: t,
+            until_ms: Some(t)
+        }
+    );
+    assert!(obligations.problem.is_some());
+    assert!(!report.funding_coverage);
+}
+
 #[test]
 fn recovered_cash_is_replayable_but_has_no_invented_model_amount_or_coverage() {
     let mut all = records(PositionMode::OneWay);

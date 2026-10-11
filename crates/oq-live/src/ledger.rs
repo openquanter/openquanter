@@ -34,6 +34,8 @@ pub struct LedgerReport {
     pub funding_identified_lines: usize,
     /// Venue lines booked without a historical model amount.
     pub funding_unmodelled_lines: usize,
+    /// Latest durable uncertainty; `None` is legacy/unrecorded, not complete.
+    pub funding_obligations: Option<crate::funding::FundingObligations>,
 }
 
 /// Read a checksummed journal through the live books' kernel.
@@ -89,6 +91,7 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
     let mut funding = BTreeSet::new();
     let mut funding_ids = BTreeSet::new();
     let mut funding_unmodelled_lines = 0;
+    let mut funding_state: Option<(oq_types::Nanos, crate::funding::FundingObligations)> = None;
     let mut adopted = false;
     for record in &records[start + 1..] {
         match record {
@@ -250,6 +253,57 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
                     funding_unmodelled_lines += 1;
                 }
             }
+            Record::FundingState { at, obligations } => {
+                let now_ms = at.0 / 1_000_000;
+                if obligations.pending_ms.windows(2).any(|p| p[0] >= p[1])
+                    || obligations.pending_ms.iter().any(|t| *t > now_ms)
+                {
+                    return Err(
+                        "funding pending timestamps are duplicate, unordered or after receipt"
+                            .into(),
+                    );
+                }
+                for (i, gap) in obligations.schedule_gaps.iter().enumerate() {
+                    if gap
+                        .until_ms
+                        .is_some_and(|until| until < gap.since_ms || until > now_ms)
+                        || gap.since_ms > now_ms.saturating_add(1)
+                        || i > 0
+                            && obligations.schedule_gaps[i - 1]
+                                .until_ms
+                                .is_none_or(|until| until >= gap.since_ms)
+                    {
+                        return Err("funding schedule gap boundaries are invalid".into());
+                    }
+                }
+                if let Some((previous_at, previous)) = &funding_state {
+                    if at < previous_at {
+                        return Err("funding state receive time moved backwards".into());
+                    }
+                    if previous.problem.is_some() && obligations.problem.is_none() {
+                        return Err("funding uncertainty was silently cleared".into());
+                    }
+                    for pending in &previous.pending_ms {
+                        if !obligations.pending_ms.contains(pending) && !funding.contains(pending) {
+                            return Err("funding pending obligation disappeared without a booked settlement".into());
+                        }
+                    }
+                    for previous_gap in &previous.schedule_gaps {
+                        let Some(gap) = obligations
+                            .schedule_gaps
+                            .iter()
+                            .find(|gap| gap.since_ms == previous_gap.since_ms)
+                        else {
+                            return Err("funding schedule gap obligation disappeared".into());
+                        };
+                        if previous_gap.until_ms.is_some() && previous_gap.until_ms != gap.until_ms
+                        {
+                            return Err("funding schedule gap history was rewritten".into());
+                        }
+                    }
+                }
+                funding_state = Some((*at, obligations.clone()));
+            }
             _ => {}
         }
     }
@@ -257,6 +311,12 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
     if !adopted {
         return Err("initial positions are unknown; explicit adoption is required".into());
     }
+    let funding_obligations = funding_state.map(|(_, mut obligations)| {
+        obligations
+            .pending_ms
+            .retain(|pending| !funding.contains(pending));
+        obligations
+    });
     let (realized, fees, funding) = b.realized_parts();
     let ctx = b.context(Tick::default(), 0);
     let legs = if mode == PositionMode::Hedge {
@@ -281,5 +341,6 @@ pub fn replay_records(records: &[Record]) -> Result<LedgerReport, String> {
         funding_coverage: false,
         funding_identified_lines: funding_ids.len(),
         funding_unmodelled_lines,
+        funding_obligations,
     })
 }

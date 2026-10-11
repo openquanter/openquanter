@@ -1024,6 +1024,7 @@ where
         funding.on_time(now.0 / 1_000_000, books.legs(), shadow.legs(), || {
             trader.venue().next_funding_ms(&symbol).ok().flatten()
         });
+        trader.session_mut().record_funding_state(now, &funding);
 
         // Market data, drained rather than sampled.
         //
@@ -1715,6 +1716,7 @@ where
                     .session_mut()
                     .record_recovered_funding(at, &recovered);
             }
+            trader.session_mut().record_funding_state(at, &funding);
         }
 
         if let Some(a) = &artifacts
@@ -1919,6 +1921,9 @@ where
                 .record_recovered_funding(at, &recovered);
         }
     }
+    trader
+        .session_mut()
+        .record_funding_state(clock.wall(), &funding);
     if let Some(why) = funding.problem() {
         println!("funding          unavailable: {why}");
     }

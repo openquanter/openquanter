@@ -181,6 +181,24 @@ fn render_ledger(path: &str, require_coverage: bool) -> ExitCode {
         report.funding_unmodelled_lines
     );
     println!("executions         {}", report.executions);
+    if let Some(obligations) = &report.funding_obligations {
+        for pending in &obligations.pending_ms {
+            println!("funding pending    {pending}");
+        }
+        for gap in &obligations.schedule_gaps {
+            println!(
+                "funding gap        {}..{} (coverage unverified)",
+                gap.since_ms,
+                gap.until_ms
+                    .map_or_else(|| "open".into(), |until| until.to_string())
+            );
+        }
+        if let Some(problem) = &obligations.problem {
+            println!("funding uncertainty {problem}");
+        }
+    } else {
+        println!("funding obligations unrecorded (legacy/unknown)");
+    }
     println!("missing fees       {}", report.missing_fees);
     println!(
         "funding coverage   {}",
@@ -312,6 +330,13 @@ fn render(record: &Record) -> String {
         } => format!(
             "operator {}  {command} by {origin}: {reason} -> {outcome}",
             at.0
+        ),
+        Record::FundingState { at, obligations } => format!(
+            "funding state {}  {} pending, {} schedule gap(s), uncertainty {:?}",
+            at.0,
+            obligations.pending_ms.len(),
+            obligations.schedule_gaps.len(),
+            obligations.problem
         ),
         Record::FundingRecovered {
             at,

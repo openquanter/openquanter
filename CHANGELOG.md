@@ -29,6 +29,16 @@ publishes it verbatim, and refuses a tag without one.
 
 ### Changed
 
+- **Funding uncertainty survives in the journal.** Additive `FUNDING_STATE`
+  (16) records changed pending timestamps, open/closed schedule gaps and
+  uncertainty reasons, even when no cash was booked. Native replay rejects
+  a pending obligation disappearing without its settlement, erased/rewritten
+  gap history, silently cleared uncertainty and invalid boundaries. A booked
+  settlement discharges its pending timestamp if the final state write was
+  interrupted. CLI diagnostics distinguish unrecorded legacy obligations
+  from recorded gaps; an empty pending list is still not coverage proof.
+  Schedule gaps now begin at discovery loss itself, including same-instant
+  rediscovery, without a one-millisecond future boundary.
 - **Confirmed funding during unknown schedules can recover venue cash.**
   The host keeps polling recorded schedule gaps even after rediscovery,
   reads ledger rows independently of rate availability, and books unseen

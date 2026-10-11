@@ -149,6 +149,14 @@ pub struct RecoveredFunding {
     pub lines: Vec<FundingCharge>,
 }
 
+/// Durable uncertainty, separate from observed funding cash totals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingObligations {
+    pub pending_ms: Vec<i64>,
+    pub schedule_gaps: Vec<ScheduleGap>,
+    pub problem: Option<String>,
+}
+
 /// Settlements crossed, and what has been learnt about them.
 #[derive(Debug, Clone)]
 pub struct FundingWatch {
@@ -226,7 +234,7 @@ impl FundingWatch {
         // and the venue changes them.
         self.next_ms = next().filter(|n| *n > t);
         if self.next_ms.is_none() {
-            self.begin_schedule_gap(t.saturating_add(1));
+            self.begin_schedule_gap(t);
         }
         if self.next_ms.is_none() && self.problem.is_none() {
             self.problem = Some(format!("the settlement after {t} could not be read"));
@@ -272,6 +280,15 @@ impl FundingWatch {
     #[must_use]
     pub fn schedule_gaps(&self) -> &[ScheduleGap] {
         &self.schedule_gaps
+    }
+
+    #[must_use]
+    pub fn obligations(&self) -> FundingObligations {
+        FundingObligations {
+            pending_ms: self.unresolved(),
+            schedule_gaps: self.schedule_gaps.clone(),
+            problem: self.problem.clone(),
+        }
     }
 
     /// Whether there is anything to ask the venue.
@@ -776,7 +793,7 @@ mod tests {
         assert_eq!(
             w.schedule_gaps(),
             &[ScheduleGap {
-                since_ms: t + 1,
+                since_ms: t,
                 until_ms: None
             }]
         );
@@ -792,7 +809,7 @@ mod tests {
         assert_eq!(
             w.schedule_gaps()[1],
             ScheduleGap {
-                since_ms: t + 100_001,
+                since_ms: t + 100_000,
                 until_ms: None
             }
         );

@@ -617,3 +617,22 @@ the range against receipt, validates line placement and rejects duplicate
 IDs shared with `FUNDING_EVIDENCE`. `oq-replay --ledger` reports how many
 funding rows have no historical model amount. Restoring observed cash does
 not repair attribution, prove coverage or close G12.
+
+`FUNDING_STATE` (16) persists the watch's changed obligations separately
+from cash. It encodes receive ns and pending count/timestamps as i64 LE,
+then an i64 LE gap count, each lower ms and a 0/1 upper-bound presence byte
+plus optional upper ms, then a 0/1 uncertainty presence byte plus optional
+length-prefixed reason. Counts are bounded by remaining payload before
+allocation; flags and trailing bytes are rejected if invalid.
+
+The session writes this state after funding capture and polling, including
+when the venue returned no rows. Unchanged states do not generate duplicate
+records. Native replay validates temporal bounds and monotone obligations:
+pending can disappear only after a recorded settlement, prior gaps cannot
+be removed or closed boundaries rewritten, and uncertainty cannot silently
+be cleared. Closing a discovery gap does not resolve its historical coverage.
+The final report also discharges pending already answered on the economic
+tape if a later state write was interrupted. Legacy journals without this
+record have unknown obligations. Persistence makes them inspectable across
+process exit; automatic restart restoration and complete coverage proof are
+separate recovery work.
