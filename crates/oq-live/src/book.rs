@@ -39,7 +39,7 @@
 //! told from a first delivery. The reasoning and the width are in this
 //! crate's `dedup` module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dedup::{Seen, TradeWindow};
 
@@ -61,6 +61,10 @@ pub struct Position {
 pub struct Book {
     positions: Vec<Position>,
     working: Vec<String>,
+    /// Terminal orders cannot be resurrected by a delayed acknowledgement.
+    /// Retained for this session: client ids are never reused, and there is
+    /// no upper bound on how late a stream can redeliver an old NEW.
+    ended: HashSet<String>,
     /// Fills already applied, by trade id *and* the order it filled.
     ///
     /// The trade id alone is not enough: when two systems on one account
@@ -132,12 +136,26 @@ impl Book {
 
     /// Apply one order update.
     ///
-    /// Returns whether it changed anything. A redelivered fill returns
-    /// `false` and is counted rather than silently dropped: a stream
+    /// Returns whether it changed anything. A redelivered fill that does
+    /// not end a working order returns `false` and is counted: a stream
     /// redelivering steadily is worth noticing even though each
     /// individual duplicate is handled correctly.
     pub fn apply(&mut self, u: &OrderUpdate) -> bool {
         let ours = self.is_ours(&u.client_id);
+        // Order lifecycle and economic deduplication are independent. Even
+        // an already-booked (or unbookable) fill can end a working order.
+        let ended_working = if ours
+            && matches!(
+                u.status.as_str(),
+                "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+            ) {
+            self.ended.insert(u.client_id.clone());
+            let before = self.working.len();
+            self.working.retain(|w| w != &u.client_id);
+            before != self.working.len()
+        } else {
+            false
+        };
         let is_fill = matches!(u.status.as_str(), "PARTIALLY_FILLED" | "FILLED");
         if is_fill {
             let Some(trade_id) = u.trade_id else {
@@ -148,7 +166,7 @@ impl Book {
                 if !ours {
                     self.foreign += 1;
                 }
-                return false;
+                return ended_working;
             };
             // Parsed before the trade is marked seen (LIVE-PATH L10b: the
             // mark is committed only once the fill is booked). Marked
@@ -166,7 +184,7 @@ impl Book {
                         if ours {
                             self.duplicates += 1;
                         }
-                        return false;
+                        return ended_working;
                     }
                     // Counted whoever placed the order: it is a fill the
                     // position did not take, and that is worth seeing
@@ -179,12 +197,7 @@ impl Book {
                     // of the run.
                     Seen::Stale => {
                         self.stale += 1;
-                        if !ours || u.status != "FILLED" {
-                            return false;
-                        }
-                        let before = self.working.len();
-                        self.working.retain(|w| w != &u.client_id);
-                        return before != self.working.len();
+                        return ended_working;
                     }
                 }
                 // Every fill moves the position, whoever placed the order.
@@ -203,7 +216,9 @@ impl Book {
         }
         match u.status.as_str() {
             "NEW" => {
-                if self.working.iter().any(|w| w == &u.client_id) {
+                if self.ended.contains(&u.client_id)
+                    || self.working.iter().any(|w| w == &u.client_id)
+                {
                     return false;
                 }
                 self.working.push(u.client_id.clone());
@@ -212,17 +227,8 @@ impl Book {
             // `EXPIRED_IN_MATCH` is self-trade prevention ending an order:
             // an ending like any other, and read as none it held a
             // working slot for the rest of the run.
-            "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED" => {
-                let before = self.working.len();
-                self.working.retain(|w| w != &u.client_id);
-                before != self.working.len()
-            }
-            "PARTIALLY_FILLED" | "FILLED" => {
-                if u.status == "FILLED" {
-                    self.working.retain(|w| w != &u.client_id);
-                }
-                true
-            }
+            "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED" => ended_working,
+            "PARTIALLY_FILLED" | "FILLED" => true,
             _ => false,
         }
     }
@@ -264,7 +270,7 @@ impl Book {
     /// Idempotent with `apply`, which inserts the same id when the
     /// event does arrive.
     pub fn on_sent(&mut self, client_id: &str) {
-        if self.working.iter().any(|w| w == client_id) {
+        if self.ended.contains(client_id) || self.working.iter().any(|w| w == client_id) {
             return;
         }
         self.working.push(client_id.to_string());
@@ -419,6 +425,62 @@ mod tests {
         assert!(b.apply(&update("a", "NEW", None)));
         assert!(!b.apply(&update("a", "NEW", None)));
         assert_eq!(b.working(), 1);
+    }
+
+    #[test]
+    fn recovered_fill_then_late_new_and_duplicate_fill_cannot_resurrect_an_order() {
+        let mut b = Book::new();
+        b.on_sent("a");
+        let filled = update("a", "FILLED", Some(7));
+        assert!(b.apply(&filled));
+        assert_eq!(b.working(), 0);
+        assert!(!b.apply(&update("a", "NEW", None)));
+        assert_eq!(b.working(), 0, "no final redelivery is needed to heal it");
+        b.on_sent("a");
+        assert_eq!(b.working(), 0, "a delayed send acknowledgement is also old");
+        assert!(!b.apply(&filled));
+        assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(1));
+        assert_eq!(b.duplicates(), 1);
+    }
+
+    #[test]
+    fn every_terminal_status_blocks_late_new_but_not_late_economic_fills() {
+        for status in ["CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"] {
+            let mut b = Book::new();
+            b.on_sent("a");
+            assert!(b.apply(&update("a", status, None)));
+            assert!(!b.apply(&update("a", "NEW", None)), "{status}");
+            assert_eq!(b.working(), 0, "{status}");
+            // A partial fill may precede cancellation at the venue but
+            // arrive after it here. Its economics must still be booked.
+            assert!(b.apply(&update("a", "PARTIALLY_FILLED", Some(7))));
+            assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(1));
+            assert_eq!(b.working(), 0);
+        }
+    }
+
+    #[test]
+    fn duplicate_final_status_still_ends_a_previously_partial_fill() {
+        let mut b = Book::new();
+        b.on_sent("a");
+        assert!(b.apply(&update("a", "PARTIALLY_FILLED", Some(7))));
+        assert_eq!(b.working(), 1);
+        assert!(b.apply(&update("a", "FILLED", Some(7))));
+        assert_eq!(b.working(), 0);
+        assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(1));
+        assert_eq!(b.duplicates(), 1);
+    }
+
+    #[test]
+    fn terminal_status_without_bookable_economics_still_ends_the_order() {
+        let mut b = Book::new();
+        b.on_sent("a");
+        assert!(b.apply(&update("a", "FILLED", None)));
+        assert_eq!(b.working(), 0);
+        assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(0));
+        assert!(!b.apply(&update("a", "NEW", None)));
+        assert!(b.apply(&update("a", "FILLED", Some(7))));
+        assert_eq!(b.net_lots("BTCUSDT", 3), QtyLots(1));
     }
 
     #[test]
