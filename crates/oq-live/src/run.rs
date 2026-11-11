@@ -1030,6 +1030,16 @@ where
     // is managing has been unmanaged for however long that took.
     let mut last_tick: Option<oq_engine::Tick> = None;
 
+    // Orders this process believes are resting but the venue no longer
+    // holds, with the first moment each was seen missing. A withdrawal
+    // the account stream never confirmed used to hold its id for the
+    // life of the process: the strategy's own list never emptied, so
+    // that side never opened again, and the console reconciled against
+    // orders that were gone. Two consecutive checks before acting, so
+    // an order sent between the two reads is not buried.
+    let mut missing_orders: std::collections::HashMap<String, Nanos> =
+        std::collections::HashMap::new();
+
     // Reports the stream should have delivered and did not, rebuilt from
     // the venue's records by a reconciliation that found the books
     // behind. Drained ahead of the stream itself, through the same arm,
@@ -1673,6 +1683,66 @@ where
                                 continue;
                             }
                             supervisor.on_read_succeeded();
+                            // Orders the account no longer holds.
+                            //
+                            // The stream is the only reporter of an
+                            // order's end, and a withdrawal confirmed
+                            // during a reconnect reaches nobody. The
+                            // venue's own open orders are the second
+                            // source, and the one to believe.
+                            if let Ok(open) = trader.venue().open_orders(&symbol) {
+                                let now = clock.wall();
+                                let open_ids: std::collections::HashSet<String> =
+                                    open.into_iter().map(|o| o.client_order_id).collect();
+                                let resting: Vec<String> =
+                                    trader.resting().into_iter().map(str::to_string).collect();
+                                for id in vanished_orders(
+                                    &resting,
+                                    &open_ids,
+                                    &mut missing_orders,
+                                    now,
+                                    MISSING_ORDER_GRACE,
+                                ) {
+                                    trader.session_mut().record_cancelled(now, &id);
+                                    // The journal is not the only count: the
+                                    // heartbeat and the risk gate read the
+                                    // book's working set, and an order left
+                                    // there holds a slot for the rest of the
+                                    // run.
+                                    trader.session_mut().forget_order(&id);
+                                    eprintln!(
+                                        "reconcile        {id} is not at the venue; recorded as cancelled"
+                                    );
+                                    match last_tick {
+                                        Some(t) => {
+                                            let ctx = books.context(t, trader.working() as usize);
+                                            let outcomes =
+                                                trader.on_ended(&id, Ending::Cancelled, &ctx, now);
+                                            for outcome in outcomes {
+                                                mirror(
+                                                    &outcome,
+                                                    trader.submitted(),
+                                                    &mut books,
+                                                    &mut shadow,
+                                                    now,
+                                                );
+                                                match &outcome {
+                                                    Outcome::Sent { .. } => sent += 1,
+                                                    Outcome::Cancelled { .. } => cancelled += 1,
+                                                    Outcome::Refused { .. } => refused += 1,
+                                                    Outcome::Unresolved { .. } => unresolved += 1,
+                                                    Outcome::CancelFailed { .. } => {
+                                                        cancel_failed += 1;
+                                                    }
+                                                    Outcome::UnknownOrder(_) => {}
+                                                }
+                                                report(&outcome);
+                                            }
+                                        }
+                                        None => trader.forget(&id),
+                                    }
+                                }
+                            }
                             // Reported, never quietly corrected: books
                             // that adopted the venue's number here would
                             // destroy the evidence of how they came to
@@ -1804,7 +1874,12 @@ where
             && clock.elapsed().saturating_sub(last_artifacts) >= ARTIFACTS_EVERY
         {
             last_artifacts = clock.elapsed();
-            if let Err(e) = a.write(&shadow, books.realized_net(), &observed) {
+            if let Err(e) = a.write(
+                &shadow,
+                books.realized_net(),
+                trader.session().accepted_fills(),
+                &observed,
+            ) {
                 eprintln!("artifacts        could not be written: {e}");
             }
         }
@@ -2021,7 +2096,12 @@ where
         attribution.manifest.config_hash
     );
     if let Some(a) = &artifacts {
-        match a.write(&shadow, books.realized_net(), &observed) {
+        match a.write(
+            &shadow,
+            books.realized_net(),
+            trader.session().accepted_fills(),
+            &observed,
+        ) {
             Ok(()) => println!(
                 "artifacts        {}.{{live.run,model.run,oqtk}}",
                 a.stem.display()
@@ -4596,6 +4676,97 @@ mod manifest_fee_policy {
     }
 }
 
+/// The grace an order gets before a missing open order is believed.
+///
+/// Two reconciliations apart, so an order the venue has accepted but not
+/// yet listed is not buried under a report that says it never existed.
+const MISSING_ORDER_GRACE: Nanos = Nanos(30 * 1_000_000_000);
+
+/// Orders believed resting that the venue no longer holds.
+///
+/// The account stream is the only reporter of an order's end, and a
+/// withdrawal confirmed during a reconnect reaches nobody. A local list
+/// that never empties keeps its side out of the entry condition for the
+/// rest of the process — measured on 2026-11-11: five covers the venue
+/// had cancelled held a short side shut for twelve days.
+fn vanished_orders(
+    resting: &[String],
+    open: &std::collections::HashSet<String>,
+    missing: &mut std::collections::HashMap<String, Nanos>,
+    now: Nanos,
+    grace: Nanos,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in resting {
+        if open.contains(id) {
+            missing.remove(id);
+            continue;
+        }
+        let first = *missing.entry(id.clone()).or_insert(now);
+        if now.0.saturating_sub(first.0) < grace.0 {
+            continue;
+        }
+        missing.remove(id);
+        out.push(id.clone());
+    }
+    out
+}
+
+#[cfg(test)]
+mod vanished {
+    use super::{MISSING_ORDER_GRACE, vanished_orders};
+    use oq_types::Nanos;
+    use std::collections::{HashMap, HashSet};
+
+    fn setup() -> (Vec<String>, HashSet<String>, HashMap<String, Nanos>) {
+        (
+            vec!["a".into(), "b".into()],
+            HashSet::from(["a".to_string()]),
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn an_order_the_venue_still_holds_is_not_vanished() {
+        let (resting, open, mut missing) = setup();
+        let out = vanished_orders(&resting, &open, &mut missing, Nanos(0), MISSING_ORDER_GRACE);
+        assert!(out.is_empty(), "b is only missing for the first time");
+        assert!(!missing.contains_key("a"), "a is at the venue");
+    }
+
+    #[test]
+    fn a_second_check_after_the_grace_reports_it() {
+        let (resting, open, mut missing) = setup();
+        vanished_orders(&resting, &open, &mut missing, Nanos(0), MISSING_ORDER_GRACE);
+        let out = vanished_orders(
+            &resting,
+            &open,
+            &mut missing,
+            Nanos(MISSING_ORDER_GRACE.0),
+            MISSING_ORDER_GRACE,
+        );
+        assert_eq!(out, vec!["b".to_string()]);
+        assert!(!missing.contains_key("b"), "reported once, then forgotten");
+    }
+
+    #[test]
+    fn an_order_that_comes_back_forgets_its_missing_start() {
+        let (resting, open, mut missing) = setup();
+        vanished_orders(&resting, &open, &mut missing, Nanos(0), MISSING_ORDER_GRACE);
+        let mut both = open.clone();
+        both.insert("b".into());
+        let out = vanished_orders(
+            &resting,
+            &both,
+            &mut missing,
+            Nanos(MISSING_ORDER_GRACE.0),
+            MISSING_ORDER_GRACE,
+        );
+        assert!(out.is_empty());
+        assert!(missing.is_empty());
+    }
+}
+
 /// The files a console reads beside a run's journal.
 ///
 /// `<stem>.live.run` is what the venue filled and `<stem>.model.run`
@@ -4615,11 +4786,22 @@ impl Artifacts {
         &self,
         shadow: &crate::shadow::Shadow,
         live_pnl: Cash,
+        live: &[oq_types::Fill],
         observed: &std::collections::VecDeque<oq_engine::Tick>,
     ) -> Result<(), String> {
         #[allow(clippy::cast_precision_loss)]
         let money = |c: Cash| c.0 as f64 / oq_types::CASH_SCALE as f64;
-        let (venue, model) = shadow.fills(&self.symbol);
+        // The journal's accepted fills, not the shadow's log: the books
+        // dedup a redelivery and this list follows them, so the report
+        // cannot count a trade the journal booked once twice.
+        let venue: Vec<oq_parity::Fill> = live
+            .iter()
+            .map(|f| {
+                oq_parity::Fill::new(f.stamp.exch.0, &self.symbol, f.side, f.price.0, f.qty.0)
+                    .with_tag(f.order.0.to_string())
+            })
+            .collect();
+        let (_, model) = shadow.fills(&self.symbol);
         let live = oq_parity::wire::Run::new(
             oq_parity::RunManifest {
                 label: format!("{} live", self.manifest.label),

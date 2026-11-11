@@ -180,6 +180,13 @@ pub struct Session<E: Execution> {
     venue: E,
     gate: RiskGate,
     book: Book,
+    /// Fills this process accepted and journaled, one per trade id.
+    ///
+    /// The console's `<stem>.live.run` is built from this list rather
+    /// than from the shadow's own log, which is fed by the same events
+    /// but was observed counting a redelivered trade twice: the run file
+    /// said 167 fills where the journal and the venue both held 161.
+    accepted: Vec<oq_types::Fill>,
     symbol: String,
     instrument: Instrument,
     position_side: PositionSide,
@@ -262,6 +269,7 @@ impl<E: Execution> Session<E> {
             venue,
             gate,
             book,
+            accepted: Vec::new(),
             symbol: config.symbol,
             instrument: config.instrument,
             position_side: config.position_side,
@@ -562,6 +570,7 @@ impl<E: Execution> Session<E> {
     /// had filled is the difference between resuming and starting over
     /// on top of one.
     pub fn record_fill(&mut self, fill: &oq_types::Fill, client_id: &str) {
+        remember_fill(&mut self.accepted, fill);
         self.write(&Record::Fill {
             at: fill.stamp.exch,
             client_id: client_id.to_string(),
@@ -576,11 +585,18 @@ impl<E: Execution> Session<E> {
     /// Persist an accepted execution with its complete accounting evidence.
     /// Unknown commission remains unknown; it is never scheduled as zero.
     pub fn record_execution(&mut self, fill: &oq_types::Fill, client_id: &str, fee: oq_types::Fee) {
+        remember_fill(&mut self.accepted, fill);
         self.write(&Record::Execution {
             client_id: client_id.to_string(),
             fill: *fill,
             fee: crate::record::venue_fee(fee),
         });
+    }
+
+    /// Fills accepted and journaled this run, in order, one per trade.
+    #[must_use]
+    pub fn accepted_fills(&self) -> &[oq_types::Fill] {
+        &self.accepted
     }
 
     /// Record what initializes the books, independently of display scales.
@@ -828,6 +844,12 @@ impl<E: Execution> Session<E> {
         }
     }
 
+    /// Drop an order from the believed working set, for a cancellation
+    /// the account stream never reported. See [`Book::forget`].
+    pub fn forget_order(&mut self, client_id: &str) -> bool {
+        self.book.forget(client_id)
+    }
+
     /// The venue's symbol for what this session trades.
     #[must_use]
     pub fn symbol(&self) -> &str {
@@ -906,3 +928,42 @@ pub const fn leg_for(configured: PositionSide, side: Side, closing: bool) -> Pos
 
 /// Anything the loop could not do.
 pub type LoopError = VenueError;
+
+/// Remember a fill once, by trade id.
+fn remember_fill(fills: &mut Vec<oq_types::Fill>, fill: &oq_types::Fill) {
+    if !fills.iter().any(|f| f.trade == fill.trade) {
+        fills.push(*fill);
+    }
+}
+
+#[cfg(test)]
+mod accepted_fills {
+    use super::remember_fill;
+    use oq_types::{
+        Fill, InstrumentId, Liquidity, Offset, OrderId, PriceTicks, QtyLots, Side, Stamp, TradeId,
+    };
+
+    fn fill(trade: u64, qty: i64) -> Fill {
+        Fill {
+            stamp: Stamp::synthetic(1),
+            instrument: InstrumentId::new(1),
+            order: OrderId(7),
+            trade: TradeId(trade),
+            side: Side::Buy,
+            offset: Offset::Open,
+            price: PriceTicks(100),
+            qty: QtyLots(qty),
+            liquidity: Liquidity::Taker,
+        }
+    }
+
+    #[test]
+    fn a_redelivered_trade_is_remembered_once() {
+        let mut fills = Vec::new();
+        remember_fill(&mut fills, &fill(1, 20));
+        remember_fill(&mut fills, &fill(1, 20));
+        assert_eq!(fills.len(), 1, "the same trade id is one fill");
+        remember_fill(&mut fills, &fill(2, 20));
+        assert_eq!(fills.len(), 2, "a different trade is a different fill");
+    }
+}

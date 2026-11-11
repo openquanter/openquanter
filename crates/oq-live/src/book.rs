@@ -290,6 +290,19 @@ impl Book {
         &self.positions
     }
 
+    /// Forget an order the venue no longer holds.
+    ///
+    /// The account stream is the only reporter of an order's end. When it
+    /// misses one, reconciliation notices and the belief has to drop the
+    /// id as well: every count of what is resting — the heartbeat's, and
+    /// the risk gate's `max_working` — is read from this list, which would
+    /// otherwise keep a slot for a trade that is over.
+    pub fn forget(&mut self, client_id: &str) -> bool {
+        let before = self.working.len();
+        self.working.retain(|w| w != client_id);
+        before != self.working.len()
+    }
+
     /// How many orders are resting.
     #[must_use]
     pub fn working(&self) -> u32 {
@@ -417,6 +430,16 @@ mod tests {
         assert_eq!(b.working(), 1);
         b.apply(&update("b", "FILLED", Some(9)));
         assert_eq!(b.working(), 0, "a filled order is no longer resting");
+    }
+
+    #[test]
+    fn a_forgotten_order_leaves_the_working_set() {
+        let mut b = Book::new();
+        b.apply(&update("a", "NEW", None));
+        assert_eq!(b.working(), 1);
+        assert!(b.forget("a"), "a listed order is removed");
+        assert_eq!(b.working(), 0);
+        assert!(!b.forget("a"), "forgetting it again changes nothing");
     }
 
     #[test]
